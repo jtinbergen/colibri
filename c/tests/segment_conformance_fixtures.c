@@ -115,6 +115,19 @@ static const ColiSegmentConformanceFixture g_fixtures[] = {
             COLI_SEGMENT_FIXTURE_DEVICE_CACHE,
         5, 10, 4, 64, UINT32_C(0x44535634),
     },
+    {
+        /* M3 keeps full K/V rows (no latent), and its MSA Lightning Indexer
+         * reuses the very cache slots the DSA indexer uses in the engine
+         * (index_hd / idx_type / Ic), so DSA_INDEXER is the honest kind here
+         * rather than a new one. Device cache: the Vulkan expert tier. */
+        "minimax_m3", "MiniMax-M3", "fixture/minimax-m3-gqa-msa-v1",
+        "GQA key/value rows + MSA block-sparse indexer + device cache",
+        "tools/make_m3tiny.py",
+        COLI_SEGMENT_FIXTURE_KV |
+            COLI_SEGMENT_FIXTURE_DSA_INDEXER |
+            COLI_SEGMENT_FIXTURE_DEVICE_CACHE,
+        3, 8, 4, 64, UINT32_C(0x4d4e4d33),
+    },
 };
 
 static int fail(char *error, size_t error_size, const char *message) {
@@ -365,6 +378,7 @@ DECLARE_OPEN_WRAPPER(olmoe, 4)
 DECLARE_OPEN_WRAPPER(qwen36, 5)
 DECLARE_OPEN_WRAPPER(qwen38, 6)
 DECLARE_OPEN_WRAPPER(deepseek_v4, 7)
+DECLARE_OPEN_WRAPPER(minimax_m3, 8)
 
 #define FIXTURE_ADAPTER(name)                                                  \
     {                                                                          \
@@ -390,6 +404,7 @@ static const ColiSegmentAdapter g_adapters[] = {
     FIXTURE_ADAPTER(qwen36),
     FIXTURE_ADAPTER(qwen38),
     FIXTURE_ADAPTER(deepseek_v4),
+    FIXTURE_ADAPTER(minimax_m3),
 };
 
 int coli_segment_conformance_register_fixtures(void) {
