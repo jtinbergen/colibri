@@ -13,6 +13,9 @@ typedef struct {
     ColiCudaTensor *tg, *tu, *td;
     uint32_t heat;
     uint8_t resident, queued;
+    /* RAM-Zeiger (Slots sind bei cap==n_experts nie evicted) — für Warmstart,
+     * Lookahead und LFRU-Swaps ohne Engine-Callback */
+    const uint8_t *g4,*u4,*d4; const float *gs,*us,*ds;
 } QSlot;
 
 static struct {
@@ -25,7 +28,7 @@ static struct {
     pthread_t th;
     int th_stop;
     /* Upload-Queue (Ring) mit Staging-Kopien */
-    struct { int layer, eid; uint8_t *w; float *s; } q[QT_QCAP];
+    struct { int layer, eid; uint8_t *w; float *s; int v_layer, v_eid; } q[QT_QCAP];
     int qh, qt_, qn;
     pthread_cond_t cv;
     /* Statistik */
@@ -34,6 +37,12 @@ static struct {
     int is_cnt[QT_MAX_DEV];
     int is_k[QT_MAX_DEV][32];
     float *is_x;                          /* count*D Replikate je Device */
+    /* M3 */
+    int *fill_order; int fill_cur;        /* Warmstart-Reihenfolge (Heat desc) */
+    int issue_open;                       /* Schutz: kein tensor_free während Issue */
+    pthread_cond_t cv_take;               /* signalisiert qt_take-Ende + Queue-Platz */
+    uint64_t tick, swaps, pf_hits, pf_notes;
+    uint32_t *heat0;                      /* geladene Heat-Tabelle (HEAT_FILE) */
 } G;
 
 static QSlot *qs(int layer, int eid){ return &G.slot[(size_t)layer*G.ne + eid]; }
@@ -61,9 +70,19 @@ static void *uploader(void *arg){
         while(G.qn==0 && !G.th_stop) pthread_cond_wait(&G.cv,&G.mx);
         if(G.th_stop && G.qn==0){ pthread_mutex_unlock(&G.mx); return NULL; }
         int layer=G.q[G.qh].layer, eid=G.q[G.qh].eid;
+        int vl=G.q[G.qh].v_layer, ve=G.q[G.qh].v_eid;
         uint8_t *w=G.q[G.qh].w; float *sc=G.q[G.qh].s;
         G.qh=(G.qh+1)%QT_QCAP; G.qn--;
-        pthread_mutex_unlock(&G.mx);
+        pthread_cond_broadcast(&G.cv_take);          /* Queue-Platz frei */
+        if(ve>=0){
+            /* LFRU-Swap: Victim erst freigeben, wenn keine Issue offen ist */
+            while(G.issue_open && !G.th_stop) pthread_cond_wait(&G.cv_take,&G.mx);
+            QSlot *v=qs(vl,ve);
+            ColiCudaTensor *a=v->tg,*b=v->tu,*ct=v->td;
+            v->tg=v->tu=v->td=NULL;
+            pthread_mutex_unlock(&G.mx);
+            if(a)coli_cuda_tensor_free(a); if(b)coli_cuda_tensor_free(b); if(ct)coli_cuda_tensor_free(ct);
+        } else pthread_mutex_unlock(&G.mx);
 
         int dv = G.dev[home(eid)];
         size_t mb=(size_t)G.D*G.Ih/2;
@@ -118,7 +137,23 @@ int qt_init(int nl, int ne, int D, int Ih, int cap, int topk){
     G.slot=calloc((size_t)nl*ne,sizeof(QSlot));
     G.is_x=malloc((size_t)32*D*sizeof(float));
     if(!G.slot||!G.is_x) return 0;
-    pthread_mutex_init(&G.mx,NULL); pthread_cond_init(&G.cv,NULL);
+    /* M3: gelernte Heat laden (HEAT_FILE), Fill-Reihenfolge + Startwerte */
+    const char *hf=getenv("HEAT_FILE");
+    if(hf){
+        FILE *f=fopen(hf,"rb");
+        if(f){
+            uint32_t hdr[3]={0,0,0};
+            if(fread(hdr,4,3,f)==3 && hdr[0]==0x51544831u && hdr[1]==(uint32_t)nl && hdr[2]==(uint32_t)ne){
+                G.heat0=malloc((size_t)nl*ne*4);
+                if(G.heat0 && fread(G.heat0,4,(size_t)nl*ne,f)==(size_t)nl*ne){
+                    for(size_t i=0;i<(size_t)nl*ne;i++) G.slot[i].heat=G.heat0[i]>>1; /* Decay */
+                    fprintf(stderr,"[qtier] HEAT_FILE geladen: %s\n",hf);
+                } else { free(G.heat0); G.heat0=NULL; }
+            }
+            fclose(f);
+        }
+    }
+    pthread_mutex_init(&G.mx,NULL); pthread_cond_init(&G.cv,NULL); pthread_cond_init(&G.cv_take,NULL);
     if(pthread_create(&G.th,NULL,uploader,NULL)!=0) return 0;
     G.on=1;
     fprintf(stderr,"[qtier] VRAM-Experten-Tier aktiv: %d Device(s), %.2f MB/Experte\n",
@@ -128,30 +163,115 @@ int qt_init(int nl, int ne, int D, int Ih, int cap, int topk){
 
 int qt_ready(void){ return G.on; }
 
+/* intern: unter gehaltenem G.mx einreihen. victim=-1: normaler Upload
+ * (Budget wird reserviert); victim>=0: Swap (Budget neutral). */
+static int enqueue_locked(int layer,int eid,int v_layer,int v_eid){
+    QSlot *s=qs(layer,eid);
+    if(s->resident||s->queued||!s->g4) return 0;
+    if(G.qn>=QT_QCAP){ G.q_full_skips++; return 0; }
+    int hd=home(eid);
+    if(v_eid<0 && G.used[hd]+G.exp_bytes>G.budget[hd]) return 0;
+    size_t mb=(size_t)G.D*G.Ih/2;
+    uint8_t *w=malloc(3*mb); float *sc=malloc((size_t)(2*G.Ih+G.D)*sizeof(float));
+    if(!w||!sc){ free(w); free(sc); return 0; }
+    if(v_eid<0) G.used[hd]+=G.exp_bytes;
+    s->queued=1;
+    stage(w,sc,s->g4,s->u4,s->d4,s->gs,s->us,s->ds);
+    G.q[G.qt_].layer=layer; G.q[G.qt_].eid=eid; G.q[G.qt_].w=w; G.q[G.qt_].s=sc;
+    G.q[G.qt_].v_layer=v_layer; G.q[G.qt_].v_eid=v_eid;
+    G.qt_=(G.qt_+1)%QT_QCAP; G.qn++;
+    pthread_cond_signal(&G.cv);
+    return 1;
+}
+
 void qt_note(int layer,int eid,
              const uint8_t *g4,const uint8_t *u4,const uint8_t *d4,
              const float *gs,const float *us,const float *ds){
     if(!G.on || !g4) return;
     QSlot *s=qs(layer,eid);
     pthread_mutex_lock(&G.mx);
+    if(!s->g4){ s->g4=g4; s->u4=u4; s->d4=d4; s->gs=gs; s->us=us; s->ds=ds; }
     if(s->heat<0xFFFFFFFFu) s->heat++;
-    int want = !s->resident && !s->queued;
-    int hd = home(eid);
-    if(want && G.used[hd]+G.exp_bytes<=G.budget[hd] && G.qn<QT_QCAP){
-        size_t mb=(size_t)G.D*G.Ih/2;
-        uint8_t *w=malloc(3*mb); float *sc=malloc((size_t)(2*G.Ih+G.D)*sizeof(float));
-        if(w&&sc){
-            G.used[hd]+=G.exp_bytes;            /* reservieren */
-            s->queued=1;
-            stage(w,sc,g4,u4,d4,gs,us,ds);
-            G.q[G.qt_].layer=layer; G.q[G.qt_].eid=eid; G.q[G.qt_].w=w; G.q[G.qt_].s=sc;
-            G.qt_=(G.qt_+1)%QT_QCAP; G.qn++;
-            pthread_cond_signal(&G.cv);
-        } else { free(w); free(sc); }
-    } else if(want && G.qn>=QT_QCAP){
-        G.q_full_skips++;
+    enqueue_locked(layer,eid,-1,-1);
+    pthread_mutex_unlock(&G.mx);
+}
+
+/* M3: blockierende Variante für den Warmstart (wartet auf Queue-Platz). */
+void qt_note_block(int layer,int eid,
+             const uint8_t *g4,const uint8_t *u4,const uint8_t *d4,
+             const float *gs,const float *us,const float *ds){
+    if(!G.on || !g4) return;
+    QSlot *s=qs(layer,eid);
+    pthread_mutex_lock(&G.mx);
+    if(!s->g4){ s->g4=g4; s->u4=u4; s->d4=d4; s->gs=gs; s->us=us; s->ds=ds; }
+    while(G.qn>=QT_QCAP && !G.th_stop) pthread_cond_wait(&G.cv_take,&G.mx);
+    enqueue_locked(layer,eid,-1,-1);
+    pthread_mutex_unlock(&G.mx);
+}
+
+/* M3: Warmstart-Reihenfolge — Heat absteigend (HEAT_FILE), sonst natürlich.
+ * Liefert 0, wenn alle Budgets voll oder Liste erschöpft. */
+static const uint32_t *g_sort_heat;
+static int cmp_heat_desc(const void *a,const void *b){
+    uint32_t ha=g_sort_heat[*(const int*)a], hb=g_sort_heat[*(const int*)b];
+    return ha<hb ? 1 : ha>hb ? -1 : 0;
+}
+int qt_fill_next(int *layer,int *eid){
+    if(!G.on) return 0;
+    size_t n=(size_t)G.nl*G.ne;
+    pthread_mutex_lock(&G.mx);
+    if(!G.fill_order){
+        G.fill_order=malloc(n*sizeof(int));
+        for(size_t i=0;i<n;i++) G.fill_order[i]=(int)i;
+        if(G.heat0){ g_sort_heat=G.heat0; qsort(G.fill_order,n,sizeof(int),cmp_heat_desc); }
+        G.fill_cur=0;
+    }
+    while((size_t)G.fill_cur<n){
+        int gi=G.fill_order[G.fill_cur];
+        int l=gi/G.ne, e=gi%G.ne, hd=home(e);
+        QSlot *s=qs(l,e);
+        int full=1; for(int i=0;i<G.ndev;i++) if(G.used[i]+G.exp_bytes<=G.budget[i]) full=0;
+        if(full){ pthread_mutex_unlock(&G.mx); return 0; }
+        G.fill_cur++;
+        if(s->resident||s->queued) continue;
+        if(G.used[hd]+G.exp_bytes>G.budget[hd]) continue;   /* dieses Device voll */
+        *layer=l; *eid=e;
+        pthread_mutex_unlock(&G.mx);
+        return 1;
     }
     pthread_mutex_unlock(&G.mx);
+    return 0;
+}
+
+/* M3: wartet, bis die Upload-Queue leer ist (Ende Warmstart). */
+void qt_fill_wait(void){
+    if(!G.on) return;
+    pthread_mutex_lock(&G.mx);
+    while(G.qn>0 && !G.th_stop) pthread_cond_wait(&G.cv_take,&G.mx);
+    pthread_mutex_unlock(&G.mx);
+}
+
+/* M3: LFRU-Swap-Prüfung (alle 16 Ticks = Tokens): je Device kältester
+ * Resident vs. heißester Nicht-Resident mit Hysterese (tier.h-Semantik). */
+static void qt_lfru_tick_locked(void){
+    if(++G.tick % 16) return;
+    size_t n=(size_t)G.nl*G.ne;
+    for(int di=0;di<G.ndev;di++){
+        int cold=-1, hot=-1; uint32_t ch=0, hh=0;
+        for(size_t i=0;i<n;i++){
+            QSlot *s=&G.slot[i];
+            int e=(int)(i%G.ne);
+            if(home(e)!=di) continue;
+            if(s->resident && !s->queued){ if(cold<0||s->heat<ch){ cold=(int)i; ch=s->heat; } }
+            else if(!s->resident && !s->queued && s->g4){ if(hot<0||s->heat>hh){ hot=(int)i; hh=s->heat; } }
+        }
+        if(cold<0||hot<0) continue;
+        if(hh<=ch+(ch>>2)+4) continue;                    /* Hysterese wie tier.h */
+        QSlot *v=&G.slot[cold];
+        v->resident=0;                                    /* ab sofort CPU-Fallback */
+        if(enqueue_locked(hot/G.ne,hot%G.ne,cold/G.ne,cold%G.ne)) G.swaps++;
+        else v->resident=1;                               /* Queue voll: zurücknehmen */
+    }
 }
 
 uint32_t qt_issue(int layer,const int *eids,int K,const float *x){
@@ -163,6 +283,8 @@ uint32_t qt_issue(int layer,const int *eids,int K,const float *x){
     for(int i=0;i<G.ndev;i++) G.is_cnt[i]=0;
 
     pthread_mutex_lock(&G.mx);
+    if(layer==0) qt_lfru_tick_locked();
+    G.issue_open=1;
     for(int k=0;k<K;k++){
         QSlot *s=qs(layer,eids[k]);
         if(s->resident){
@@ -190,8 +312,8 @@ uint32_t qt_issue(int layer,const int *eids,int K,const float *x){
 
 void qt_take(uint32_t mask,const float *val,int K,float *out){
     (void)K;
-    if(!G.on||!mask) return;
-    for(int di=0;di<G.ndev;di++){
+    if(!G.on) return;
+    if(mask) for(int di=0;di<G.ndev;di++){
         int c=G.is_cnt[di];
         if(!c) continue;
         const float *y=coli_cuda_expert_group_take(G.dev[di]);
@@ -203,6 +325,10 @@ void qt_take(uint32_t mask,const float *val,int K,float *out){
         }
         G.is_cnt[di]=0;
     }
+    pthread_mutex_lock(&G.mx);
+    G.issue_open=0;
+    pthread_cond_broadcast(&G.cv_take);
+    pthread_mutex_unlock(&G.mx);
 }
 
 void qt_stats(void){
@@ -219,11 +345,27 @@ void qt_stats(void){
                 G.dev[i], (unsigned long long)G.hits[i], tc, tb/1073741824.0, G.budget[i]/1073741824.0);
     }
     double tot=(double)(hits+G.miss);
-    fprintf(stderr,"[qtier] VRAM-Hit-Rate: %.1f %%\n", tot>0? 100.0*hits/tot : 0.0);
+    fprintf(stderr,"[qtier] VRAM-Hit-Rate: %.1f %% | LFRU-Swaps %llu\n",
+            tot>0? 100.0*hits/tot : 0.0, (unsigned long long)G.swaps);
+    { uint64_t calls=0,ex=0,rows=0; double h2d=0,kms=0,d2h=0;
+      coli_cuda_group_stats(&calls,&ex,&rows,&h2d,&kms,&d2h);
+      if(calls) fprintf(stderr,"[qtier] group_stats: %llu Calls, %llu Experten | h2d %.0f ms, kernel %.0f ms, d2h %.0f ms\n",
+              (unsigned long long)calls,(unsigned long long)ex,h2d,kms,d2h); }
 }
 
 void qt_shutdown(void){
     if(!G.on) return;
+    const char *hf=getenv("HEAT_FILE");
+    if(hf){
+        FILE *f=fopen(hf,"wb");
+        if(f){
+            uint32_t hdr[3]={0x51544831u,(uint32_t)G.nl,(uint32_t)G.ne};
+            fwrite(hdr,4,3,f);
+            for(size_t i=0;i<(size_t)G.nl*G.ne;i++) fwrite(&G.slot[i].heat,4,1,f);
+            fclose(f);
+            fprintf(stderr,"[qtier] HEAT_FILE gespeichert: %s\n",hf);
+        }
+    }
     pthread_mutex_lock(&G.mx); G.th_stop=1; pthread_cond_signal(&G.cv); pthread_mutex_unlock(&G.mx);
     pthread_join(G.th,NULL);
     G.on=0;

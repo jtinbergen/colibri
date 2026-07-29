@@ -39,6 +39,14 @@ uint32_t qt_issue(int layer, const int *eids, int K, const float *x);
 /* Sammelt die GPU-Ergebnisse ein und akkumuliert val[k]*y_k in out[hidden]. */
 void qt_take(uint32_t mask, const float *val, int K, float *out);
 
+/* M3: Warmstart — nächster vorzuladender Experte (Heat-Reihenfolge, bis
+ * Budgets voll). Engine lädt den RAM-Slot und ruft qt_note_block. */
+int  qt_fill_next(int *layer, int *eid);
+void qt_note_block(int layer, int eid,
+             const uint8_t *g4, const uint8_t *u4, const uint8_t *d4,
+             const float *gs, const float *us, const float *ds);
+void qt_fill_wait(void);   /* wartet, bis die Upload-Queue leer ist */
+
 /* Telemetriezeile (stderr): Residenz, Hits/Misses, Uploads je Device. */
 void qt_stats(void);
 
