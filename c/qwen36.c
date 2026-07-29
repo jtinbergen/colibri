@@ -615,6 +615,28 @@ static double rss_gb(void) { struct rusage r; getrusage(RUSAGE_SELF, &r); return
 #else
 static double rss_gb(void) { struct rusage r; getrusage(RUSAGE_SELF, &r); return r.ru_maxrss / (1024.0*1024.0); }
 #endif
+
+/* ---- M-PROF (R2): per-phase wall-clock accumulators, COLI_TIMERS=1 ---- */
+static int g_timers = -1;
+static double g_tm_dec[6], g_tm_pre[6];   /* 0=deltanet 1=attention 2=moe_total 3=shared 4=router 5=lm_head */
+static long g_tm_dec_tokens = 0, g_tm_pre_tokens = 0;
+static double tm_now(void){ struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts); return ts.tv_sec*1e3 + ts.tv_nsec/1e6; }
+static int tm_on(void){ if(g_timers<0){ const char *e=getenv("COLI_TIMERS"); g_timers = (e && *e=='1'); } return g_timers; }
+static void tm_add(int S, int idx, double ms){ if(S==1) g_tm_dec[idx]+=ms; else g_tm_pre[idx]+=ms; }
+static void tm_report(void){
+    if(!tm_on()) return;
+    static const char *nm[6]={"deltanet","attention","moe_total","(shared)","(router)","lm_head"};
+    fprintf(stderr,"[timers] decode: %ld tokens  (shared/router sind Teilmengen von moe_total)\n", g_tm_dec_tokens);
+    double sum=0;
+    for(int i=0;i<6;i++){
+        fprintf(stderr,"[timers]   %-10s %9.1f ms  %8.2f ms/token\n",
+                nm[i], g_tm_dec[i], g_tm_dec_tokens? g_tm_dec[i]/g_tm_dec_tokens:0.0);
+        if(i!=3&&i!=4) sum+=g_tm_dec[i];
+    }
+    fprintf(stderr,"[timers]   %-10s %9.1f ms  %8.2f ms/token\n","SUMME",sum,g_tm_dec_tokens?sum/g_tm_dec_tokens:0.0);
+    fprintf(stderr,"[timers] prefill: %ld tokens  dn=%.0f attn=%.0f moe=%.0f(sh=%.0f rt=%.0f) head=%.0f ms\n",
+            g_tm_pre_tokens,g_tm_pre[0],g_tm_pre[1],g_tm_pre[2],g_tm_pre[3],g_tm_pre[4],g_tm_pre[5]);
+}
 static float *falloc(int64_t n) { float *p = malloc(n*sizeof(float)); if(!p){fprintf(stderr,"OOM %ld\n",(long)n);exit(1);} return p; }
 
 /* y[S,O] = x[S,I] @ W^T,  W is [O,I] row-major */
@@ -1239,7 +1261,9 @@ static int g_gpu_count   = 0;                 /* # compute-capable devices */
 static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
     Cfg *c = &m->c; int D = c->hidden, E = c->n_experts, K = c->topk, I = c->inter;
     float *logits = falloc((int64_t)S*E);
+    double _tr = tm_on() ? tm_now() : 0.0;
     matmul(logits, x, l->gate, S, D, E);
+    if (tm_on()) tm_add(S, 4, tm_now()-_tr);
     if (c->has_bias && l->gate_bias) {
         for (int s = 0; s < S; s++) { float *pr = logits + (int64_t)s*E; for (int e = 0; e < E; e++) pr[e] += l->gate_bias[e]; }
     }
@@ -1351,6 +1375,7 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
             }
         }
         /* shared expert (SwiGLU), sigmoid-gated by shared_expert_gate */
+        double _ts = tm_on() ? tm_now() : 0.0;
         int Ish = c->shared_inter;
         matmul(sh, xs, l->sh_g, 1, D, Ish);
         matmul(shu, xs, l->sh_u, 1, D, Ish);
@@ -1364,6 +1389,7 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
         }
         float *os = out + (int64_t)s*D;
         for (int d = 0; d < D; d++) os[d] += sgate * shd[d];
+        if (tm_on()) tm_add(S, 3, tm_now()-_ts);
     }
     free(logits); free(g); free(u); free(hh); free(sh); free(shu); free(shd);
 }
@@ -1540,10 +1566,13 @@ static float *step(Model *m, const int *ids, int S, int pos_base) {
     for (int i = 0; i < c->n_layers; i++) {
         Layer *l = &m->L[i];
         for (int s = 0; s < S; s++) rmsnorm_row(nrm + (int64_t)s*D, x + (int64_t)s*D, l->in_ln, D, c->eps);
+        double _t0 = tm_on() ? tm_now() : 0.0;
         if (c->is_attn[i]) {
             attention(m, l, i, nrm, S, pos_base, tmp);
+            if (tm_on()) tm_add(S, 1, tm_now()-_t0);
         } else {
             deltanet(m, l, i, nrm, S, pos_base, tmp);
+            if (tm_on()) tm_add(S, 0, tm_now()-_t0);
         }
         if (lf) fwrite(tmp + (int64_t)(S-1)*D, sizeof(float), D, lf);   /* sublayer output */
         for (int64_t j = 0; j < (int64_t)S*D; j++) x[j] += tmp[j];
@@ -1551,7 +1580,9 @@ static float *step(Model *m, const int *ids, int S, int pos_base) {
         if (g_pilot >= 1 && S <= 8 && i + 1 < c->n_layers)
             pilot_prefetch(m, i + 1, x, S);
         for (int s = 0; s < S; s++) rmsnorm_row(nrm + (int64_t)s*D, x + (int64_t)s*D, l->post_ln, D, c->eps);
+        _t0 = tm_on() ? tm_now() : 0.0;
         moe(m, l, i, nrm, S, tmp);
+        if (tm_on()) tm_add(S, 2, tm_now()-_t0);
         for (int64_t j = 0; j < (int64_t)S*D; j++) x[j] += tmp[j];
         if (lf) fwrite(x + (int64_t)(S-1)*D, sizeof(float), D, lf);
         if (g_pilot >= 2 && S <= 8 && i + 2 < c->n_layers)
@@ -1565,7 +1596,9 @@ static float *step(Model *m, const int *ids, int S, int pos_base) {
     float *last = falloc(D);
     rmsnorm_row(last, x + (int64_t)(S-1)*D, m->final_norm, D, c->eps);
     float *logit = falloc(c->vocab);
+    double _th = tm_on() ? tm_now() : 0.0;
     matmul(logit, last, m->lm_head, 1, D, c->vocab);
+    if (tm_on()) { tm_add(S, 5, tm_now()-_th); if (S==1) g_tm_dec_tokens++; else g_tm_pre_tokens += S; }
     free(x); free(nrm); free(tmp); free(last);
     if (lf) fclose(lf);
     if (m->resident_collecting) {
@@ -2014,6 +2047,7 @@ int main(int argc, char **argv) {
     }
     double tot = m.hits + m.miss;
     if (g_ttft >= 0) fprintf(stderr, "TTFT: %.2f s (time to first token)\n", g_ttft);
+    tm_report();
     fprintf(stderr, "\nPEAK RSS: %.2f GB\n", rss_gb());
     fprintf(stderr, "Expert cache hit rate: %.1f%% (hit=%llu miss=%llu)\n", tot?100.0*m.hits/tot:0.0,
            (unsigned long long)m.hits, (unsigned long long)m.miss);
