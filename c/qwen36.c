@@ -623,6 +623,7 @@ static double g_tm_dec[6], g_tm_pre[6];   /* 0=deltanet 1=attention 2=moe_total 
 static long g_tm_dec_tokens = 0, g_tm_pre_tokens = 0;
 static double tm_now(void){ struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts); return ts.tv_sec*1e3 + ts.tv_nsec/1e6; }
 static int tm_on(void){ if(g_timers<0){ const char *e=getenv("COLI_TIMERS"); g_timers = (e && *e=='1'); } return g_timers; }
+double g_qt_iss=0, g_qt_cpu=0, g_qt_tak=0;   /* QTIER-Phasen (Decode) */
 static double g_tm_win_moe=0; static int g_tm_win_n=0;
 static void tm_add(int S, int idx, double ms){
     if(S==1){
@@ -645,6 +646,9 @@ static void tm_report(void){
         if(i!=3&&i!=4) sum+=g_tm_dec[i];
     }
     fprintf(stderr,"[timers]   %-10s %9.1f ms  %8.2f ms/token\n","SUMME",sum,g_tm_dec_tokens?sum/g_tm_dec_tokens:0.0);
+    if(g_qt_iss+g_qt_cpu+g_qt_tak>0)
+        fprintf(stderr,"[timers]   qtier: issue %.2f | cpu-miss %.2f | take %.2f ms/token\n",
+                g_qt_iss/g_tm_dec_tokens, g_qt_cpu/g_tm_dec_tokens, g_qt_tak/g_tm_dec_tokens);
     fprintf(stderr,"[timers] prefill: %ld tokens  dn=%.0f attn=%.0f moe=%.0f(sh=%.0f rt=%.0f) head=%.0f ms\n",
             g_tm_pre_tokens,g_tm_pre[0],g_tm_pre[1],g_tm_pre[2],g_tm_pre[3],g_tm_pre[4],g_tm_pre[5]);
 }
@@ -1338,7 +1342,9 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
                 Slot *e; expert_get(m, layer, idx[kk], &e);
                 if (e->g4) qt_note(layer, idx[kk], e->g4, e->u4, e->d4, e->gs, e->us, e->ds);
             }
+            double _q0 = tm_on()? tm_now():0;
             uint32_t qmask = qt_issue(layer, idx, K, xs);
+            double _q1 = tm_on()? tm_now():0;
             for (int kk = 0; kk < K; kk++) {
                 if (qmask & (1u<<kk)) continue;
                 Slot *e; expert_get(m, layer, idx[kk], &e);
@@ -1349,7 +1355,12 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
                 float w = val[kk]; float *os = out + (int64_t)s*D;
                 for (int d = 0; d < D; d++) os[d] += w * hh[d];
             }
+            double _q2 = tm_on()? tm_now():0;
             qt_take(qmask, val, K, out + (int64_t)s*D);
+            if (tm_on() && S==1) {
+                extern double g_qt_iss, g_qt_cpu, g_qt_tak;
+                g_qt_iss += _q1-_q0; g_qt_cpu += _q2-_q1; g_qt_tak += tm_now()-_q2;
+            }
         } else if (g_gpu_backend == GPU_BACKEND_VULKAN && vg_ready()) {
             /* GPU path: route on CPU, run all K experts' GEMVs in 2 dispatches.
              * The shared expert (below) stays on CPU. */
@@ -1716,9 +1727,14 @@ static void pilot_prefetch(Model *m, int lnext, const float *x, int S) {
             if (idx[b] >= 0 && (idx[a] < 0 || idx[a] > idx[b])) { int t = idx[a]; idx[a] = idx[b]; idx[b] = t; }
         for (int kk = 0; kk < cand; kk++) {
             int eid = idx[kk]; if (eid < 0) continue;
-            int found = 0; pthread_mutex_lock(&g_pilot_mx); LCache *lc = &m->cache[lnext];
-            for (int z = 0; z < lc->n; z++) if (lc->slots[z].eid == eid) { found = 1; break; }
+            int found = 0, fz = -1; pthread_mutex_lock(&g_pilot_mx); LCache *lc = &m->cache[lnext];
+            for (int z = 0; z < lc->n; z++) if (lc->slots[z].eid == eid) { found = 1; fz = z; break; }
             pthread_mutex_unlock(&g_pilot_mx);
+            /* M3 Lookahead: RAM-residente L+1-Kandidaten asynchron ins VRAM (SP4) */
+            if (found && fz >= 0 && qt_ready()) {
+                Slot *ps = &lc->slots[fz];
+                if (ps->g4) qt_note(lnext, eid, ps->g4, ps->u4, ps->d4, ps->gs, ps->us, ps->ds);
+            }
             if (!found) {
                 int gidx = lnext*E + eid;
                 pthread_mutex_lock(&g_pilot_mx); int already_queued = m->is_queued[gidx];
@@ -1998,6 +2014,17 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[gpu] MoE experts -> CUDA VRAM tier\n");
         atexit(qt_shutdown);
         g_gpu_backend = GPU_BACKEND_CPU;   /* Vulkan aus; CPU ist der Miss-Fallback */
+        /* M3: proaktive Budget-Füllung VOR dem ersten Token (Heat-Reihenfolge
+         * bei HEAT_FILE, sonst natürliche Ordnung). Lädt die RAM-Slots gleich mit. */
+        if (!getenv("QT_NO_WARMSTART")) {
+            double t0 = now_s(); long nf = 0; int wl, we;
+            while (qt_fill_next(&wl, &we)) {
+                Slot *e; expert_get(&m, wl, we, &e);
+                if (e->g4) { qt_note_block(wl, we, e->g4, e->u4, e->d4, e->gs, e->us, e->ds); nf++; }
+            }
+            qt_fill_wait();
+            fprintf(stderr, "[qtier] Warmstart: %ld Experten in %.1f s ins VRAM vorgeladen\n", nf, now_s()-t0);
+        }
     }
     /* optional transparent Vulkan compute backend for the routed-expert GEMVs.
      * Only attempted when gpu_probe() found a compute-capable device; if vg_init
