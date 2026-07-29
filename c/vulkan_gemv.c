@@ -178,6 +178,9 @@ static void vg_invalidate(Buf *b, VkDeviceSize off, VkDeviceSize len){
 
 static int vg_load_lib(void){
     g_lib=dl_open(VK_LIB);
+#if !defined(_WIN32)
+    if(!g_lib) g_lib=dl_open("libvulkan.so.1"); /* LOCAL FIX: runtime-only systems ship the .so.1, not the dev symlink */
+#endif
     if(!g_lib){ fprintf(stderr,"[vg] cannot load %s\n", VK_LIB); return -1; }
 #define X(name) \
     g_##name=(PFN_##name)dl_sym(g_lib,#name); \
@@ -229,6 +232,7 @@ int vg_init(const vg_cfg *cfg){
     VkPhysicalDeviceProperties pdprops; memset(&pdprops,0,sizeof pdprops);
     g_vkGetPhysicalDeviceProperties(g_pd,&pdprops);
     g_vendor_id = pdprops.vendorID; g_driver_ver = pdprops.driverVersion;
+    fprintf(stderr,"[vg] using device 0/%u: %s (vendor 0x%X)\n", ndev, pdprops.deviceName, g_vendor_id); /* LOCAL FIX: diagnostics */
     uint32_t nf=0; g_vkGetPhysicalDeviceQueueFamilyProperties(g_pd,&nf,NULL);
     VkQueueFamilyProperties *qfp=malloc(nf*sizeof(VkQueueFamilyProperties));
     g_vkGetPhysicalDeviceQueueFamilyProperties(g_pd,&nf,qfp);
