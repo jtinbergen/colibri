@@ -32,7 +32,8 @@
 #endif
 #include "st.h"
 #include "json.h"   /* tokenizer.json parsing (reuse minimal parser) */
-#include "vulkan_gemv.h"   /* optional transparent Vulkan compute backend for MoE experts */
+#include "vulkan_gemv.h"
+#include "qwen36_tier.h"   /* optional transparent Vulkan compute backend for MoE experts */
 
 #ifdef _WIN32
 #include <windows.h>
@@ -622,7 +623,17 @@ static double g_tm_dec[6], g_tm_pre[6];   /* 0=deltanet 1=attention 2=moe_total 
 static long g_tm_dec_tokens = 0, g_tm_pre_tokens = 0;
 static double tm_now(void){ struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts); return ts.tv_sec*1e3 + ts.tv_nsec/1e6; }
 static int tm_on(void){ if(g_timers<0){ const char *e=getenv("COLI_TIMERS"); g_timers = (e && *e=='1'); } return g_timers; }
-static void tm_add(int S, int idx, double ms){ if(S==1) g_tm_dec[idx]+=ms; else g_tm_pre[idx]+=ms; }
+static double g_tm_win_moe=0; static int g_tm_win_n=0;
+static void tm_add(int S, int idx, double ms){
+    if(S==1){
+        g_tm_dec[idx]+=ms;
+        if(idx==2) g_tm_win_moe+=ms;
+        if(idx==5 && ++g_tm_win_n==32){
+            fprintf(stderr,"[timers] Fenster: moe %.0f ms/token (letzte 32)\n", g_tm_win_moe/32.0);
+            g_tm_win_moe=0; g_tm_win_n=0;
+        }
+    } else g_tm_pre[idx]+=ms;
+}
 static void tm_report(void){
     if(!tm_on()) return;
     static const char *nm[6]={"deltanet","attention","moe_total","(shared)","(router)","lm_head"};
@@ -1320,7 +1331,26 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
             for (int kk = 0; kk < K; kk++) if (idx[kk] >= 0) freq_l[idx[kk]]++;
         }
         const float *xs = x + (int64_t)s*D;
-        if (g_gpu_backend == GPU_BACKEND_VULKAN && vg_ready()) {
+        if (qt_ready()) {
+            /* R2 M-QTIER: residente Experten als Async-Gruppen auf beide GPUs,
+             * Misses auf der CPU (überlappt), dann Ergebnisse einsammeln. */
+            for (int kk = 0; kk < K; kk++) {
+                Slot *e; expert_get(m, layer, idx[kk], &e);
+                if (e->g4) qt_note(layer, idx[kk], e->g4, e->u4, e->d4, e->gs, e->us, e->ds);
+            }
+            uint32_t qmask = qt_issue(layer, idx, K, xs);
+            for (int kk = 0; kk < K; kk++) {
+                if (qmask & (1u<<kk)) continue;
+                Slot *e; expert_get(m, layer, idx[kk], &e);
+                matmul_q(g, xs, e->g, e->gs, D, I);
+                matmul_q(u, xs, e->u, e->us, D, I);
+                for (int i = 0; i < I; i++) { float gv = g[i]; g[i] = (gv / (1.f + expf(-gv))) * u[i]; }
+                matmul_q(hh, g, e->d, e->ds, I, D);
+                float w = val[kk]; float *os = out + (int64_t)s*D;
+                for (int d = 0; d < D; d++) os[d] += w * hh[d];
+            }
+            qt_take(qmask, val, K, out + (int64_t)s*D);
+        } else if (g_gpu_backend == GPU_BACKEND_VULKAN && vg_ready()) {
             /* GPU path: route on CPU, run all K experts' GEMVs in 2 dispatches.
              * The shared expert (below) stays on CPU. */
             int handles[256];
@@ -1961,6 +1991,14 @@ int main(int argc, char **argv) {
     Model m; model_init(&m, snap, cap, bits);
     fprintf(stderr, "resident weights loaded in %.1fs | RSS after load: %.2f GB\n", m.dense_load_s, rss_gb());
 
+    /* R2 M-QTIER: CUDA-VRAM-Experten-Tier (COLI_CUDA=1) hat Vorrang; der
+     * Vulkan-Pfad bleibt als Fallback (S3) und wird dann gar nicht erst
+     * initialisiert. */
+    if (qt_init(m.c.n_layers, m.c.n_experts, m.c.hidden, m.c.inter, cap, m.c.topk)) {
+        fprintf(stderr, "[gpu] MoE experts -> CUDA VRAM tier\n");
+        atexit(qt_shutdown);
+        g_gpu_backend = GPU_BACKEND_CPU;   /* Vulkan aus; CPU ist der Miss-Fallback */
+    }
     /* optional transparent Vulkan compute backend for the routed-expert GEMVs.
      * Only attempted when gpu_probe() found a compute-capable device; if vg_init
      * fails for any reason we silently fall back to the CPU MoE path. */
@@ -2048,6 +2086,7 @@ int main(int argc, char **argv) {
     double tot = m.hits + m.miss;
     if (g_ttft >= 0) fprintf(stderr, "TTFT: %.2f s (time to first token)\n", g_ttft);
     tm_report();
+    qt_stats();
     fprintf(stderr, "\nPEAK RSS: %.2f GB\n", rss_gb());
     fprintf(stderr, "Expert cache hit rate: %.1f%% (hit=%llu miss=%llu)\n", tot?100.0*m.hits/tot:0.0,
            (unsigned long long)m.hits, (unsigned long long)m.miss);
