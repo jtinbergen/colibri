@@ -114,9 +114,10 @@ typedef struct { VkBuffer buf; VkDeviceMemory mem; void *ptr; VkDeviceSize size;
  * on their owning device = eid % g_ndev) */
 typedef struct {
     int layer, eid, valid;
+    int pool;                          /* index into the device-local weight pool, -1 = not resident */
     uint64_t used;
-    uint32_t woff_g, woff_u, woff_d;   /* uint offsets into w */
-    uint32_t soff_g, soff_u, soff_d;   /* float offsets into s */
+    uint32_t woff_g, woff_u, woff_d;   /* uint offsets into w (pool-relative) */
+    uint32_t soff_g, soff_u, soff_d;   /* float offsets into s (pool-relative) */
 } GSlot;
 
 /* ---------- per-device context (multi-GPU extension) ---------- */
@@ -137,6 +138,14 @@ typedef struct {
     VkCommandBuffer  cmd;
     Buf w, s, x, y, meta;
     GSlot *slot;
+    /* device-local weight pool: the precompiled GEMV shaders address at most
+     * 4 GB into the weight buffer (32-bit byte addressing), so the full slot
+     * space cannot be mirrored 1:1. Weights live in a compact pool of
+     * pool_n slots with LRU reuse; a pool miss just re-memcpys the expert
+     * from host RAM into the pinned mirror. */
+    int  pool_n;
+    int *pool_gidx;        /* pool slot -> global slot idx (-1 free) */
+    GSlot **pool_owner;    /* pool slot -> owning GSlot (for eviction) */
     uint32_t vendor_id, driver_ver;
     char name[256];
 } VgDev;
@@ -209,6 +218,8 @@ static int vg_load_lib(void){
 static void vg_dev_shutdown(VgDev *dv){
     if(!dv->dev){ memset(dv,0,sizeof *dv); return; }
     if(dv->slot){ free(dv->slot); dv->slot=NULL; }
+    if(dv->pool_gidx){ free(dv->pool_gidx); dv->pool_gidx=NULL; }
+    if(dv->pool_owner){ free(dv->pool_owner); dv->pool_owner=NULL; }
     if(dv->cmd)  g_vkFreeCommandBuffers(dv->dev,dv->cpool,1,&dv->cmd);
     if(dv->cpool)g_vkDestroyCommandPool(dv->dev,dv->cpool,NULL);
     if(dv->pipe) g_vkDestroyPipeline(dv->dev,dv->pipe,NULL);
@@ -353,10 +364,15 @@ static int vg_dev_init(VgDev *dv, VkPhysicalDevice pd, const char *name,
      * on every device; only slots owned by this device are ever written, so the
      * resident share is ~1/n of the buffer. */
     {
-        VkDeviceSize wsz=(VkDeviceSize)((uint64_t)g_nslots*g_slot_wbytes);
+        /* pool: as many slots as fit below the 4 GB shader addressing limit */
+        uint64_t limit = 3750ull*1024*1024;   /* margin below 4 GiB */
+        uint64_t maxs  = g_slot_wbytes ? limit/g_slot_wbytes : 0;
+        dv->pool_n = (int)((uint64_t)g_nslots < maxs ? (uint64_t)g_nslots : maxs);
+        if(dv->pool_n <= 2*g_topk){ fprintf(stderr,"[vg] %s: slot too large for pool\n", dv->name); goto fail; }
+        VkDeviceSize wsz=(VkDeviceSize)((uint64_t)dv->pool_n*g_slot_wbytes);
         if(wsz==0) wsz=16;
         CHECK(vg_create_buf(dv,wsz, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT, &dv->w),"buf w");
-        VkDeviceSize ssz=(VkDeviceSize)g_nslots*g_slot_sfloats*sizeof(float);
+        VkDeviceSize ssz=(VkDeviceSize)dv->pool_n*g_slot_sfloats*sizeof(float);
         if(ssz==0) ssz=16;
         CHECK(vg_create_buf(dv,ssz, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT, &dv->s),"buf s");
         VkDeviceSize xsz=(VkDeviceSize)(g_hidden + g_topk*g_inter + 16)*sizeof(float);
@@ -380,7 +396,11 @@ static int vg_dev_init(VgDev *dv, VkPhysicalDevice pd, const char *name,
     }
 
     dv->slot=calloc((size_t)g_nslots, sizeof(GSlot));
-    if(!dv->slot){ fprintf(stderr,"[vg] OOM slot table\n"); goto fail; }
+    dv->pool_gidx=malloc((size_t)dv->pool_n*sizeof(int));
+    dv->pool_owner=calloc((size_t)dv->pool_n, sizeof(GSlot*));
+    if(!dv->slot || !dv->pool_gidx || !dv->pool_owner){ fprintf(stderr,"[vg] OOM slot table\n"); goto fail; }
+    for(int i=0;i<g_nslots;i++) dv->slot[i].pool=-1;
+    for(int i=0;i<dv->pool_n;i++) dv->pool_gidx[i]=-1;
     return 0;
 
 fail:
@@ -406,13 +426,6 @@ int vg_init(const vg_cfg *cfg){
                     * (g_weight_bits==4 ? 1u : 2u) / 2u;
     g_slot_wbytes = align_up64(g_slot_wbytes, 4u);
     g_slot_sfloats = 3u * (uint32_t)g_hidden;
-    /* shader meta carries uint (4-byte word) offsets into w — verify they fit */
-    if(((uint64_t)g_nslots*g_slot_wbytes)/4ull > 0xFFFFFFFFull){
-        fprintf(stderr,"[vg] weight pool too large for 32-bit shader offsets "
-                "(%d slots x %llu B) -> CPU path\n", g_nslots,
-                (unsigned long long)g_slot_wbytes);
-        return -1;
-    }
 
     /* instance — request 1.1 so vkGetPhysicalDeviceFeatures2 works */
     VkApplicationInfo ai; memset(&ai,0,sizeof ai);
@@ -516,9 +529,9 @@ int vg_init(const vg_cfg *cfg){
         fprintf(stderr,"[vg] int8 dot-product path off (unsupported/blacklisted on >=1 device) -> float path\n");
 
     g_vg_ok=1;
-    fprintf(stderr,"[vg] Vulkan GEMV backend ready: %d device(s), %d layers x %d slots, weights %.1f MB/device%s\n",
-            g_ndev, g_nlayers, g_nslots,
-            (double)((uint64_t)g_nslots*g_slot_wbytes)/(1024.0*1024.0),
+    fprintf(stderr,"[vg] Vulkan GEMV backend ready: %d device(s), %d layers x %d slots, pool %d slots (%.1f MB)/device%s\n",
+            g_ndev, g_nlayers, g_nslots, g_d[0].pool_n,
+            (double)((uint64_t)g_d[0].pool_n*g_slot_wbytes)/(1024.0*1024.0),
             g_use_int4 ? " [int4 unpack+float GEMV ACTIVE]"
             : g_use_idp ? " [int8 dot-product OpSDotKHR ACTIVE]" : " [float path]");
     return 0;
@@ -539,8 +552,25 @@ void vg_shutdown(void){
     g_vg_ok=0;
 }
 
-/* Upload one expert's weights/scales into the OWNING device's slot
- * (layer*cap + li). 64-bit offsets (see header comment). */
+/* Reserve a pool slot for global slot idx on device dv (LRU eviction).
+ * Returns the pool index; the evicted GSlot (if any) is unmapped. */
+static int vg_pool_place(VgDev *dv, GSlot *s, int idx){
+    if(s->pool>=0 && dv->pool_gidx[s->pool]==idx) return s->pool;
+    int best=-1; uint64_t best_used=~0ull;
+    for(int i=0;i<dv->pool_n;i++){
+        if(dv->pool_gidx[i]<0){ best=i; break; }
+        GSlot *o=dv->pool_owner[i];
+        uint64_t u=o?o->used:0;
+        if(u<best_used){ best_used=u; best=i; }
+    }
+    GSlot *victim=dv->pool_owner[best];
+    if(victim && victim!=s) victim->pool=-1;
+    dv->pool_gidx[best]=idx; dv->pool_owner[best]=s; s->pool=best;
+    return best;
+}
+
+/* Upload one expert's weights/scales into the OWNING device's pool slot.
+ * 64-bit host offsets; shader offsets stay below 4 GB by pool construction. */
 void vg_expert_loaded(int layer, int eid, int li,
                       const int8_t *g, const int8_t *u, const int8_t *d,
                       const float *gs, const float *us, const float *ds){
@@ -553,8 +583,10 @@ void vg_expert_loaded(int layer, int eid, int li,
      * survive on other devices — invalidate them so the owner scan is unique */
     for(int od=0;od<g_ndev;od++) if(od!=owner) g_d[od].slot[idx].valid=0;
     GSlot *s=&dv->slot[idx];
-    uint64_t wbase = (uint64_t)idx * g_slot_wbytes;          /* bytes */
-    uint64_t sbase = (uint64_t)idx * g_slot_sfloats;          /* floats */
+    s->used=++g_tick;                       /* fresh tick BEFORE placing: never evicted by itself */
+    int pool = vg_pool_place(dv,s,idx);
+    uint64_t wbase = (uint64_t)pool * g_slot_wbytes;          /* bytes */
+    uint64_t sbase = (uint64_t)pool * g_slot_sfloats;          /* floats */
     uint32_t D=(uint32_t)g_hidden, Ih=(uint32_t)g_inter;
     uint64_t gbytes = (uint64_t)D*Ih*sizeof(int8_t);
     memcpy((uint8_t*)dv->w.ptr + wbase,              g,  gbytes);
@@ -579,8 +611,9 @@ void vg_expert_ensure(int layer, int li, int eid,
     if(!g_vg_ok) return;
     int idx = layer*g_cap + li;
     if(idx<0 || idx>=g_nslots) return;
-    GSlot *s=&g_d[vg_owner(eid)].slot[idx];
-    if(s->valid && s->eid==eid){ s->used=++g_tick; return; }   /* already cached */
+    VgDev *dv=&g_d[vg_owner(eid)];
+    GSlot *s=&dv->slot[idx];
+    if(s->valid && s->eid==eid && s->pool>=0 && dv->pool_gidx[s->pool]==idx){ s->used=++g_tick; return; }
     vg_expert_loaded(layer, eid, li, g, u, d, gs, us, ds);
 }
 
@@ -595,8 +628,10 @@ void vg_expert_loaded_int4(int layer, int eid, int li,
     VgDev *dv=&g_d[owner];
     for(int od=0;od<g_ndev;od++) if(od!=owner) g_d[od].slot[idx].valid=0;
     GSlot *s=&dv->slot[idx];
-    uint64_t wbase = (uint64_t)idx * g_slot_wbytes;          /* bytes */
-    uint64_t sbase = (uint64_t)idx * g_slot_sfloats;          /* floats */
+    s->used=++g_tick;
+    int pool = vg_pool_place(dv,s,idx);
+    uint64_t wbase = (uint64_t)pool * g_slot_wbytes;          /* bytes */
+    uint64_t sbase = (uint64_t)pool * g_slot_sfloats;          /* floats */
     uint32_t D=(uint32_t)g_hidden, Ih=(uint32_t)g_inter;
     uint64_t gbytes = (uint64_t)D*Ih/2u;                      /* int4: half of int8 */
     memcpy((uint8_t*)dv->w.ptr + wbase,              g,  gbytes);
@@ -621,8 +656,9 @@ void vg_expert_ensure_int4(int layer, int li, int eid,
     if(!g_vg_ok) return;
     int idx = layer*g_cap + li;
     if(idx<0 || idx>=g_nslots) return;
-    GSlot *s=&g_d[vg_owner(eid)].slot[idx];
-    if(s->valid && s->eid==eid){ s->used=++g_tick; return; }
+    VgDev *dv=&g_d[vg_owner(eid)];
+    GSlot *s=&dv->slot[idx];
+    if(s->valid && s->eid==eid && s->pool>=0 && dv->pool_gidx[s->pool]==idx){ s->used=++g_tick; return; }
     vg_expert_loaded_int4(layer, eid, li, g, u, d, gs, us, ds);
 }
 
@@ -698,7 +734,7 @@ void vg_moe_run(int layer, int K, const int *handles, const float *val,
             owner=-1;
             for(int d=0;d<g_ndev;d++){
                 GSlot *s=&g_d[d].slot[handles[k]];
-                if(s->valid && vg_owner(s->eid)==d){ owner=d; break; }
+                if(s->valid && s->pool>=0 && vg_owner(s->eid)==d){ owner=d; break; }
             }
             if(owner<0){ free(meta); return; }  /* not uploaded -> let CPU path handle */
         }
@@ -900,6 +936,7 @@ int main(void){
     int K_test = getenv("TK")   ? atoi(getenv("TK"))   : 4;
     int C_test = getenv("TCAP") ? atoi(getenv("TCAP")) : 6;
     int NL_test= getenv("TNL")  ? atoi(getenv("TNL"))  : 2;
+    int L0_test= getenv("TL0")  ? atoi(getenv("TL0"))  : 0;   /* base layer: exercises HIGH buffer offsets */
     vg_cfg cfg; cfg.n_layers=NL_test; cfg.hidden=D_test; cfg.inter=Ih_test; cfg.cap=C_test; cfg.topk=K_test; cfg.weight_bits=wbits;
     if(vg_init(&cfg)!=0){ fprintf(stderr,"SELFTEST: vg_init failed (no GPU?) -> cannot verify\n"); return 2; }
 
@@ -934,7 +971,7 @@ int main(void){
     /* upload experts (li = e % cap, layer = e / cap) */
     int handles[K];
     for(int k=0;k<K;k++){
-        int e=k; int layer=e/cfg.cap, li=e%cfg.cap;
+        int e=k; int layer=L0_test + e/cfg.cap, li=e%cfg.cap;
         if(wbits==4)
             vg_expert_loaded_int4(layer, e, li, Eg4+e*(nwb/2), Eu4+e*(nwb/2), Ed4+e*(nwb/2),
                                    Egs+e*Ih, Eus+e*Ih, Eds+e*D);
