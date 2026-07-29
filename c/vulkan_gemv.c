@@ -4,7 +4,17 @@
  *
  * Vulkan is loaded DYNAMICALLY (dlopen/LoadLibrary "vulkan-1") so the default
  * binary keeps zero compile-time dependency on Vulkan and silently falls back to
- * CPU when the loader or a compute device is absent. */
+ * CPU when the loader or a compute device is absent.
+ *
+ * LOCAL EXTENSION (multi-GPU): the backend now drives up to VG_MAX_DEV Vulkan
+ * devices in parallel. Experts are sharded by owner = eid % n_devices; each
+ * device holds only its own experts' weights and computes only its share of a
+ * (token, layer). Phase submissions go to all queues first and are then waited
+ * on together, so the GPUs overlap. Device selection prefers DISCRETE_GPU and
+ * skips CPU-type devices (llvmpipe); COLIBRI_GPUS=n limits the device count
+ * (COLIBRI_GPUS=1 restores the old single-device behaviour).
+ * Also fixed here: 64-bit slot offsets (the original 32-bit wbase arithmetic
+ * overflows and aliases slots once cap*layers*slot_bytes exceeds 4 GB). */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -88,60 +98,65 @@ static int g_vg_ok = 0;
 /* ---------- static sizes ---------- */
 static int g_hidden=0, g_inter=0, g_cap=0, g_topk=0, g_nlayers=0, g_nslots=0;
 static uint64_t g_tick = 0;
+static int g_use_idp=0;              /* 1 if IDP active (on ALL devices) */
+static int g_use_int4=0;             /* 1 if int4 path active (on ALL devices) */
+static int g_weight_bits=8;          /* 4 or 8 */
+static int g_dbg=0;                  /* set by MOE_DBG env */
 
-/* ---------- Vulkan objects ---------- */
-static VkInstance       g_inst=VK_NULL_HANDLE;
-static VkDevice         g_dev =VK_NULL_HANDLE;
-static VkPhysicalDevice g_pd  =VK_NULL_HANDLE;
-static VkQueue          g_q   =VK_NULL_HANDLE;
-static uint32_t         g_qf  =~0u;
-static VkShaderModule   g_sm  =VK_NULL_HANDLE;   /* float-path shader (fallback) */
-static VkShaderModule   g_sm_idp=VK_NULL_HANDLE;  /* OpSDotKHR int8 shader */
-static VkDescriptorSetLayout g_dsl=VK_NULL_HANDLE;
-static VkDescriptorPool g_dpool=VK_NULL_HANDLE;
-static VkDescriptorSet  g_ds  =VK_NULL_HANDLE;
-static VkPipelineLayout g_pl  =VK_NULL_HANDLE;
-static VkPipeline       g_pipe=VK_NULL_HANDLE;   /* float-path pipeline */
-static VkPipeline       g_pipe_idp=VK_NULL_HANDLE;/* int8 dot-product pipeline */
-static VkShaderModule   g_sm_int4=VK_NULL_HANDLE; /* int4 unpack + float GEMV shader */
-static VkPipeline       g_pipe_int4=VK_NULL_HANDLE;/* int4 pipeline */
-static int              g_use_idp=0;             /* 1 if IDP active */
-static int              g_use_int4=0;            /* 1 if int4 path active */
-static int              g_weight_bits=8;         /* 4 or 8 */
-static int              g_dbg=0;                 /* set by MOE_DBG env */
-static uint32_t         g_vendor_id=0;          /* GPU vendor (0x1002=AMD,0x10DE=NVIDIA,0x8086=Intel) */
-static uint32_t         g_driver_ver=0;         /* GPU driver version (vendor-encoded) */
-static VkCommandPool    g_cpool=VK_NULL_HANDLE;
-static VkCommandBuffer  g_cmd =VK_NULL_HANDLE;
+/* per-slot byte/float layout (precomputed) */
+static uint64_t g_slot_wbytes = 0;   /* bytes per slot in w  (3 * D * Ih [/2 for int4]) */
+static uint32_t g_slot_sfloats = 0;  /* floats per slot in s (3 * D) */
 
 /* persistent buffers (host-visible + coherent) */
 typedef struct { VkBuffer buf; VkDeviceMemory mem; void *ptr; VkDeviceSize size; } Buf;
-static Buf g_w, g_s, g_x, g_y, g_meta;
 
-/* GPU slot table (mirror of CPU LRU) */
+/* GPU slot table (mirror of CPU LRU; one table per device, experts live only
+ * on their owning device = eid % g_ndev) */
 typedef struct {
     int layer, eid, valid;
     uint64_t used;
-    uint32_t woff_g, woff_u, woff_d;   /* uint offsets into g_w */
-    uint32_t soff_g, soff_u, soff_d;   /* float offsets into g_s */
+    uint32_t woff_g, woff_u, woff_d;   /* uint offsets into w */
+    uint32_t soff_g, soff_u, soff_d;   /* float offsets into s */
 } GSlot;
-static GSlot *g_slot = NULL;
 
-/* per-slot byte/float layout (precomputed) */
-static uint32_t g_slot_wbytes = 0;     /* bytes per slot in g_w  (3 * D * Ih) */
-static uint32_t g_slot_sfloats = 0;    /* floats per slot in g_s (3 * D) */
+/* ---------- per-device context (multi-GPU extension) ---------- */
+#define VG_MAX_DEV 4
+#define VG_KMAX 64                    /* max experts per (token, layer) call */
+typedef struct {
+    VkPhysicalDevice pd;
+    VkDevice         dev;
+    VkQueue          q;
+    uint32_t         qf;
+    VkShaderModule   sm, sm_idp, sm_int4;
+    VkDescriptorSetLayout dsl;
+    VkDescriptorPool dpool;
+    VkDescriptorSet  ds;
+    VkPipelineLayout pl;
+    VkPipeline       pipe, pipe_idp, pipe_int4;
+    VkCommandPool    cpool;
+    VkCommandBuffer  cmd;
+    Buf w, s, x, y, meta;
+    GSlot *slot;
+    uint32_t vendor_id, driver_ver;
+    char name[256];
+} VgDev;
+static VgDev g_d[VG_MAX_DEV];
+static int   g_ndev = 0;
+static VkInstance g_inst = VK_NULL_HANDLE;
+
+static int vg_owner(int eid){ return g_ndev>1 ? (eid % g_ndev) : 0; }
 
 #define CHECK(r,msg) do{ if((r)!=VK_SUCCESS){ fprintf(stderr,"[vg] %s failed (code %d)\n", msg, (int)(r)); goto fail; } }while(0)
-static uint32_t align_up(uint32_t x, uint32_t a){ return (x + a - 1) & ~(a - 1); }
+static uint64_t align_up64(uint64_t x, uint64_t a){ return (x + a - 1) & ~(a - 1); }
 
-static VkResult vg_create_buf(VkDeviceSize size, VkBufferUsageFlags usage, Buf *b){
+static VkResult vg_create_buf(VgDev *dv, VkDeviceSize size, VkBufferUsageFlags usage, Buf *b){
     VkBufferCreateInfo bi; memset(&bi,0,sizeof bi);
     bi.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bi.size=size; bi.usage=usage; bi.sharingMode=VK_SHARING_MODE_EXCLUSIVE;
-    VkResult r=g_vkCreateBuffer(g_dev,&bi,NULL,&b->buf);
+    VkResult r=g_vkCreateBuffer(dv->dev,&bi,NULL,&b->buf);
     if(r!=VK_SUCCESS) return r;
-    VkMemoryRequirements req; g_vkGetBufferMemoryRequirements(g_dev,b->buf,&req);
-    VkPhysicalDeviceMemoryProperties mp; g_vkGetPhysicalDeviceMemoryProperties(g_pd,&mp);
+    VkMemoryRequirements req; g_vkGetBufferMemoryRequirements(dv->dev,b->buf,&req);
+    VkPhysicalDeviceMemoryProperties mp; g_vkGetPhysicalDeviceMemoryProperties(dv->pd,&mp);
     uint32_t mi=~0u;
     for(uint32_t i=0;i<mp.memoryTypeCount;i++){
         if((req.memoryTypeBits&(1u<<i)) &&
@@ -155,25 +170,25 @@ static VkResult vg_create_buf(VkDeviceSize size, VkBufferUsageFlags usage, Buf *
     VkMemoryAllocateInfo ai; memset(&ai,0,sizeof ai);
     ai.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     ai.allocationSize=req.size; ai.memoryTypeIndex=mi;
-    r=g_vkAllocateMemory(g_dev,&ai,NULL,&b->mem);
+    r=g_vkAllocateMemory(dv->dev,&ai,NULL,&b->mem);
     if(r!=VK_SUCCESS) return r;
-    r=g_vkBindBufferMemory(g_dev,b->buf,b->mem,0);
+    r=g_vkBindBufferMemory(dv->dev,b->buf,b->mem,0);
     if(r!=VK_SUCCESS) return r;
     b->size=req.size;
-    return g_vkMapMemory(g_dev,b->mem,0,req.size,0,&b->ptr);
+    return g_vkMapMemory(dv->dev,b->mem,0,req.size,0,&b->ptr);
 }
 
-static void vg_flush(Buf *b, VkDeviceSize off, VkDeviceSize len){
+static void vg_flush(VgDev *dv, Buf *b, VkDeviceSize off, VkDeviceSize len){
     if(len==0) return;
     VkMappedMemoryRange r; memset(&r,0,sizeof r);
     r.sType=VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE; r.memory=b->mem; r.offset=off; r.size=len;
-    g_vkFlushMappedMemoryRanges(g_dev,1,&r);
+    g_vkFlushMappedMemoryRanges(dv->dev,1,&r);
 }
-static void vg_invalidate(Buf *b, VkDeviceSize off, VkDeviceSize len){
+static void vg_invalidate(VgDev *dv, Buf *b, VkDeviceSize off, VkDeviceSize len){
     if(len==0) return;
     VkMappedMemoryRange r; memset(&r,0,sizeof r);
     r.sType=VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE; r.memory=b->mem; r.offset=off; r.size=len;
-    g_vkInvalidateMappedMemoryRanges(g_dev,1,&r);
+    g_vkInvalidateMappedMemoryRanges(dv->dev,1,&r);
 }
 
 static int vg_load_lib(void){
@@ -190,6 +205,189 @@ static int vg_load_lib(void){
     return 0;
 }
 
+/* ---------- per-device teardown ---------- */
+static void vg_dev_shutdown(VgDev *dv){
+    if(!dv->dev){ memset(dv,0,sizeof *dv); return; }
+    if(dv->slot){ free(dv->slot); dv->slot=NULL; }
+    if(dv->cmd)  g_vkFreeCommandBuffers(dv->dev,dv->cpool,1,&dv->cmd);
+    if(dv->cpool)g_vkDestroyCommandPool(dv->dev,dv->cpool,NULL);
+    if(dv->pipe) g_vkDestroyPipeline(dv->dev,dv->pipe,NULL);
+    if(dv->pipe_idp) g_vkDestroyPipeline(dv->dev,dv->pipe_idp,NULL);
+    if(dv->pipe_int4) g_vkDestroyPipeline(dv->dev,dv->pipe_int4,NULL);
+    if(dv->sm_idp) g_vkDestroyShaderModule(dv->dev,dv->sm_idp,NULL);
+    if(dv->sm_int4) g_vkDestroyShaderModule(dv->dev,dv->sm_int4,NULL);
+    if(dv->pl)   g_vkDestroyPipelineLayout(dv->dev,dv->pl,NULL);
+    if(dv->dpool)g_vkDestroyDescriptorPool(dv->dev,dv->dpool,NULL);
+    if(dv->dsl)  g_vkDestroyDescriptorSetLayout(dv->dev,dv->dsl,NULL);
+    if(dv->sm)   g_vkDestroyShaderModule(dv->dev,dv->sm,NULL);
+    if(dv->y.buf){ g_vkDestroyBuffer(dv->dev,dv->y.buf,NULL); g_vkFreeMemory(dv->dev,dv->y.mem,NULL); }
+    if(dv->x.buf){ g_vkDestroyBuffer(dv->dev,dv->x.buf,NULL); g_vkFreeMemory(dv->dev,dv->x.mem,NULL); }
+    if(dv->s.buf){ g_vkDestroyBuffer(dv->dev,dv->s.buf,NULL); g_vkFreeMemory(dv->dev,dv->s.mem,NULL); }
+    if(dv->w.buf){ g_vkDestroyBuffer(dv->dev,dv->w.buf,NULL); g_vkFreeMemory(dv->dev,dv->w.mem,NULL); }
+    if(dv->meta.buf){ g_vkDestroyBuffer(dv->dev,dv->meta.buf,NULL); g_vkFreeMemory(dv->dev,dv->meta.mem,NULL); }
+    g_vkDestroyDevice(dv->dev,NULL);
+    memset(dv,0,sizeof *dv);
+}
+
+/* ---------- per-device init: logical device, pipelines, buffers ----------
+ * Returns 0 on success. On failure the device is torn down and skipped. */
+static int vg_dev_init(VgDev *dv, VkPhysicalDevice pd, const char *name,
+                       uint32_t vendor_id, uint32_t driver_ver,
+                       int idp_supported_dev, int int8_supported_dev){
+    memset(dv,0,sizeof *dv);
+    dv->pd=pd; dv->qf=~0u;
+    dv->vendor_id=vendor_id; dv->driver_ver=driver_ver;
+    snprintf(dv->name,sizeof dv->name,"%s",name);
+
+    uint32_t nf=0; g_vkGetPhysicalDeviceQueueFamilyProperties(pd,&nf,NULL);
+    VkQueueFamilyProperties *qfp=malloc(nf*sizeof(VkQueueFamilyProperties));
+    g_vkGetPhysicalDeviceQueueFamilyProperties(pd,&nf,qfp);
+    for(uint32_t i=0;i<nf;i++){ if(qfp[i].queueFlags & VK_QUEUE_COMPUTE_BIT){ dv->qf=i; break; } }
+    free(qfp);
+    if(dv->qf==~0u){ fprintf(stderr,"[vg] %s: no compute queue family\n", name); return -1; }
+
+    float qpri=1.0f;
+    VkDeviceQueueCreateInfo dq; memset(&dq,0,sizeof dq);
+    dq.sType=VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO; dq.queueFamilyIndex=dv->qf;
+    dq.queueCount=1; dq.pQueuePriorities=&qpri;
+
+    VkPhysicalDeviceFeatures2 f2; memset(&f2,0,sizeof f2);
+    f2.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    VkPhysicalDeviceShaderIntegerDotProductFeatures dpf; memset(&dpf,0,sizeof dpf);
+    dpf.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES;
+    VkPhysicalDeviceShaderFloat16Int8Features f16i8; memset(&f16i8,0,sizeof f16i8);
+    f16i8.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES;
+    f2.pNext=&f16i8; f16i8.pNext=&dpf;
+    dpf.shaderIntegerDotProduct = idp_supported_dev ? VK_TRUE : VK_FALSE;
+    f16i8.shaderInt8 = int8_supported_dev ? VK_TRUE : VK_FALSE;
+
+    VkDeviceCreateInfo dci; memset(&dci,0,sizeof dci);
+    dci.sType=VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO; dci.queueCreateInfoCount=1;
+    dci.pQueueCreateInfos=&dq; dci.pNext=&f2;
+    CHECK(g_vkCreateDevice(pd,&dci,NULL,&dv->dev),"vkCreateDevice");
+    g_vkGetDeviceQueue(dv->dev,dv->qf,0,&dv->q);
+
+    /* float-path shader module */
+    VkShaderModuleCreateInfo smi; memset(&smi,0,sizeof smi);
+    smi.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    smi.codeSize=GEMV_SPV_LEN; smi.pCode=(const uint32_t*)GEMV_SPV;
+    CHECK(g_vkCreateShaderModule(dv->dev,&smi,NULL,&dv->sm),"vkCreateShaderModule");
+
+    /* descriptor set: 5 storage buffers (meta,x,w,scale,y) */
+    VkDescriptorSetLayoutBinding bnd[5];
+    for(int b=0;b<5;b++){ memset(&bnd[b],0,sizeof bnd[b]); bnd[b].binding=b;
+        bnd[b].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; bnd[b].descriptorCount=1;
+        bnd[b].stageFlags=VK_SHADER_STAGE_COMPUTE_BIT; }
+    VkDescriptorSetLayoutCreateInfo dlci; memset(&dlci,0,sizeof dlci);
+    dlci.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; dlci.bindingCount=5; dlci.pBindings=bnd;
+    CHECK(g_vkCreateDescriptorSetLayout(dv->dev,&dlci,NULL,&dv->dsl),"desc layout");
+
+    VkDescriptorPoolSize dps; dps.type=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; dps.descriptorCount=5;
+    VkDescriptorPoolCreateInfo dpci; memset(&dpci,0,sizeof dpci);
+    dpci.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO; dpci.maxSets=1;
+    dpci.poolSizeCount=1; dpci.pPoolSizes=&dps;
+    CHECK(g_vkCreateDescriptorPool(dv->dev,&dpci,NULL,&dv->dpool),"desc pool");
+
+    VkDescriptorSetAllocateInfo dsai; memset(&dsai,0,sizeof dsai);
+    dsai.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO; dsai.descriptorPool=dv->dpool;
+    dsai.descriptorSetCount=1; dsai.pSetLayouts=&dv->dsl;
+    CHECK(g_vkAllocateDescriptorSets(dv->dev,&dsai,&dv->ds),"desc alloc");
+
+    /* pipelines */
+    VkPipelineShaderStageCreateInfo stage; memset(&stage,0,sizeof stage);
+    stage.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stage.stage=VK_SHADER_STAGE_COMPUTE_BIT; stage.module=dv->sm; stage.pName="main";
+    VkPipelineLayoutCreateInfo plci; memset(&plci,0,sizeof plci);
+    plci.sType=VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO; plci.setLayoutCount=1; plci.pSetLayouts=&dv->dsl;
+    CHECK(g_vkCreatePipelineLayout(dv->dev,&plci,NULL,&dv->pl),"pipeline layout");
+    VkComputePipelineCreateInfo cpci; memset(&cpci,0,sizeof cpci);
+    cpci.sType=VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO; cpci.stage=stage; cpci.layout=dv->pl;
+    CHECK(g_vkCreateComputePipelines(dv->dev,VK_NULL_HANDLE,1,&cpci,NULL,&dv->pipe),"compute pipeline");
+
+    /* int4 path (Shader-only, unpack nibbles + float GEMV) */
+    if(g_weight_bits==4){
+        VkShaderModuleCreateInfo i4smi; memset(&i4smi,0,sizeof i4smi);
+        i4smi.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        i4smi.codeSize=GEMV_INT4_SPV_LEN; i4smi.pCode=(const uint32_t*)GEMV_INT4_SPV;
+        if(g_vkCreateShaderModule(dv->dev,&i4smi,NULL,&dv->sm_int4)==VK_SUCCESS){
+            VkPipelineShaderStageCreateInfo i4stg; memset(&i4stg,0,sizeof i4stg);
+            i4stg.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            i4stg.stage=VK_SHADER_STAGE_COMPUTE_BIT; i4stg.module=dv->sm_int4; i4stg.pName="main";
+            VkComputePipelineCreateInfo i4cpi; memset(&i4cpi,0,sizeof i4cpi);
+            i4cpi.sType=VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO; i4cpi.stage=i4stg; i4cpi.layout=dv->pl;
+            if(g_vkCreateComputePipelines(dv->dev,VK_NULL_HANDLE,1,&i4cpi,NULL,&dv->pipe_int4)!=VK_SUCCESS){
+                g_vkDestroyShaderModule(dv->dev,dv->sm_int4,NULL); dv->sm_int4=VK_NULL_HANDLE;
+            }
+        }
+        if(!dv->pipe_int4){ fprintf(stderr,"[vg] %s: int4 pipeline unavailable\n", name); goto fail; }
+    }
+
+    /* integer dot-product path (int8 weights only); per-device support was
+     * checked by the caller, AMD 0x800184 blacklist applies as before */
+    if(g_weight_bits!=4 && idp_supported_dev && int8_supported_dev){
+        VkShaderModuleCreateInfo ismi; memset(&ismi,0,sizeof ismi);
+        ismi.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        ismi.codeSize=GEMV_IDP_SPV_LEN; ismi.pCode=(const uint32_t*)GEMV_IDP_SPV;
+        if(g_vkCreateShaderModule(dv->dev,&ismi,NULL,&dv->sm_idp)==VK_SUCCESS){
+            VkPipelineShaderStageCreateInfo istg; memset(&istg,0,sizeof istg);
+            istg.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            istg.stage=VK_SHADER_STAGE_COMPUTE_BIT; istg.module=dv->sm_idp; istg.pName="main";
+            VkComputePipelineCreateInfo icpi; memset(&icpi,0,sizeof icpi);
+            icpi.sType=VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO; icpi.stage=istg; icpi.layout=dv->pl;
+            if(g_vkCreateComputePipelines(dv->dev,VK_NULL_HANDLE,1,&icpi,NULL,&dv->pipe_idp)!=VK_SUCCESS){
+                g_vkDestroyShaderModule(dv->dev,dv->sm_idp,NULL); dv->sm_idp=VK_NULL_HANDLE;
+            }
+        }
+    }
+
+    /* command pool + buffer */
+    VkCommandPoolCreateInfo cp2; memset(&cp2,0,sizeof cp2);
+    cp2.sType=VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO; cp2.queueFamilyIndex=dv->qf;
+    CHECK(g_vkCreateCommandPool(dv->dev,&cp2,NULL,&dv->cpool),"cmd pool");
+    VkCommandBufferAllocateInfo cbai; memset(&cbai,0,sizeof cbai);
+    cbai.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO; cbai.commandPool=dv->cpool;
+    cbai.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY; cbai.commandBufferCount=1;
+    CHECK(g_vkAllocateCommandBuffers(dv->dev,&cbai,&dv->cmd),"cmd alloc");
+
+    /* persistent buffers (host-visible coherent). Same global slot-index space
+     * on every device; only slots owned by this device are ever written, so the
+     * resident share is ~1/n of the buffer. */
+    {
+        VkDeviceSize wsz=(VkDeviceSize)((uint64_t)g_nslots*g_slot_wbytes);
+        if(wsz==0) wsz=16;
+        CHECK(vg_create_buf(dv,wsz, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT, &dv->w),"buf w");
+        VkDeviceSize ssz=(VkDeviceSize)g_nslots*g_slot_sfloats*sizeof(float);
+        if(ssz==0) ssz=16;
+        CHECK(vg_create_buf(dv,ssz, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT, &dv->s),"buf s");
+        VkDeviceSize xsz=(VkDeviceSize)(g_hidden + g_topk*g_inter + 16)*sizeof(float);
+        CHECK(vg_create_buf(dv,xsz, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT, &dv->x),"buf x");
+        VkDeviceSize ysz=(VkDeviceSize)(g_topk*g_hidden + 16)*sizeof(float);
+        CHECK(vg_create_buf(dv,ysz, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT, &dv->y),"buf y");
+        VkDeviceSize msz=(VkDeviceSize)(1 + 6*2*g_topk + 16)*sizeof(uint32_t);
+        CHECK(vg_create_buf(dv,msz, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT, &dv->meta),"buf meta");
+    }
+
+    /* bind descriptor buffers */
+    {
+        VkBuffer bufs[5]={dv->meta.buf,dv->x.buf,dv->w.buf,dv->s.buf,dv->y.buf};
+        VkDescriptorBufferInfo dbi[5];
+        VkWriteDescriptorSet wds[5];
+        for(int b=0;b<5;b++){ dbi[b].buffer=bufs[b]; dbi[b].offset=0; dbi[b].range=VK_WHOLE_SIZE;
+            memset(&wds[b],0,sizeof wds[b]); wds[b].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            wds[b].dstSet=dv->ds; wds[b].dstBinding=b; wds[b].descriptorCount=1;
+            wds[b].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; wds[b].pBufferInfo=&dbi[b]; }
+        g_vkUpdateDescriptorSets(dv->dev,5,wds,0,NULL);
+    }
+
+    dv->slot=calloc((size_t)g_nslots, sizeof(GSlot));
+    if(!dv->slot){ fprintf(stderr,"[vg] OOM slot table\n"); goto fail; }
+    return 0;
+
+fail:
+    vg_dev_shutdown(dv);
+    return -1;
+}
+
 int vg_init(const vg_cfg *cfg){
     if(g_vg_ok) return 0;
     if(vg_load_lib()!=0) return -1;
@@ -200,17 +398,23 @@ int vg_init(const vg_cfg *cfg){
     g_weight_bits = (cfg->weight_bits==4) ? 4 : 8;   /* 0/other -> 8 */
     g_nslots=g_nlayers*g_cap;
     if(g_nslots<=0 || g_hidden<=0 || g_inter<=0) return -1;
+    if(g_topk>VG_KMAX){ fprintf(stderr,"[vg] topk %d > VG_KMAX\n", g_topk); return -1; }
 
-    /* int4 weights are packed 2 nibbles/byte -> half the byte footprint of int8.
-     * int8 = 1 byte/weight; int4 = 1/2 byte/weight.  3 matrices (g,u,d). */
-    g_slot_wbytes = 3u * (uint32_t)g_hidden * (uint32_t)g_inter
+    /* 64-bit slot layout (LOCAL FIX: the original 32-bit math overflows for
+     * cap*layers*slot_bytes > 4 GB and silently aliases slots) */
+    g_slot_wbytes = 3ull * (uint64_t)g_hidden * (uint64_t)g_inter
                     * (g_weight_bits==4 ? 1u : 2u) / 2u;
-    g_slot_wbytes = align_up(g_slot_wbytes, 4u);
+    g_slot_wbytes = align_up64(g_slot_wbytes, 4u);
     g_slot_sfloats = 3u * (uint32_t)g_hidden;
+    /* shader meta carries uint (4-byte word) offsets into w — verify they fit */
+    if(((uint64_t)g_nslots*g_slot_wbytes)/4ull > 0xFFFFFFFFull){
+        fprintf(stderr,"[vg] weight pool too large for 32-bit shader offsets "
+                "(%d slots x %llu B) -> CPU path\n", g_nslots,
+                (unsigned long long)g_slot_wbytes);
+        return -1;
+    }
 
-    /* instance — request 1.1 so vkGetPhysicalDeviceFeatures2 can report
-     * 1.1+ extension features (shaderIntegerDotProduct for OpSDotKHR).
-     * Fall back to 1.0 (float path only) if 1.1 is unavailable. */
+    /* instance — request 1.1 so vkGetPhysicalDeviceFeatures2 works */
     VkApplicationInfo ai; memset(&ai,0,sizeof ai);
     ai.sType=VK_STRUCTURE_TYPE_APPLICATION_INFO; ai.apiVersion=VK_API_VERSION_1_1;
     VkInstanceCreateInfo ci; memset(&ci,0,sizeof ci);
@@ -218,249 +422,108 @@ int vg_init(const vg_cfg *cfg){
     VkResult ir = g_vkCreateInstance(&ci,NULL,&g_inst);
     if(ir!=VK_SUCCESS){
         ai.apiVersion=VK_API_VERSION_1_0;
-        CHECK(g_vkCreateInstance(&ci,NULL,&g_inst),"vkCreateInstance");
+        if(g_vkCreateInstance(&ci,NULL,&g_inst)!=VK_SUCCESS){
+            fprintf(stderr,"[vg] vkCreateInstance failed\n"); return -1; }
     }
 
-    uint32_t ndev=0; g_vkEnumeratePhysicalDevices(g_inst,&ndev,NULL);
-    if(ndev==0){ fprintf(stderr,"[vg] no physical devices\n"); goto fail; }
-    VkPhysicalDevice *pds=malloc(ndev*sizeof(VkPhysicalDevice));
-    g_vkEnumeratePhysicalDevices(g_inst,&ndev,pds);
-    g_pd=pds[0];
-    /* Capture vendor/driver version so we can blacklist drivers known to crash
-     * on OpSDotKHR pipeline compilation (e.g. AMD 0x800184). A segfault there
-     * cannot be caught, so we must avoid invoking the compiler on them. */
-    VkPhysicalDeviceProperties pdprops; memset(&pdprops,0,sizeof pdprops);
-    g_vkGetPhysicalDeviceProperties(g_pd,&pdprops);
-    g_vendor_id = pdprops.vendorID; g_driver_ver = pdprops.driverVersion;
-    fprintf(stderr,"[vg] using device 0/%u: %s (vendor 0x%X)\n", ndev, pdprops.deviceName, g_vendor_id); /* LOCAL FIX: diagnostics */
-    uint32_t nf=0; g_vkGetPhysicalDeviceQueueFamilyProperties(g_pd,&nf,NULL);
-    VkQueueFamilyProperties *qfp=malloc(nf*sizeof(VkQueueFamilyProperties));
-    g_vkGetPhysicalDeviceQueueFamilyProperties(g_pd,&nf,qfp);
-    for(uint32_t i=0;i<nf;i++){ if(qfp[i].queueFlags & VK_QUEUE_COMPUTE_BIT){ g_qf=i; break; } }
-    free(qfp); free(pds);
-    if(g_qf==~0u){ fprintf(stderr,"[vg] no compute-capable queue family\n"); goto fail; }
+    /* ---------- device selection (multi-GPU extension) ----------
+     * Rank: DISCRETE_GPU (2) first, then INTEGRATED (1), then VIRTUAL (3);
+     * CPU-type devices (llvmpipe) are never auto-selected. COLIBRI_GPUS=n
+     * caps the count (default: all discrete GPUs, or the single best device). */
+    {
+        uint32_t ndev=0; g_vkEnumeratePhysicalDevices(g_inst,&ndev,NULL);
+        if(ndev==0){ fprintf(stderr,"[vg] no physical devices\n"); goto fail_inst; }
+        VkPhysicalDevice *pds=malloc(ndev*sizeof(VkPhysicalDevice));
+        g_vkEnumeratePhysicalDevices(g_inst,&ndev,pds);
 
-    float qpri=1.0f;
-    VkDeviceQueueCreateInfo dq; memset(&dq,0,sizeof dq);
-    dq.sType=VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO; dq.queueFamilyIndex=g_qf;
-    dq.queueCount=1; dq.pQueuePriorities=&qpri;
-
-    /* Query + enable VK_KHR_shader_integer_dot_product so we can use OpSDotKHR,
-     * AND VK_KHR_shader_float16_int8 so the int8 (v4i8) types in the IDP shader
-     * are legal. Both fall back to the float path if the device lacks them. */
-    VkPhysicalDeviceFeatures2 f2; memset(&f2,0,sizeof f2);
-    f2.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-    VkPhysicalDeviceShaderIntegerDotProductFeatures dpf; memset(&dpf,0,sizeof dpf);
-    dpf.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES;
-    VkPhysicalDeviceShaderFloat16Int8Features f16i8; memset(&f16i8,0,sizeof f16i8);
-    f16i8.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES;
-    f2.pNext=&f16i8; f16i8.pNext=&dpf;
-    /* NOTE: this trimmed vulkan_core.h typedefs the fn as returning void,
-     * so we don't capture its VkResult. Output is written into dpf/f2 via
-     * the pointer; a failed call leaves fields zeroed -> idp off (safe). */
-    g_vkGetPhysicalDeviceFeatures2(g_pd,&f2);
-    int idp_supported = (int)dpf.shaderIntegerDotProduct;
-    int int8_supported = (int)f16i8.shaderInt8;
-    dpf.shaderIntegerDotProduct = idp_supported ? VK_TRUE : VK_FALSE;
-    f16i8.shaderInt8 = int8_supported ? VK_TRUE : VK_FALSE;
-
-    VkDeviceCreateInfo dci; memset(&dci,0,sizeof dci);
-    dci.sType=VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO; dci.queueCreateInfoCount=1;
-    dci.pQueueCreateInfos=&dq; dci.pNext=&f2;
-    CHECK(g_vkCreateDevice(g_pd,&dci,NULL,&g_dev),"vkCreateDevice");
-    g_vkGetDeviceQueue(g_dev,g_qf,0,&g_q);
-
-    /* shader module from embedded SPIR-V */
-    VkShaderModuleCreateInfo smi; memset(&smi,0,sizeof smi);
-    smi.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    smi.codeSize=GEMV_SPV_LEN; smi.pCode=(const uint32_t*)GEMV_SPV;
-    CHECK(g_vkCreateShaderModule(g_dev,&smi,NULL,&g_sm),"vkCreateShaderModule");
-
-    /* descriptor set: 5 storage buffers (meta,x,w,scale,y) */
-    VkDescriptorSetLayoutBinding bnd[5];
-    for(int b=0;b<5;b++){ memset(&bnd[b],0,sizeof bnd[b]); bnd[b].binding=b;
-        bnd[b].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; bnd[b].descriptorCount=1;
-        bnd[b].stageFlags=VK_SHADER_STAGE_COMPUTE_BIT; }
-    VkDescriptorSetLayoutCreateInfo dlci; memset(&dlci,0,sizeof dlci);
-    dlci.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; dlci.bindingCount=5; dlci.pBindings=bnd;
-    CHECK(g_vkCreateDescriptorSetLayout(g_dev,&dlci,NULL,&g_dsl),"desc layout");
-
-    VkDescriptorPoolSize dps; dps.type=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; dps.descriptorCount=5;
-    VkDescriptorPoolCreateInfo dpci; memset(&dpci,0,sizeof dpci);
-    dpci.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO; dpci.maxSets=1;
-    dpci.poolSizeCount=1; dpci.pPoolSizes=&dps;
-    CHECK(g_vkCreateDescriptorPool(g_dev,&dpci,NULL,&g_dpool),"desc pool");
-
-    VkDescriptorSetAllocateInfo dsai; memset(&dsai,0,sizeof dsai);
-    dsai.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO; dsai.descriptorPool=g_dpool;
-    dsai.descriptorSetCount=1; dsai.pSetLayouts=&g_dsl;
-    CHECK(g_vkAllocateDescriptorSets(g_dev,&dsai,&g_ds),"desc alloc");
-
-    /* NOTE: descriptor buffers (g_w/g_s/g_x/g_y/g_meta) are bound AFTER they
-     * are created below (see "bind descriptor buffers" block) — binding here
-     * would attach VK_NULL_HANDLE since the buffers don't exist yet. */
-
-    /* pipeline */
-    VkPipelineShaderStageCreateInfo stage; memset(&stage,0,sizeof stage);
-    stage.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stage.stage=VK_SHADER_STAGE_COMPUTE_BIT; stage.module=g_sm; stage.pName="main";
-    VkPipelineLayoutCreateInfo plci; memset(&plci,0,sizeof plci);
-    plci.sType=VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO; plci.setLayoutCount=1; plci.pSetLayouts=&g_dsl;
-    CHECK(g_vkCreatePipelineLayout(g_dev,&plci,NULL,&g_pl),"pipeline layout");
-    VkComputePipelineCreateInfo cpci; memset(&cpci,0,sizeof cpci);
-    cpci.sType=VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO; cpci.stage=stage; cpci.layout=g_pl;
-    CHECK(g_vkCreateComputePipelines(g_dev,VK_NULL_HANDLE,1,&cpci,NULL,&g_pipe),"compute pipeline");
-
-    /* int4 path (Shader-only, unpack nibbles + float GEMV). Created only when
-     * the model weights are int4. Needs no special features, so it works on
-     * every Vulkan driver -- including AMD 0x800184 whose int8/dot-product
-     * compiler path segfaults. */
-    if(g_weight_bits==4){
-        VkShaderModuleCreateInfo i4smi; memset(&i4smi,0,sizeof i4smi);
-        i4smi.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-        i4smi.codeSize=GEMV_INT4_SPV_LEN; i4smi.pCode=(const uint32_t*)GEMV_INT4_SPV;
-        VkResult i4r = g_vkCreateShaderModule(g_dev,&i4smi,NULL,&g_sm_int4);
-        if(i4r==VK_SUCCESS){
-            VkPipelineShaderStageCreateInfo i4stg; memset(&i4stg,0,sizeof i4stg);
-            i4stg.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-            i4stg.stage=VK_SHADER_STAGE_COMPUTE_BIT; i4stg.module=g_sm_int4; i4stg.pName="main";
-            VkComputePipelineCreateInfo i4cpi; memset(&i4cpi,0,sizeof i4cpi);
-            i4cpi.sType=VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO; i4cpi.stage=i4stg; i4cpi.layout=g_pl;
-            VkResult i4pr = g_vkCreateComputePipelines(g_dev,VK_NULL_HANDLE,1,&i4cpi,NULL,&g_pipe_int4);
-            if(i4pr==VK_SUCCESS){ g_use_int4=1; }
-            else {
-#ifdef VG_SELFTEST
-                fprintf(stderr,"[vg] int4 pipeline create FAILED (code %d)\n", (int)i4pr);
-#endif
-                if(g_sm_int4){ g_vkDestroyShaderModule(g_dev,g_sm_int4,NULL); g_sm_int4=VK_NULL_HANDLE; }
+        typedef struct { VkPhysicalDevice pd; VkPhysicalDeviceProperties props;
+                         int idp, int8s; int rank; } Cand;
+        Cand *cand=calloc(ndev,sizeof(Cand)); int ncand=0;
+        for(uint32_t i=0;i<ndev;i++){
+            VkPhysicalDeviceProperties pp; memset(&pp,0,sizeof pp);
+            g_vkGetPhysicalDeviceProperties(pds[i],&pp);
+            int rank;
+            switch((int)pp.deviceType){
+                case 2 /*DISCRETE*/:   rank=0; break;
+                case 1 /*INTEGRATED*/: rank=1; break;
+                case 3 /*VIRTUAL*/:    rank=2; break;
+                default:               rank=99; break;  /* CPU/other: skip */
             }
-        } else {
-#ifdef VG_SELFTEST
-            fprintf(stderr,"[vg] int4 shader module create FAILED (code %d)\n", (int)i4r);
-#endif
+            if(rank==99) continue;
+            /* feature probe (idp/int8) per device */
+            VkPhysicalDeviceFeatures2 f2; memset(&f2,0,sizeof f2);
+            f2.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            VkPhysicalDeviceShaderIntegerDotProductFeatures dpf; memset(&dpf,0,sizeof dpf);
+            dpf.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES;
+            VkPhysicalDeviceShaderFloat16Int8Features f16i8; memset(&f16i8,0,sizeof f16i8);
+            f16i8.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES;
+            f2.pNext=&f16i8; f16i8.pNext=&dpf;
+            g_vkGetPhysicalDeviceFeatures2(pds[i],&f2);
+            cand[ncand].pd=pds[i]; cand[ncand].props=pp;
+            cand[ncand].idp=(int)dpf.shaderIntegerDotProduct;
+            cand[ncand].int8s=(int)f16i8.shaderInt8;
+            cand[ncand].rank=rank; ncand++;
         }
-    }
+        free(pds);
+        if(ncand==0){ fprintf(stderr,"[vg] no usable (non-CPU) Vulkan device\n"); free(cand); goto fail_inst; }
+        /* stable sort by rank (insertion, ncand is tiny) */
+        for(int i=1;i<ncand;i++){ Cand t=cand[i]; int j=i-1;
+            while(j>=0 && cand[j].rank>t.rank){ cand[j+1]=cand[j]; j--; } cand[j+1]=t; }
 
-    /* integer dot-product path (OpSDotKHR) when the device supports it, the
-     * int8 types it needs (shaderInt8) are available, AND the driver is
-     * known-good.  AMD driver 0x800184 (Radeon 780M, early RDNA3) crashes the
-     * pipeline compiler on ANY shader that computes with 8-bit integers (both
-     * plain int8 ALU and OpSDotKHR) — a driver bug. That segfault can't be
-     * caught in-process, so we avoid invoking the compiler on it and fall
-     * back to the verified float path.  Override with env COLIBRI_IDP:
-     * 0 = force off, 1 = force on (accepts the crash risk on known-bad
-     * drivers). */
-    int idp_blacklisted = (g_vendor_id==0x1002u && g_driver_ver==0x800184u);
-    const char *idp_env = getenv("COLIBRI_IDP");
-    int idp_force_on  = (idp_env && idp_env[0]=='1');
-    int idp_force_off = (idp_env && idp_env[0]=='0');
-    int want_idp = 0;
-    if(g_weight_bits!=4 && idp_supported && int8_supported && !idp_force_off){
-        if(idp_force_on) want_idp = 1;
-        else if(!idp_blacklisted) want_idp = 1;
-    }
-#ifdef VG_SELFTEST
-    fprintf(stderr,"[vg] idp_supported=%d vendor=0x%X driver=0x%X blacklisted=%d\n",
-            idp_supported, g_vendor_id, g_driver_ver, idp_blacklisted);
-#endif
-    if(!idp_supported){
-        fprintf(stderr,"[vg] OpSDotKHR unsupported by device -> float path\n");
-    } else if(idp_force_off){
-        fprintf(stderr,"[vg] COLIBRI_IDP=0 -> int8 dot-product disabled (float path)\n");
-    } else if(idp_blacklisted && !idp_force_on){
-        fprintf(stderr,"[vg] int8 dot-product (OpSDotKHR) DISABLED: AMD driver 0x%X has a "
-                "compiler bug that crashes on OpSDotKHR. Update the AMD graphics driver to "
-                "enable GPU int8 GEMV. Using float path.\n", g_driver_ver);
-    }
-    if(want_idp){
-#ifdef VG_SELFTEST
-        fprintf(stderr,"[vg] creating IDP shader module...\n");
-#endif
-        VkShaderModuleCreateInfo ismi; memset(&ismi,0,sizeof ismi);
-        ismi.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-        ismi.codeSize=GEMV_IDP_SPV_LEN; ismi.pCode=(const uint32_t*)GEMV_IDP_SPV;
-        VkResult smr = g_vkCreateShaderModule(g_dev,&ismi,NULL,&g_sm_idp);
-        if(smr==VK_SUCCESS){
-#ifdef VG_SELFTEST
-            fprintf(stderr,"[vg] IDP shader module OK; creating pipeline...\n");
-#endif
-            VkPipelineShaderStageCreateInfo istg; memset(&istg,0,sizeof istg);
-            istg.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-            istg.stage=VK_SHADER_STAGE_COMPUTE_BIT; istg.module=g_sm_idp; istg.pName="main";
-            VkComputePipelineCreateInfo icpi; memset(&icpi,0,sizeof icpi);
-            icpi.sType=VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO; icpi.stage=istg; icpi.layout=g_pl;
-            VkResult pr = g_vkCreateComputePipelines(g_dev,VK_NULL_HANDLE,1,&icpi,NULL,&g_pipe_idp);
-            if(pr==VK_SUCCESS){
-                g_use_idp=1;
-#ifdef VG_SELFTEST
-                fprintf(stderr,"[vg] IDP pipeline OK (g_use_idp=1)\n");
-#endif
+        int n_best_rank=0; for(int i=0;i<ncand;i++) if(cand[i].rank==cand[0].rank) n_best_rank++;
+        int want = n_best_rank;                          /* default: all best-rank GPUs */
+        const char *ge=getenv("COLIBRI_GPUS");
+        if(ge && atoi(ge)>0) want=atoi(ge);
+        if(want>ncand) want=ncand;
+        if(want>VG_MAX_DEV) want=VG_MAX_DEV;
+
+        /* IDP policy: only if every selected device supports it (keeps one
+         * uniform compute path). AMD 0x800184 blacklist as before. */
+        int all_idp=1;
+        for(int i=0;i<want;i++){
+            int black = (cand[i].props.vendorID==0x1002u && cand[i].props.driverVersion==0x800184u);
+            const char *idp_env=getenv("COLIBRI_IDP");
+            int force_on=(idp_env&&idp_env[0]=='1'), force_off=(idp_env&&idp_env[0]=='0');
+            int ok = cand[i].idp && cand[i].int8s && !force_off && (!black || force_on);
+            if(!ok) all_idp=0;
+        }
+
+        g_ndev=0;
+        for(int i=0;i<want;i++){
+            VgDev *dv=&g_d[g_ndev];
+            if(vg_dev_init(dv,cand[i].pd,cand[i].props.deviceName,
+                           cand[i].props.vendorID,cand[i].props.driverVersion,
+                           (g_weight_bits!=4)&&all_idp?cand[i].idp:0,
+                           (g_weight_bits!=4)&&all_idp?cand[i].int8s:0)==0){
+                fprintf(stderr,"[vg] device %d: %s (vendor 0x%X, type %d)\n",
+                        g_ndev, dv->name, dv->vendor_id, (int)cand[i].props.deviceType);
+                g_ndev++;
             } else {
-#ifdef VG_SELFTEST
-                fprintf(stderr,"[vg] IDP pipeline create FAILED (code %d)\n", (int)pr);
-#endif
-                if(g_sm_idp){ g_vkDestroyShaderModule(g_dev,g_sm_idp,NULL); g_sm_idp=VK_NULL_HANDLE; }
+                fprintf(stderr,"[vg] device init failed for %s -> skipped\n",
+                        cand[i].props.deviceName);
             }
-        } else {
-#ifdef VG_SELFTEST
-            fprintf(stderr,"[vg] IDP shader module create FAILED (code %d)\n", (int)smr);
-#endif
         }
+        free(cand);
+        if(g_ndev==0){ fprintf(stderr,"[vg] all device inits failed\n"); goto fail_inst; }
     }
 
-    /* command pool + buffer */
-    VkCommandPoolCreateInfo cp2; memset(&cp2,0,sizeof cp2);
-    cp2.sType=VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO; cp2.queueFamilyIndex=g_qf;
-    CHECK(g_vkCreateCommandPool(g_dev,&cp2,NULL,&g_cpool),"cmd pool");
-    VkCommandBufferAllocateInfo cbai; memset(&cbai,0,sizeof cbai);
-    cbai.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO; cbai.commandPool=g_cpool;
-    cbai.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY; cbai.commandBufferCount=1;
-    CHECK(g_vkAllocateCommandBuffers(g_dev,&cbai,&g_cmd),"cmd alloc");
-
-    /* persistent buffers (host-visible coherent).
-     *  - g_w: cached int8 weights, nslots * slot_wbytes
-     *  - g_s: cached scales (f32), nslots * slot_sfloats
-     *  - g_x: transient inputs (xs + per-expert gact)
-     *  - g_y: transient outputs
-     *  - g_meta: transient per-matrix metadata */
-    {
-        VkDeviceSize wsz=(VkDeviceSize)g_nslots*g_slot_wbytes;
-        if(wsz==0) wsz=16;
-        CHECK(vg_create_buf(wsz, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT, &g_w),"buf w");
-        VkDeviceSize ssz=(VkDeviceSize)g_nslots*g_slot_sfloats*sizeof(float);
-        if(ssz==0) ssz=16;
-        CHECK(vg_create_buf(ssz, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT, &g_s),"buf s");
-        VkDeviceSize xsz=(VkDeviceSize)(g_hidden + g_topk*g_inter + 16)*sizeof(float);
-        CHECK(vg_create_buf(xsz, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT, &g_x),"buf x");
-        VkDeviceSize ysz=(VkDeviceSize)(g_topk*g_hidden + 16)*sizeof(float);
-        CHECK(vg_create_buf(ysz, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT, &g_y),"buf y");
-        VkDeviceSize msz=(VkDeviceSize)(1 + 6*2*g_topk + 16)*sizeof(uint32_t);
-        CHECK(vg_create_buf(msz, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT, &g_meta),"buf meta");
-    }
-
-    /* bind descriptor buffers (now that they exist) */
-    {
-        VkBuffer bufs[5]={g_meta.buf,g_x.buf,g_w.buf,g_s.buf,g_y.buf};
-        VkDescriptorBufferInfo dbi[5];
-        VkWriteDescriptorSet wds[5];
-        for(int b=0;b<5;b++){ dbi[b].buffer=bufs[b]; dbi[b].offset=0; dbi[b].range=VK_WHOLE_SIZE;
-            memset(&wds[b],0,sizeof wds[b]); wds[b].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            wds[b].dstSet=g_ds; wds[b].dstBinding=b; wds[b].descriptorCount=1;
-            wds[b].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; wds[b].pBufferInfo=&dbi[b]; }
-        g_vkUpdateDescriptorSets(g_dev,5,wds,0,NULL);
-    }
-
-    g_slot=calloc((size_t)g_nslots, sizeof(GSlot));
-    if(!g_slot){ fprintf(stderr,"[vg] OOM slot table\n"); goto fail; }
+    /* uniform path flags across devices */
+    g_use_int4 = (g_weight_bits==4);            /* devices without int4 were dropped */
+    g_use_idp  = 1;
+    for(int d=0;d<g_ndev;d++) if(!g_d[d].pipe_idp) g_use_idp=0;
+    if(g_weight_bits==4) g_use_idp=0;
+    if(g_weight_bits!=4 && !g_use_idp)
+        fprintf(stderr,"[vg] int8 dot-product path off (unsupported/blacklisted on >=1 device) -> float path\n");
 
     g_vg_ok=1;
-    fprintf(stderr,"[vg] Vulkan GEMV backend ready: %d layers x %d experts, weights %.1f MB%s\n",
-            g_nlayers, g_nslots, (double)((uint64_t)g_nslots*g_slot_wbytes)/(1024.0*1024.0),
+    fprintf(stderr,"[vg] Vulkan GEMV backend ready: %d device(s), %d layers x %d slots, weights %.1f MB/device%s\n",
+            g_ndev, g_nlayers, g_nslots,
+            (double)((uint64_t)g_nslots*g_slot_wbytes)/(1024.0*1024.0),
             g_use_int4 ? " [int4 unpack+float GEMV ACTIVE]"
             : g_use_idp ? " [int8 dot-product OpSDotKHR ACTIVE]" : " [float path]");
     return 0;
 
-fail:
+fail_inst:
     vg_shutdown();
     return -1;
 }
@@ -469,98 +532,86 @@ int vg_ready(void){ return g_vg_ok; }
 int vg_use_int4(void){ return g_use_int4; }
 
 void vg_shutdown(void){
-    if(g_slot){ free(g_slot); g_slot=NULL; }
-    if(g_cmd)  g_vkFreeCommandBuffers(g_dev,g_cpool,1,&g_cmd);
-    if(g_cpool)g_vkDestroyCommandPool(g_dev,g_cpool,NULL);
-    if(g_pipe) g_vkDestroyPipeline(g_dev,g_pipe,NULL);
-    if(g_pipe_idp) g_vkDestroyPipeline(g_dev,g_pipe_idp,NULL);
-    if(g_pipe_int4) g_vkDestroyPipeline(g_dev,g_pipe_int4,NULL);
-    if(g_sm_idp) g_vkDestroyShaderModule(g_dev,g_sm_idp,NULL);
-    if(g_sm_int4) g_vkDestroyShaderModule(g_dev,g_sm_int4,NULL);
-    if(g_pl)   g_vkDestroyPipelineLayout(g_dev,g_pl,NULL);
-    if(g_dpool)g_vkDestroyDescriptorPool(g_dev,g_dpool,NULL);
-    if(g_dsl)  g_vkDestroyDescriptorSetLayout(g_dev,g_dsl,NULL);
-    if(g_sm)   g_vkDestroyShaderModule(g_dev,g_sm,NULL);
-    if(g_y.buf){ g_vkDestroyBuffer(g_dev,g_y.buf,NULL); g_vkFreeMemory(g_dev,g_y.mem,NULL); }
-    if(g_x.buf){ g_vkDestroyBuffer(g_dev,g_x.buf,NULL); g_vkFreeMemory(g_dev,g_x.mem,NULL); }
-    if(g_s.buf){ g_vkDestroyBuffer(g_dev,g_s.buf,NULL); g_vkFreeMemory(g_dev,g_s.mem,NULL); }
-    if(g_w.buf){ g_vkDestroyBuffer(g_dev,g_w.buf,NULL); g_vkFreeMemory(g_dev,g_w.mem,NULL); }
-    if(g_meta.buf){ g_vkDestroyBuffer(g_dev,g_meta.buf,NULL); g_vkFreeMemory(g_dev,g_meta.mem,NULL); }
-    if(g_dev)  g_vkDestroyDevice(g_dev,NULL);
-    if(g_inst) g_vkDestroyInstance(g_inst,NULL);
-    if(g_lib)  dl_close(g_lib);
-    g_lib=NULL; g_vg_ok=0; g_dev=VK_NULL_HANDLE; g_inst=VK_NULL_HANDLE;
-    memset(&g_w,0,sizeof g_w); memset(&g_s,0,sizeof g_s);
-    memset(&g_x,0,sizeof g_x); memset(&g_y,0,sizeof g_y); memset(&g_meta,0,sizeof g_meta);
+    for(int d=0;d<VG_MAX_DEV;d++) vg_dev_shutdown(&g_d[d]);
+    g_ndev=0;
+    if(g_inst){ g_vkDestroyInstance(g_inst,NULL); g_inst=VK_NULL_HANDLE; }
+    if(g_lib){ dl_close(g_lib); g_lib=NULL; }
+    g_vg_ok=0;
 }
 
-/* Upload one expert's weights/scales into GPU slot (layer*cap + li). */
+/* Upload one expert's weights/scales into the OWNING device's slot
+ * (layer*cap + li). 64-bit offsets (see header comment). */
 void vg_expert_loaded(int layer, int eid, int li,
                       const int8_t *g, const int8_t *u, const int8_t *d,
                       const float *gs, const float *us, const float *ds){
     if(!g_vg_ok) return;
     int idx = layer*g_cap + li;
     if(idx<0 || idx>=g_nslots) return;
-    GSlot *s=&g_slot[idx];
-    uint32_t wbase = (uint32_t)idx * g_slot_wbytes;          /* bytes */
-    uint32_t sbase = (uint32_t)idx * g_slot_sfloats;          /* floats */
+    int owner=vg_owner(eid);
+    VgDev *dv=&g_d[owner];
+    /* the CPU LRU reassigned this slot: stale entries for the previous eid may
+     * survive on other devices — invalidate them so the owner scan is unique */
+    for(int od=0;od<g_ndev;od++) if(od!=owner) g_d[od].slot[idx].valid=0;
+    GSlot *s=&dv->slot[idx];
+    uint64_t wbase = (uint64_t)idx * g_slot_wbytes;          /* bytes */
+    uint64_t sbase = (uint64_t)idx * g_slot_sfloats;          /* floats */
     uint32_t D=(uint32_t)g_hidden, Ih=(uint32_t)g_inter;
-    uint32_t gbytes = D*Ih*sizeof(int8_t);
-    /* weights (raw int8 bytes; shader unpacks 4-per-uint) */
-    memcpy((uint8_t*)g_w.ptr + wbase,            g,  gbytes);
-    memcpy((uint8_t*)g_w.ptr + wbase + D*Ih,     u,  gbytes);
-    memcpy((uint8_t*)g_w.ptr + wbase + 2*D*Ih,   d,  gbytes);
-    /* scales (f32) */
-    memcpy((float*)g_s.ptr + sbase,          gs, Ih*sizeof(float));
-    memcpy((float*)g_s.ptr + sbase + Ih,     us, Ih*sizeof(float));
-    memcpy((float*)g_s.ptr + sbase + 2*Ih,   ds, D *sizeof(float));
-    vg_flush(&g_w, wbase, 3u*gbytes);
-    vg_flush(&g_s, (VkDeviceSize)sbase*sizeof(float), (VkDeviceSize)(2u*Ih + D)*sizeof(float));
+    uint64_t gbytes = (uint64_t)D*Ih*sizeof(int8_t);
+    memcpy((uint8_t*)dv->w.ptr + wbase,              g,  gbytes);
+    memcpy((uint8_t*)dv->w.ptr + wbase + gbytes,     u,  gbytes);
+    memcpy((uint8_t*)dv->w.ptr + wbase + 2*gbytes,   d,  gbytes);
+    memcpy((float*)dv->s.ptr + sbase,          gs, Ih*sizeof(float));
+    memcpy((float*)dv->s.ptr + sbase + Ih,     us, Ih*sizeof(float));
+    memcpy((float*)dv->s.ptr + sbase + 2*Ih,   ds, D *sizeof(float));
+    vg_flush(dv,&dv->w, wbase, 3u*gbytes);
+    vg_flush(dv,&dv->s, (VkDeviceSize)(sbase*sizeof(float)), (VkDeviceSize)(2u*Ih + D)*sizeof(float));
 
-    s->woff_g = wbase/4u;        s->woff_u = (wbase + D*Ih)/4u;      s->woff_d = (wbase + 2*D*Ih)/4u;
-    s->soff_g = sbase;           s->soff_u = sbase + Ih;             s->soff_d = sbase + 2*Ih;
+    s->woff_g = (uint32_t)(wbase/4u);
+    s->woff_u = (uint32_t)((wbase + gbytes)/4u);
+    s->woff_d = (uint32_t)((wbase + 2*gbytes)/4u);
+    s->soff_g = (uint32_t)sbase; s->soff_u = (uint32_t)(sbase + Ih); s->soff_d = (uint32_t)(sbase + 2*Ih);
     s->layer=layer; s->eid=eid; s->valid=1; s->used=++g_tick;
 }
 
-/* Called from the engine's forward thread, once per (layer, slot) before a
- * dispatch. Mirrors the CPU LRU: if the GPU slot already holds this eid we just
- * refresh its LRU stamp; otherwise we upload the int8 weights + scales. */
 void vg_expert_ensure(int layer, int li, int eid,
                       const int8_t *g, const int8_t *u, const int8_t *d,
                       const float *gs, const float *us, const float *ds){
     if(!g_vg_ok) return;
     int idx = layer*g_cap + li;
     if(idx<0 || idx>=g_nslots) return;
-    GSlot *s=&g_slot[idx];
+    GSlot *s=&g_d[vg_owner(eid)].slot[idx];
     if(s->valid && s->eid==eid){ s->used=++g_tick; return; }   /* already cached */
     vg_expert_loaded(layer, eid, li, g, u, d, gs, us, ds);
 }
 
-/* int4 variant: weights packed 2 nibbles/byte. Scales/activation semantics
- * identical to the int8 path. Only valid when cfg.weight_bits==4. */
+/* int4 variant: weights packed 2 nibbles/byte. */
 void vg_expert_loaded_int4(int layer, int eid, int li,
                            const uint8_t *g, const uint8_t *u, const uint8_t *d,
                            const float *gs, const float *us, const float *ds){
     if(!g_vg_ok) return;
     int idx = layer*g_cap + li;
     if(idx<0 || idx>=g_nslots) return;
-    GSlot *s=&g_slot[idx];
-    uint32_t wbase = (uint32_t)idx * g_slot_wbytes;          /* bytes */
-    uint32_t sbase = (uint32_t)idx * g_slot_sfloats;          /* floats */
+    int owner=vg_owner(eid);
+    VgDev *dv=&g_d[owner];
+    for(int od=0;od<g_ndev;od++) if(od!=owner) g_d[od].slot[idx].valid=0;
+    GSlot *s=&dv->slot[idx];
+    uint64_t wbase = (uint64_t)idx * g_slot_wbytes;          /* bytes */
+    uint64_t sbase = (uint64_t)idx * g_slot_sfloats;          /* floats */
     uint32_t D=(uint32_t)g_hidden, Ih=(uint32_t)g_inter;
-    uint32_t gbytes = D*Ih/2u;                                /* int4: half of int8 */
-    memcpy((uint8_t*)g_w.ptr + wbase,            g,  gbytes);
-    memcpy((uint8_t*)g_w.ptr + wbase + D*Ih/2u,  u,  gbytes);
-    memcpy((uint8_t*)g_w.ptr + wbase + D*Ih,     d,  gbytes);
-    /* scales (f32) -- same layout as int8 */
-    memcpy((float*)g_s.ptr + sbase,          gs, Ih*sizeof(float));
-    memcpy((float*)g_s.ptr + sbase + Ih,     us, Ih*sizeof(float));
-    memcpy((float*)g_s.ptr + sbase + 2*Ih,   ds, D *sizeof(float));
-    vg_flush(&g_w, wbase, 3u*gbytes);
-    vg_flush(&g_s, (VkDeviceSize)sbase*sizeof(float), (VkDeviceSize)(2u*Ih + D)*sizeof(float));
+    uint64_t gbytes = (uint64_t)D*Ih/2u;                      /* int4: half of int8 */
+    memcpy((uint8_t*)dv->w.ptr + wbase,              g,  gbytes);
+    memcpy((uint8_t*)dv->w.ptr + wbase + gbytes,     u,  gbytes);
+    memcpy((uint8_t*)dv->w.ptr + wbase + 2*gbytes,   d,  gbytes);
+    memcpy((float*)dv->s.ptr + sbase,          gs, Ih*sizeof(float));
+    memcpy((float*)dv->s.ptr + sbase + Ih,     us, Ih*sizeof(float));
+    memcpy((float*)dv->s.ptr + sbase + 2*Ih,   ds, D *sizeof(float));
+    vg_flush(dv,&dv->w, wbase, 3u*gbytes);
+    vg_flush(dv,&dv->s, (VkDeviceSize)(sbase*sizeof(float)), (VkDeviceSize)(2u*Ih + D)*sizeof(float));
 
-    s->woff_g = wbase/4u;          s->woff_u = (wbase + D*Ih/2u)/4u;  s->woff_d = (wbase + D*Ih)/4u;
-    s->soff_g = sbase;             s->soff_u = sbase + Ih;           s->soff_d = sbase + 2*Ih;
+    s->woff_g = (uint32_t)(wbase/4u);
+    s->woff_u = (uint32_t)((wbase + gbytes)/4u);
+    s->woff_d = (uint32_t)((wbase + 2*gbytes)/4u);
+    s->soff_g = (uint32_t)sbase; s->soff_u = (uint32_t)(sbase + Ih); s->soff_d = (uint32_t)(sbase + 2*Ih);
     s->layer=layer; s->eid=eid; s->valid=1; s->used=++g_tick;
 }
 
@@ -570,14 +621,13 @@ void vg_expert_ensure_int4(int layer, int li, int eid,
     if(!g_vg_ok) return;
     int idx = layer*g_cap + li;
     if(idx<0 || idx>=g_nslots) return;
-    GSlot *s=&g_slot[idx];
+    GSlot *s=&g_d[vg_owner(eid)].slot[idx];
     if(s->valid && s->eid==eid){ s->used=++g_tick; return; }
     vg_expert_loaded_int4(layer, eid, li, g, u, d, gs, us, ds);
 }
 
 /* Quantize a float vector to packed int8 (4 int8/uint32, LE) with a symmetric
- * per-vector scale (absmax/127). Returns the scale. Used by the integer
- * dot-product path (activations become int8 so OpSDotKHR can be used). */
+ * per-vector scale (absmax/127). Returns the scale. */
 static float vg_quantize_pack(const float *x, int n, uint32_t *dst_packed){
     float amax=0.0f;
     for(int i=0;i<n;i++){ float a=x[i]<0?-x[i]:x[i]; if(a>amax) amax=a; }
@@ -596,182 +646,218 @@ static float vg_quantize_pack(const float *x, int n, uint32_t *dst_packed){
     return s;
 }
 static uint32_t vg_f2u(float f){ uint32_t u; memcpy(&u,&f,4); return u; }
-static int vg_dispatch(uint32_t nmat, uint32_t stride, const uint32_t *meta, uint32_t total){
+
+/* Record + submit one dispatch on a device WITHOUT waiting; call vg_wait()
+ * after all devices were submitted so they overlap (multi-GPU extension). */
+static int vg_dispatch_submit(VgDev *dv, uint32_t nmat, uint32_t stride,
+                              const uint32_t *meta, uint32_t total){
     uint32_t groups=(total+63u)/64u;
     uint32_t nwords=1u+stride*nmat;
-    /* meta buffer */
-    memcpy(g_meta.ptr, meta, (size_t)nwords*sizeof(uint32_t));
-    vg_flush(&g_meta, 0, (VkDeviceSize)nwords*sizeof(uint32_t));
+    memcpy(dv->meta.ptr, meta, (size_t)nwords*sizeof(uint32_t));
+    vg_flush(dv,&dv->meta, 0, (VkDeviceSize)nwords*sizeof(uint32_t));
 
-    VkPipeline pipe = g_use_int4 ? g_pipe_int4 : (g_use_idp ? g_pipe_idp : g_pipe);
+    VkPipeline pipe = g_use_int4 ? dv->pipe_int4 : (g_use_idp ? dv->pipe_idp : dv->pipe);
     VkCommandBufferBeginInfo bbi; memset(&bbi,0,sizeof bbi);
     bbi.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    if(g_vkResetCommandBuffer(g_cmd,0)!=VK_SUCCESS){ fprintf(stderr,"[vg-dbg] ResetCmdBuffer FAIL\n"); return -1; }
-    if(g_vkBeginCommandBuffer(g_cmd,&bbi)!=VK_SUCCESS){ fprintf(stderr,"[vg-dbg] BeginCmdBuffer FAIL\n"); return -1; }
-    g_vkCmdBindPipeline(g_cmd,VK_PIPELINE_BIND_POINT_COMPUTE,pipe);
-    g_vkCmdBindDescriptorSets(g_cmd,VK_PIPELINE_BIND_POINT_COMPUTE,g_pl,0,1,&g_ds,0,NULL);
-    g_vkCmdDispatch(g_cmd,groups,1,1);
-    if(g_vkEndCommandBuffer(g_cmd)!=VK_SUCCESS){ fprintf(stderr,"[vg-dbg] EndCmdBuffer FAIL\n"); return -1; }
+    if(g_vkResetCommandBuffer(dv->cmd,0)!=VK_SUCCESS){ fprintf(stderr,"[vg-dbg] ResetCmdBuffer FAIL\n"); return -1; }
+    if(g_vkBeginCommandBuffer(dv->cmd,&bbi)!=VK_SUCCESS){ fprintf(stderr,"[vg-dbg] BeginCmdBuffer FAIL\n"); return -1; }
+    g_vkCmdBindPipeline(dv->cmd,VK_PIPELINE_BIND_POINT_COMPUTE,pipe);
+    g_vkCmdBindDescriptorSets(dv->cmd,VK_PIPELINE_BIND_POINT_COMPUTE,dv->pl,0,1,&dv->ds,0,NULL);
+    g_vkCmdDispatch(dv->cmd,groups,1,1);
+    if(g_vkEndCommandBuffer(dv->cmd)!=VK_SUCCESS){ fprintf(stderr,"[vg-dbg] EndCmdBuffer FAIL\n"); return -1; }
     VkSubmitInfo si; memset(&si,0,sizeof si);
-    si.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO; si.commandBufferCount=1; si.pCommandBuffers=&g_cmd;
-    if(g_vkQueueSubmit(g_q,1,&si,VK_NULL_HANDLE)!=VK_SUCCESS){ fprintf(stderr,"[vg-dbg] QueueSubmit FAIL\n"); return -1; }
-    if(g_vkQueueWaitIdle(g_q)!=VK_SUCCESS){ fprintf(stderr,"[vg-dbg] QueueWaitIdle FAIL\n"); return -1; }
+    si.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO; si.commandBufferCount=1; si.pCommandBuffers=&dv->cmd;
+    if(g_vkQueueSubmit(dv->q,1,&si,VK_NULL_HANDLE)!=VK_SUCCESS){ fprintf(stderr,"[vg-dbg] QueueSubmit FAIL\n"); return -1; }
+    return 0;
+}
+static int vg_wait(VgDev *dv){
+    if(g_vkQueueWaitIdle(dv->q)!=VK_SUCCESS){ fprintf(stderr,"[vg-dbg] QueueWaitIdle FAIL\n"); return -1; }
     return 0;
 }
 
+/* Run one (token, layer) of the routed-expert forward across all devices.
+ * Experts are partitioned by owner (eid % g_ndev); each phase is submitted to
+ * every participating queue first and waited on together. */
 void vg_moe_run(int layer, int K, const int *handles, const float *val,
                 const float *xs, float *out){
+    (void)layer;
     if(!g_vg_ok) return;
+    if(K<=0 || K>VG_KMAX) return;
     const uint32_t D=(uint32_t)g_hidden, Ih=(uint32_t)g_inter;
-    uint32_t *meta=malloc((size_t)(1u+6u*2u*(uint32_t)K)*sizeof(uint32_t));
+    uint32_t *meta=malloc((size_t)(1u+6u*2u*(uint32_t)VG_KMAX)*sizeof(uint32_t));
     if(!meta) return;
-    float *y=(float*)g_y.ptr;
-    uint32_t *xq=(uint32_t*)g_x.ptr;   /* IDP: packed int8; float path aliases as float */
+
+    /* partition: kl[d] = global k-indices owned by device d (in call order) */
+    int kl[VG_MAX_DEV][VG_KMAX]; int Kl[VG_MAX_DEV];
+    for(int d=0;d<g_ndev;d++) Kl[d]=0;
+    for(int k=0;k<K;k++){
+        /* owner from the slot table: every device indexes the same global slot
+         * space, so look the eid up on each device (valid only on the owner). */
+        int owner=0;
+        if(g_ndev>1){
+            owner=-1;
+            for(int d=0;d<g_ndev;d++){
+                GSlot *s=&g_d[d].slot[handles[k]];
+                if(s->valid && vg_owner(s->eid)==d){ owner=d; break; }
+            }
+            if(owner<0){ free(meta); return; }  /* not uploaded -> let CPU path handle */
+        }
+        kl[owner][Kl[owner]++]=k;
+    }
 
     if(g_use_idp){
         /* ---- IDP path: activations quantized to packed int8, OpSDotKHR ---- */
-        /* Phase 1: gate + up, shared activation xs */
-        float s1 = vg_quantize_pack(xs, (int)D, xq);          /* at uint offset 0 */
-        vg_flush(&g_x, 0, (VkDeviceSize)(D/4u)*4u);
-        uint32_t nm1=(uint32_t)(2*K);
-        meta[0]=nm1;
-        for(int k=0;k<K;k++){
-            GSlot *s=&g_slot[handles[k]];
-            uint32_t m=(uint32_t)(2*k);
-            meta[1+6*m+0]=0;        meta[1+6*m+1]=s->woff_g; meta[1+6*m+2]=s->soff_g;
-            meta[1+6*m+3]=D/4u;      meta[1+6*m+4]=Ih;        meta[1+6*m+5]=vg_f2u(s1);
-            uint32_t m2=(uint32_t)(2*k+1);
-            meta[1+6*m2+0]=0;        meta[1+6*m2+1]=s->woff_u; meta[1+6*m2+2]=s->soff_u;
-            meta[1+6*m2+3]=D/4u;     meta[1+6*m2+4]=Ih;       meta[1+6*m2+5]=vg_f2u(s1);
+        /* Phase 1: gate + up, shared activation xs (same quantization on all
+         * devices so results match the single-device path bit-for-bit) */
+        uint32_t *xq_tmp=malloc(((size_t)D/4u+4)*sizeof(uint32_t));
+        if(!xq_tmp){ free(meta); return; }
+        float s1 = vg_quantize_pack(xs,(int)D,xq_tmp);
+        for(int d=0;d<g_ndev;d++){
+            if(!Kl[d]) continue;
+            VgDev *dv=&g_d[d];
+            memcpy(dv->x.ptr, xq_tmp, (size_t)(D/4u)*4u);
+            vg_flush(dv,&dv->x, 0, (VkDeviceSize)(D/4u)*4u);
+            uint32_t nm1=(uint32_t)(2*Kl[d]);
+            meta[0]=nm1;
+            for(int lk=0;lk<Kl[d];lk++){
+                GSlot *s=&dv->slot[handles[kl[d][lk]]];
+                uint32_t m=(uint32_t)(2*lk);
+                meta[1+6*m+0]=0;        meta[1+6*m+1]=s->woff_g; meta[1+6*m+2]=s->soff_g;
+                meta[1+6*m+3]=D/4u;     meta[1+6*m+4]=Ih;        meta[1+6*m+5]=vg_f2u(s1);
+                uint32_t m2=(uint32_t)(2*lk+1);
+                meta[1+6*m2+0]=0;       meta[1+6*m2+1]=s->woff_u; meta[1+6*m2+2]=s->soff_u;
+                meta[1+6*m2+3]=D/4u;    meta[1+6*m2+4]=Ih;       meta[1+6*m2+5]=vg_f2u(s1);
+            }
+            if(vg_dispatch_submit(dv,nm1,6,meta,(uint32_t)(2*Kl[d])*Ih)!=0){ free(xq_tmp); free(meta); return; }
         }
-        uint32_t total1=(uint32_t)(2*K)*Ih;
-        if(vg_dispatch(nm1,6,meta,total1)!=0){ free(meta); return; }
-        vg_invalidate(&g_y,0,(VkDeviceSize)total1*sizeof(float));
-        /* read back gate/up, compute gact = silu(g)*u per expert */
         float *gact=malloc((size_t)K*Ih*sizeof(float));
-        for(int k=0;k<K;k++){
-            const float *gk=y+(size_t)(2*k)*Ih;
-            const float *uk=y+(size_t)(2*k+1)*Ih;
-            float *ak=gact+(size_t)k*Ih;
-            for(uint32_t i=0;i<Ih;i++){ float gv=gk[i]; ak[i]=gv/(1.0f+expf(-gv))*uk[i]; }
+        float *sks=malloc((size_t)K*sizeof(float));
+        if(!gact||!sks){ free(gact); free(sks); free(xq_tmp); free(meta); return; }
+        for(int d=0;d<g_ndev;d++){
+            if(!Kl[d]) continue;
+            VgDev *dv=&g_d[d];
+            vg_wait(dv);
+            vg_invalidate(dv,&dv->y,0,(VkDeviceSize)((uint32_t)(2*Kl[d])*Ih)*sizeof(float));
+            float *y=(float*)dv->y.ptr;
+            for(int lk=0;lk<Kl[d];lk++){
+                const float *gk=y+(size_t)(2*lk)*Ih;
+                const float *uk=y+(size_t)(2*lk+1)*Ih;
+                float *ak=gact+(size_t)kl[d][lk]*Ih;
+                for(uint32_t i=0;i<Ih;i++){ float gv=gk[i]; ak[i]=gv/(1.0f+expf(-gv))*uk[i]; }
+            }
         }
         /* Phase 2: down, per-expert activation (own scale) */
-        uint32_t nm2=(uint32_t)K;
-        meta[0]=nm2;
-        uint32_t xoff_k=0;
-        float *sks=malloc((size_t)K*sizeof(float));
-        for(int k=0;k<K;k++){
-            float sk=vg_quantize_pack(gact+(size_t)k*Ih, (int)Ih, xq + (size_t)k*(Ih/4u));
-            sks[k]=sk;
-            GSlot *s=&g_slot[handles[k]];
-            uint32_t m=(uint32_t)k;
-            meta[1+6*m+0]=xoff_k;    meta[1+6*m+1]=s->woff_d; meta[1+6*m+2]=s->soff_d;
-            meta[1+6*m+3]=Ih/4u;     meta[1+6*m+4]=D;         meta[1+6*m+5]=vg_f2u(sk);
-            xoff_k += Ih/4u;
+        for(int d=0;d<g_ndev;d++){
+            if(!Kl[d]) continue;
+            VgDev *dv=&g_d[d];
+            uint32_t *xq=(uint32_t*)dv->x.ptr;
+            uint32_t nm2=(uint32_t)Kl[d];
+            meta[0]=nm2;
+            uint32_t xoff_k=0;
+            for(int lk=0;lk<Kl[d];lk++){
+                int k=kl[d][lk];
+                float sk=vg_quantize_pack(gact+(size_t)k*Ih,(int)Ih, xq+(size_t)lk*(Ih/4u));
+                sks[k]=sk;
+                GSlot *s=&dv->slot[handles[k]];
+                uint32_t m=(uint32_t)lk;
+                meta[1+6*m+0]=xoff_k;   meta[1+6*m+1]=s->woff_d; meta[1+6*m+2]=s->soff_d;
+                meta[1+6*m+3]=Ih/4u;    meta[1+6*m+4]=D;         meta[1+6*m+5]=vg_f2u(sk);
+                xoff_k += Ih/4u;
+            }
+            vg_flush(dv,&dv->x,0,(VkDeviceSize)xoff_k*4u);
+            if(vg_dispatch_submit(dv,nm2,6,meta,(uint32_t)Kl[d]*D)!=0){ free(gact); free(sks); free(xq_tmp); free(meta); return; }
         }
-        vg_flush(&g_x,0,(VkDeviceSize)xoff_k*4u);
-        uint32_t total2=(uint32_t)K*D;
-        if(vg_dispatch(nm2,6,meta,total2)!=0){ free(meta); free(gact); free(sks); return; }
-        vg_invalidate(&g_y,0,(VkDeviceSize)total2*sizeof(float));
-        for(int k=0;k<K;k++){
-            const float *hk=y+(size_t)k*D; float w=val[k];
-            for(uint32_t d=0;d<D;d++) out[d]+= w*hk[d];
+        for(int d=0;d<g_ndev;d++){
+            if(!Kl[d]) continue;
+            VgDev *dv=&g_d[d];
+            vg_wait(dv);
+            vg_invalidate(dv,&dv->y,0,(VkDeviceSize)((uint32_t)Kl[d]*D)*sizeof(float));
+            float *y=(float*)dv->y.ptr;
+            for(int lk=0;lk<Kl[d];lk++){
+                int k=kl[d][lk];
+                const float *hk=y+(size_t)lk*D; float w=val[k];
+                for(uint32_t dd=0;dd<D;dd++) out[dd]+= w*hk[dd];
+            }
         }
-        free(meta); free(gact); free(sks);
+        free(gact); free(sks); free(xq_tmp); free(meta);
         return;
     }
 
-    /* ---- int4 path: unpack nibbles + float GEMV (Shader-only, AMD-safe) ---- */
-    if(g_use_int4){
-        float *x=(float*)g_x.ptr;
+    /* ---- int4 path (unpack nibbles + float GEMV) and float path share the
+     * same two-phase structure; they differ only in meta contents ---- */
+    int int4 = g_use_int4;
+
+    /* Phase 1: gate + up */
+    for(int d=0;d<g_ndev;d++){
+        if(!Kl[d]) continue;
+        VgDev *dv=&g_d[d];
+        float *x=(float*)dv->x.ptr;
         memcpy(x, xs, D*sizeof(float));
-        vg_flush(&g_x, 0, (VkDeviceSize)D*sizeof(float));
-        uint32_t nm1=(uint32_t)(2*K);
+        vg_flush(dv,&dv->x, 0, (VkDeviceSize)D*sizeof(float));
+        uint32_t nm1=(uint32_t)(2*Kl[d]);
         meta[0]=nm1;
-        for(int k=0;k<K;k++){
-            GSlot *s=&g_slot[handles[k]];
-            uint32_t m=(uint32_t)(2*k);
-            meta[1+5*m+0]=0;            meta[1+5*m+1]=s->woff_g; meta[1+5*m+2]=s->soff_g; meta[1+5*m+3]=D/8u; meta[1+5*m+4]=Ih;
-            uint32_t m2=(uint32_t)(2*k+1);
-            meta[1+5*m2+0]=0;           meta[1+5*m2+1]=s->woff_u; meta[1+5*m2+2]=s->soff_u; meta[1+5*m2+3]=D/8u; meta[1+5*m2+4]=Ih;
-        }
-        uint32_t total1=(uint32_t)(2*K)*Ih;
-        if(vg_dispatch(nm1,5,meta,total1)!=0){ free(meta); return; }
-        vg_invalidate(&g_y,0,(VkDeviceSize)total1*sizeof(float));
-        if(g_dbg){
-            static int pc=0;
-            if(pc++<1){
-            fprintf(stderr,"[vg-dbg] Phase1 gate[0..3]=%.4f %.4f %.4f %.4f  up[0..3]=%.4f %.4f %.4f %.4f\n",
-                y[0],y[1],y[2],y[3], y[Ih],y[Ih+1],y[Ih+2],y[Ih+3]);
+        for(int lk=0;lk<Kl[d];lk++){
+            GSlot *s=&dv->slot[handles[kl[d][lk]]];
+            uint32_t m=(uint32_t)(2*lk), m2=(uint32_t)(2*lk+1);
+            if(int4){
+                meta[1+5*m+0]=0;  meta[1+5*m+1]=s->woff_g;  meta[1+5*m+2]=s->soff_g;  meta[1+5*m+3]=D/8u; meta[1+5*m+4]=Ih;
+                meta[1+5*m2+0]=0; meta[1+5*m2+1]=s->woff_u; meta[1+5*m2+2]=s->soff_u; meta[1+5*m2+3]=D/8u; meta[1+5*m2+4]=Ih;
+            } else {
+                meta[1+5*m+0]=0;  meta[1+5*m+1]=s->woff_g;  meta[1+5*m+2]=s->soff_g;  meta[1+5*m+3]=D;    meta[1+5*m+4]=Ih;
+                meta[1+5*m2+0]=0; meta[1+5*m2+1]=s->woff_u; meta[1+5*m2+2]=s->soff_u; meta[1+5*m2+3]=D;   meta[1+5*m2+4]=Ih;
             }
         }
-        for(int k=0;k<K;k++){
-            const float *gk = y + (size_t)(2*k)*Ih;
-            const float *uk = y + (size_t)(2*k+1)*Ih;
-            float *ak = x + D + (size_t)k*Ih;
+        if(vg_dispatch_submit(dv,nm1,5,meta,(uint32_t)(2*Kl[d])*Ih)!=0){ free(meta); return; }
+    }
+    /* wait + silu(g)*u into each device's x (after the xs prefix) */
+    for(int d=0;d<g_ndev;d++){
+        if(!Kl[d]) continue;
+        VgDev *dv=&g_d[d];
+        vg_wait(dv);
+        vg_invalidate(dv,&dv->y,0,(VkDeviceSize)((uint32_t)(2*Kl[d])*Ih)*sizeof(float));
+        float *y=(float*)dv->y.ptr;
+        float *x=(float*)dv->x.ptr;
+        if(g_dbg && d==0){
+            static int pc=0;
+            if(pc++<1)
+                fprintf(stderr,"[vg-dbg] Phase1 gate[0..3]=%.4f %.4f %.4f %.4f  up[0..3]=%.4f %.4f %.4f %.4f\n",
+                        y[0],y[1],y[2],y[3], y[Ih],y[Ih+1],y[Ih+2],y[Ih+3]);
+        }
+        for(int lk=0;lk<Kl[d];lk++){
+            const float *gk = y + (size_t)(2*lk)*Ih;
+            const float *uk = y + (size_t)(2*lk+1)*Ih;
+            float *ak = x + D + (size_t)lk*Ih;
             for(uint32_t i=0;i<Ih;i++){
                 float gv=gk[i]; float a=gv/(1.0f+expf(-gv)); ak[i]=a*uk[i];
             }
         }
-        vg_flush(&g_x, (VkDeviceSize)D*sizeof(float), (VkDeviceSize)((uint32_t)K*Ih)*sizeof(float));
-        uint32_t nm2=(uint32_t)K;
+    }
+    /* Phase 2: down */
+    for(int d=0;d<g_ndev;d++){
+        if(!Kl[d]) continue;
+        VgDev *dv=&g_d[d];
+        vg_flush(dv,&dv->x, (VkDeviceSize)D*sizeof(float), (VkDeviceSize)((uint32_t)Kl[d]*Ih)*sizeof(float));
+        uint32_t nm2=(uint32_t)Kl[d];
         meta[0]=nm2;
-        for(int k=0;k<K;k++){
-            GSlot *s=&g_slot[handles[k]];
-            uint32_t m=(uint32_t)k;
-            meta[1+5*m+0]=D + (uint32_t)k*Ih; meta[1+5*m+1]=s->woff_d; meta[1+5*m+2]=s->soff_d;
-            meta[1+5*m+3]=Ih/8u; meta[1+5*m+4]=D;
+        for(int lk=0;lk<Kl[d];lk++){
+            GSlot *s=&dv->slot[handles[kl[d][lk]]];
+            uint32_t m=(uint32_t)lk;
+            meta[1+5*m+0]=D + (uint32_t)lk*Ih; meta[1+5*m+1]=s->woff_d; meta[1+5*m+2]=s->soff_d;
+            meta[1+5*m+3]= int4 ? Ih/8u : Ih;  meta[1+5*m+4]=D;
         }
-        uint32_t total2=(uint32_t)K*D;
-        if(vg_dispatch(nm2,5,meta,total2)!=0){ free(meta); return; }
-        vg_invalidate(&g_y,0,(VkDeviceSize)total2*sizeof(float));
-        for(int k=0;k<K;k++){
-            const float *hk = y + (size_t)k*D; float w=val[k];
-            for(uint32_t d=0;d<D;d++) out[d]+= w*hk[d];
+        if(vg_dispatch_submit(dv,nm2,5,meta,(uint32_t)Kl[d]*D)!=0){ free(meta); return; }
+    }
+    for(int d=0;d<g_ndev;d++){
+        if(!Kl[d]) continue;
+        VgDev *dv=&g_d[d];
+        vg_wait(dv);
+        vg_invalidate(dv,&dv->y,0,(VkDeviceSize)((uint32_t)Kl[d]*D)*sizeof(float));
+        float *y=(float*)dv->y.ptr;
+        for(int lk=0;lk<Kl[d];lk++){
+            int k=kl[d][lk];
+            const float *hk = y + (size_t)lk*D; float w=val[k];
+            for(uint32_t dd=0;dd<D;dd++) out[dd]+= w*hk[dd];
         }
-        free(meta);
-        return;
-    }
-
-    /* ---- float path (fallback) ---- */
-    float *x=(float*)g_x.ptr;
-    memcpy(x, xs, D*sizeof(float));
-    vg_flush(&g_x, 0, (VkDeviceSize)D*sizeof(float));
-    uint32_t nm1=(uint32_t)(2*K);
-    meta[0]=nm1;
-    for(int k=0;k<K;k++){
-        GSlot *s=&g_slot[handles[k]];
-        uint32_t m=(uint32_t)(2*k);
-        meta[1+5*m+0]=0;            meta[1+5*m+1]=s->woff_g; meta[1+5*m+2]=s->soff_g; meta[1+5*m+3]=D; meta[1+5*m+4]=Ih;
-        meta[1+5*m+5]=0;            meta[1+5*m+6]=s->woff_u; meta[1+5*m+7]=s->soff_u; meta[1+5*m+8]=D; meta[1+5*m+9]=Ih;
-    }
-    uint32_t total1=(uint32_t)(2*K)*Ih;
-    if(vg_dispatch(nm1,5,meta,total1)!=0){ free(meta); return; }
-    vg_invalidate(&g_y, 0, (VkDeviceSize)total1*sizeof(float));
-    for(int k=0;k<K;k++){
-        const float *gk = y + (size_t)(2*k)*Ih;
-        const float *uk = y + (size_t)(2*k+1)*Ih;
-        float *ak = x + D + (size_t)k*Ih;
-        for(uint32_t i=0;i<Ih;i++){
-            float gv=gk[i]; float a=gv/(1.0f+expf(-gv)); ak[i]=a*uk[i];
-        }
-    }
-    vg_flush(&g_x, (VkDeviceSize)D*sizeof(float), (VkDeviceSize)((uint32_t)K*Ih)*sizeof(float));
-    uint32_t nm2=(uint32_t)K;
-    meta[0]=nm2;
-    for(int k=0;k<K;k++){
-        GSlot *s=&g_slot[handles[k]];
-        uint32_t m=(uint32_t)k;
-        meta[1+5*m+0]=D + (uint32_t)k*Ih; meta[1+5*m+1]=s->woff_d; meta[1+5*m+2]=s->soff_d;
-        meta[1+5*m+3]=Ih; meta[1+5*m+4]=D;
-    }
-    uint32_t total2=(uint32_t)K*D;
-    if(vg_dispatch(nm2,5,meta,total2)!=0){ free(meta); return; }
-    vg_invalidate(&g_y, 0, (VkDeviceSize)total2*sizeof(float));
-    for(int k=0;k<K;k++){
-        const float *hk = y + (size_t)k*D;
-        float w=val[k];
-        for(uint32_t d=0;d<D;d++) out[d]+= w*hk[d];
     }
     free(meta);
 }
@@ -889,7 +975,7 @@ int main(void){
     double dot=0,n1=0,n2=0;
     for(int d=0;d<D;d++){ dot+=(double)out_ref[d]*out_gpu[d]; n1+=(double)out_ref[d]*out_ref[d]; n2+=(double)out_gpu[d]*out_gpu[d]; }
     double cos = dot/sqrt(n1*n2);
-    printf("weight_bits=%d  int4_active=%d  idp_active=%d\n", wbits, g_use_int4, g_use_idp);
+    printf("devices=%d weight_bits=%d  int4_active=%d  idp_active=%d\n", g_ndev, wbits, g_use_int4, g_use_idp);
     printf("CPU[0..3] = %.5f %.5f %.5f %.5f\n", out_ref[0],out_ref[1],out_ref[2],out_ref[3]);
     printf("GPU[0..3] = %.5f %.5f %.5f %.5f\n", out_gpu[0],out_gpu[1],out_gpu[2],out_gpu[3]);
     printf("cosine(GPU, %s-ref) = %.6f\n", g_use_idp?"int8-act":(g_use_int4?"int4":"float"), cos);
@@ -905,7 +991,7 @@ int main(void){
     printf(pass?"RESULT: PASS (GPU batched MoE matches CPU)\n":"RESULT: FAIL\n");
 
     free(Eg);free(Eu);free(Ed);free(Eg4);free(Eu4);free(Ed4);free(Egs);free(Eus);free(Eds);free(xs);
-    free(g);free(u);free(hh);free(out_cpu);free(out_gpu);free(out_gpu2);
+    free(g);free(u);free(hh);free(out_cpu);free(out_cpu_i8);free(out_gpu);free(out_gpu2);
     vg_shutdown();
     return pass?0:1;
 }
