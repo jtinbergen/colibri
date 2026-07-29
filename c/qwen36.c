@@ -1781,11 +1781,11 @@ static int *read_int_array(jval *o, const char *key, int *n_out) {
 
 /* --- hand-declared minimal Vulkan pieces (avoids needing vulkan.h) --- */
 #define VK_RESULT_SUCCESS 0
-#define VK_QUEUE_COMPUTE_BIT 0x00000020u
+#define VK_QUEUE_COMPUTE_BIT 0x00000002u /* LOCAL FIX: 0x20 is VIDEO_DECODE; compute is 0x2 */
 #define VK_ST_APPLICATION_INFO 0
 #define VK_ST_INSTANCE_CREATE_INFO 1
 #define VK_QF_OFF_FLAGS 0    /* queueFlags is the FIRST field of VkQueueFamilyProperties (it has NO sType/pNext) */
-#define VK_QF_STRIDE 32      /* sizeof(VkQueueFamilyProperties)=4(queueFlags)+4(queueCount)+12(minImgGran)+4(tsBits)+8(minAlloc)=32 */
+#define VK_QF_STRIDE 24      /* LOCAL FIX: sizeof(VkQueueFamilyProperties)=4+4+4+12=24, not 32 */
 
 typedef void* VkInstance;       /* opaque handle */
 typedef void* VkPhysicalDevice; /* opaque handle (pointer-sized everywhere) */
