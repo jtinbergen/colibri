@@ -709,15 +709,24 @@ olmoe$(EXE): olmoe.c st.h json.h compat.h sample.h tok.h tok_unicode.h tok_unico
 	$(CC) $(NOCUDA_CFLAGS) olmoe.c -o olmoe$(EXE) $(NOCUDA_LDFLAGS)
 
 # Qwen3.6-35B-A3B engine (hybrid Gated Attention + Gated DeltaNet + streaming
-# MoE). CPU-only in this target; the optional CUDA expert tier is a separate
-# follow-up (see docs/qwen36-phase01.md).
-qwen36$(EXE): qwen36.c st.h json.h compat.h
-	$(CC) $(CFLAGS) qwen36.c -o qwen36$(EXE) $(LDFLAGS)
+# MoE). With CUDA=1 the optional VRAM expert tier (qwen36_tier.c) is compiled
+# in and reuses the shared CUDA backend; without it the engine is CPU-only
+# (qwen36_tier.h provides inline stubs).
+ifeq ($(CUDA),1)
+QWEN36_TIER_SRC = qwen36_tier.c
+else
+QWEN36_TIER_SRC =
+endif
+qwen36$(EXE): qwen36.c qwen36_tier.h st.h json.h compat.h $(QWEN36_TIER_SRC) $(CUDA_OBJ)
+	$(CC) $(CFLAGS) qwen36.c $(QWEN36_TIER_SRC) $(CUDA_OBJ) -o qwen36$(EXE) $(LDFLAGS)
 
 # Context-size gates: KV layout, growth across requests, and the attention
 # capacity. Includes qwen36.c directly, so no model file is needed.
-tests/test_qwen36_ctx$(EXE): tests/test_qwen36_ctx.c qwen36.c st.h json.h compat.h
-	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
+# Same tier sources as the engine: the test includes qwen36.c, so with CUDA=1
+# it needs qwen36_tier.c and the backend object too (without CUDA, the header's
+# inline stubs cover it and both are empty).
+tests/test_qwen36_ctx$(EXE): tests/test_qwen36_ctx.c qwen36.c qwen36_tier.h st.h json.h compat.h $(QWEN36_TIER_SRC) $(CUDA_OBJ)
+	$(CC) $(CFLAGS) $< $(QWEN36_TIER_SRC) $(CUDA_OBJ) -o $@ $(LDFLAGS)
 
 inkling$(EXE): inkling.c st.h json.h compat.h $(INK_CUDA_OBJ) $(METAL_OBJ)
 	$(CC) $(CFLAGS) inkling.c $(INK_CUDA_OBJ) $(METAL_OBJ) -o inkling$(EXE) $(LDFLAGS)
