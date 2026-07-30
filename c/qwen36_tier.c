@@ -12,7 +12,7 @@
 typedef struct {
     ColiCudaTensor *tg, *tu, *td;
     uint32_t heat;
-    uint8_t resident, queued;
+    uint8_t resident, queued, planned;
     /* RAM-Zeiger (Slots sind bei cap==n_experts nie evicted) — für Warmstart,
      * Lookahead und LFRU-Swaps ohne Engine-Callback */
     const uint8_t *g4,*u4,*d4; const float *gs,*us,*ds;
@@ -165,16 +165,16 @@ int qt_ready(void){ return G.on; }
 
 /* intern: unter gehaltenem G.mx einreihen. victim=-1: normaler Upload
  * (Budget wird reserviert); victim>=0: Swap (Budget neutral). */
-static int enqueue_locked(int layer,int eid,int v_layer,int v_eid){
+static int enqueue_locked(int layer,int eid,int v_layer,int v_eid,int reserved){
     QSlot *s=qs(layer,eid);
     if(s->resident||s->queued||!s->g4) return 0;
     if(G.qn>=QT_QCAP){ G.q_full_skips++; return 0; }
     int hd=home(eid);
-    if(v_eid<0 && G.used[hd]+G.exp_bytes>G.budget[hd]) return 0;
+    if(!reserved && v_eid<0 && G.used[hd]+G.exp_bytes>G.budget[hd]) return 0;
     size_t mb=(size_t)G.D*G.Ih/2;
     uint8_t *w=malloc(3*mb); float *sc=malloc((size_t)(2*G.Ih+G.D)*sizeof(float));
     if(!w||!sc){ free(w); free(sc); return 0; }
-    if(v_eid<0) G.used[hd]+=G.exp_bytes;
+    if(!reserved && v_eid<0) G.used[hd]+=G.exp_bytes;
     s->queued=1;
     stage(w,sc,s->g4,s->u4,s->d4,s->gs,s->us,s->ds);
     G.q[G.qt_].layer=layer; G.q[G.qt_].eid=eid; G.q[G.qt_].w=w; G.q[G.qt_].s=sc;
@@ -192,7 +192,7 @@ void qt_note(int layer,int eid,
     pthread_mutex_lock(&G.mx);
     if(!s->g4){ s->g4=g4; s->u4=u4; s->d4=d4; s->gs=gs; s->us=us; s->ds=ds; }
     if(s->heat<0xFFFFFFFFu) s->heat++;
-    enqueue_locked(layer,eid,-1,-1);
+    enqueue_locked(layer,eid,-1,-1,0);
     pthread_mutex_unlock(&G.mx);
 }
 
@@ -205,7 +205,7 @@ void qt_note_block(int layer,int eid,
     pthread_mutex_lock(&G.mx);
     if(!s->g4){ s->g4=g4; s->u4=u4; s->d4=d4; s->gs=gs; s->us=us; s->ds=ds; }
     while(G.qn>=QT_QCAP && !G.th_stop) pthread_cond_wait(&G.cv_take,&G.mx);
-    enqueue_locked(layer,eid,-1,-1);
+    enqueue_locked(layer,eid,-1,-1,0);
     pthread_mutex_unlock(&G.mx);
 }
 
@@ -243,6 +243,55 @@ int qt_fill_next(int *layer,int *eid){
     return 0;
 }
 
+/* M3b (Parallelisierung): plant das komplette Warmstart-Set in einem Zug —
+ * Heat-Reihenfolge und Budget-Reservierung exakt wie qt_fill_next, aber ohne
+ * zu laden. Die Experten werden danach von mehreren Threads geladen und per
+ * qt_note_planned eingereiht. */
+int qt_plan_fill(int *layers,int *eids,int max){
+    if(!G.on) return 0;
+    size_t n=(size_t)G.nl*G.ne;
+    int cnt=0;
+    pthread_mutex_lock(&G.mx);
+    if(!G.fill_order){
+        G.fill_order=malloc(n*sizeof(int));
+        for(size_t i=0;i<n;i++) G.fill_order[i]=(int)i;
+        if(G.heat0){ g_sort_heat=G.heat0; qsort(G.fill_order,n,sizeof(int),cmp_heat_desc); }
+        G.fill_cur=0;
+    }
+    while((size_t)G.fill_cur<n && cnt<max){
+        int full=1; for(int i=0;i<G.ndev;i++) if(G.used[i]+G.exp_bytes<=G.budget[i]) full=0;
+        if(full) break;
+        int gi=G.fill_order[G.fill_cur++];
+        int l=gi/G.ne, e=gi%G.ne, hd=home(e);
+        QSlot *s=qs(l,e);
+        if(s->resident||s->queued||s->planned) continue;
+        if(G.used[hd]+G.exp_bytes>G.budget[hd]) continue;
+        G.used[hd]+=G.exp_bytes;          /* reservieren */
+        s->planned=1;
+        layers[cnt]=l; eids[cnt]=e; cnt++;
+    }
+    pthread_mutex_unlock(&G.mx);
+    return cnt;
+}
+
+/* Threadsicher (von mehreren Ladethreads aufrufbar): stage + einreihen eines
+ * per qt_plan_fill reservierten Experten; blockiert nur bei voller Queue. */
+void qt_note_planned(int layer,int eid,
+             const uint8_t *g4,const uint8_t *u4,const uint8_t *d4,
+             const float *gs,const float *us,const float *ds){
+    if(!G.on || !g4) return;
+    QSlot *s=qs(layer,eid);
+    pthread_mutex_lock(&G.mx);
+    if(!s->g4){ s->g4=g4; s->u4=u4; s->d4=d4; s->gs=gs; s->us=us; s->ds=ds; }
+    while(G.qn>=QT_QCAP && !G.th_stop) pthread_cond_wait(&G.cv_take,&G.mx);
+    if(!enqueue_locked(layer,eid,-1,-1,1)){
+        /* nicht einreihbar (z.B. schon resident): Reservierung zurückgeben */
+        if(s->planned) G.used[home(eid)]-=G.exp_bytes;
+    }
+    s->planned=0;
+    pthread_mutex_unlock(&G.mx);
+}
+
 /* M3: wartet, bis die Upload-Queue leer ist (Ende Warmstart). */
 void qt_fill_wait(void){
     if(!G.on) return;
@@ -269,7 +318,7 @@ static void qt_lfru_tick_locked(void){
         if(hh<=ch+(ch>>2)+4) continue;                    /* Hysterese wie tier.h */
         QSlot *v=&G.slot[cold];
         v->resident=0;                                    /* ab sofort CPU-Fallback */
-        if(enqueue_locked(hot/G.ne,hot%G.ne,cold/G.ne,cold%G.ne)) G.swaps++;
+        if(enqueue_locked(hot/G.ne,hot%G.ne,cold/G.ne,cold%G.ne,0)) G.swaps++;
         else v->resident=1;                               /* Queue voll: zurücknehmen */
     }
 }

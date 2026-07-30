@@ -42,6 +42,12 @@ void qt_take(uint32_t mask, const float *val, int K, float *out);
 /* M3: Warmstart — nächster vorzuladender Experte (Heat-Reihenfolge, bis
  * Budgets voll). Engine lädt den RAM-Slot und ruft qt_note_block. */
 int  qt_fill_next(int *layer, int *eid);
+/* M3b: komplettes Warmstart-Set planen (Heat-Reihenfolge, Budget reserviert);
+ * danach dürfen MEHRERE Threads laden und qt_note_planned aufrufen. */
+int  qt_plan_fill(int *layers, int *eids, int max);
+void qt_note_planned(int layer, int eid,
+             const uint8_t *g4, const uint8_t *u4, const uint8_t *d4,
+             const float *gs, const float *us, const float *ds);
 void qt_note_block(int layer, int eid,
              const uint8_t *g4, const uint8_t *u4, const uint8_t *d4,
              const float *gs, const float *us, const float *ds);

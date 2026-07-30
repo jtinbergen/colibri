@@ -2142,13 +2142,22 @@ int main(int argc, char **argv) {
          * bei HEAT_FILE, sonst natürliche Ordnung). Lädt die RAM-Slots gleich mit. */
         const char *nws = getenv("QT_NO_WARMSTART");
         if (!(nws && *nws=='1')) {
-            double t0 = now_s(); long nf = 0; int wl, we;
-            while (qt_fill_next(&wl, &we)) {
-                Slot *e; expert_get(&m, wl, we, &e);
-                if (e->g4) { qt_note_block(wl, we, e->g4, e->u4, e->d4, e->gs, e->us, e->ds); nf++; }
+            /* M3b: Set planen (Heat-Reihenfolge), dann PARALLEL laden+stagen.
+             * Ladepfad ist threadsicher: expert_get sperrt den Layer-Cache
+             * (g_pilot_mx), st_read_raw nutzt pread; Eintraege sind unique. */
+            double t0 = now_s();
+            int cap_total = m.c.n_layers * m.c.n_experts;
+            int *wpl = malloc((size_t)cap_total*sizeof(int));
+            int *wpe = malloc((size_t)cap_total*sizeof(int));
+            int wn = qt_plan_fill(wpl, wpe, cap_total);
+            #pragma omp parallel for schedule(dynamic, 16)
+            for (int i = 0; i < wn; i++) {
+                Slot *e; expert_get(&m, wpl[i], wpe[i], &e);
+                if (e->g4) qt_note_planned(wpl[i], wpe[i], e->g4, e->u4, e->d4, e->gs, e->us, e->ds);
             }
             qt_fill_wait();
-            fprintf(stderr, "[qtier] Warmstart: %ld Experten in %.1f s ins VRAM vorgeladen\n", nf, now_s()-t0);
+            free(wpl); free(wpe);
+            fprintf(stderr, "[qtier] Warmstart (parallel): %d Experten in %.1f s ins VRAM vorgeladen\n", wn, now_s()-t0);
         }
     }
     /* optional transparent Vulkan compute backend for the routed-expert GEMVs.
