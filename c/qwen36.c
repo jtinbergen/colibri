@@ -2150,14 +2150,23 @@ int main(int argc, char **argv) {
             int *wpl = malloc((size_t)cap_total*sizeof(int));
             int *wpe = malloc((size_t)cap_total*sizeof(int));
             int wn = qt_plan_fill(wpl, wpe, cap_total);
+            /* Zielplattform (Z5): Modell komplett in RAM+VRAM. ALLE Experten
+             * werden ins RAM geladen (sonst kosten CPU-Fallback-Erstkontakte
+             * ~12 ms Disk-Load MITTEN im Decode — gemessen 139 ms/Token beim
+             * 1-GPU-Lauf); nur die geplanten gehen zusätzlich ins VRAM. */
+            uint8_t *planned = calloc((size_t)cap_total, 1);
+            for (int i = 0; i < wn; i++) planned[wpl[i]*m.c.n_experts + wpe[i]] = 1;
             #pragma omp parallel for schedule(dynamic, 16)
-            for (int i = 0; i < wn; i++) {
-                Slot *e; expert_get(&m, wpl[i], wpe[i], &e);
-                if (e->g4) qt_note_planned(wpl[i], wpe[i], e->g4, e->u4, e->d4, e->gs, e->us, e->ds);
+            for (int gi = 0; gi < cap_total; gi++) {
+                int l = gi / m.c.n_experts, eidw = gi % m.c.n_experts;
+                Slot *e; expert_get(&m, l, eidw, &e);
+                if (planned[gi] && e->g4)
+                    qt_note_planned(l, eidw, e->g4, e->u4, e->d4, e->gs, e->us, e->ds);
             }
             qt_fill_wait();
-            free(wpl); free(wpe);
-            fprintf(stderr, "[qtier] Warmstart (parallel): %d Experten in %.1f s ins VRAM vorgeladen\n", wn, now_s()-t0);
+            free(wpl); free(wpe); free(planned);
+            fprintf(stderr, "[qtier] Warmstart (parallel): alle %d Experten im RAM, %d davon im VRAM — %.1f s\n",
+                    cap_total, wn, now_s()-t0);
         }
     }
     /* optional transparent Vulkan compute backend for the routed-expert GEMVs.
