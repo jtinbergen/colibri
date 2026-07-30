@@ -1114,6 +1114,30 @@ static int container_is_int4(Model *m) {
     return (tw->nbytes == want_w / 2) ? 1 : 0;
 }
 
+/* Maßnahme 2: int8-Block eines Slots bei Bedarf aus der int4-Kopie
+ * rematerialisieren (~0,5 ms, kein Disk-Zugriff). */
+static void slot_ensure_int8(Model *m, Slot *s) {
+    if (s->g || !s->g4) return;
+    Cfg *c = &m->c;
+    int64_t ng = (int64_t)c->inter * c->hidden, nd = (int64_t)c->hidden * c->inter;
+    int8_t *w = malloc((size_t)(ng + ng + nd));
+    if (!w) { fprintf(stderr, "OOM slot_ensure_int8\n"); exit(1); }
+    const uint8_t *src4[3] = { s->g4, s->u4, s->d4 };
+    int64_t lens[3] = { ng, ng, nd };
+    int8_t *dst = w;
+    for (int t = 0; t < 3; t++) {
+        const uint8_t *p = src4[t];
+        for (int64_t i = 0; i < lens[t]; i += 2) {
+            uint8_t b = p[i >> 1];
+            int8_t lo = (int8_t)(b & 0xF); if (lo & 8) lo -= 16;
+            int8_t hi = (int8_t)((b >> 4) & 0xF); if (hi & 8) hi -= 16;
+            dst[i] = lo; dst[i + 1] = hi;
+        }
+        dst += lens[t];
+    }
+    s->g = w; s->u = w + ng; s->d = w + ng + ng;
+}
+
 static void expert_get(Model *m, int layer, int eid, Slot **out) {
     LCache *lc = &m->cache[layer];
     pthread_mutex_lock(&g_pilot_mx);
@@ -1417,6 +1441,7 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
             for (int kk = 0; kk < K; kk++) {
                 if (qmask & (1u<<kk)) continue;
                 Slot *e; expert_get(m, layer, idx[kk], &e);
+                slot_ensure_int8(m, e);
                 matmul_q(g, xs, e->g, e->gs, D, I);
                 matmul_q(u, xs, e->u, e->us, D, I);
                 for (int i = 0; i < I; i++) { float gv = g[i]; g[i] = (gv / (1.f + expf(-gv))) * u[i]; }
@@ -1495,6 +1520,7 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
         } else {
             for (int kk = 0; kk < K; kk++) {
                 Slot *e; expert_get(m, layer, idx[kk], &e);
+                slot_ensure_int8(m, e);
                 matmul_q(g, xs, e->g, e->gs, D, I);
                 matmul_q(u, xs, e->u, e->us, D, I);
                 for (int i = 0; i < I; i++) { float gv = g[i]; g[i] = (gv / (1.f + expf(-gv))) * u[i]; }
@@ -1798,7 +1824,7 @@ static void pilot_prefetch(Model *m, int lnext, const float *x, int S) {
     Layer *l = &m->L[lnext];
     float *nrm_x = falloc((int64_t)S * D);
     for (int s = 0; s < S; s++) rmsnorm_row(nrm_x + (int64_t)s*D, x + (int64_t)s*D, l->post_ln, D, c->eps);
-    matmul(logits, nrm_x, l->gate, S, D, E);
+    matmul_d(logits, nrm_x, l->gate, S, D, E);   /* int8-Kopie (f32 ggf. freigegeben) */
     free(nrm_x);
     for (int s = 0; s < S; s++) {
         float *pr = logits + (int64_t)s*E;
@@ -2128,7 +2154,18 @@ int main(int argc, char **argv) {
             qdw_register(l->dn_out, qc->dn_vheads * qc->dn_vdim, D2);
         }
         qdw_register(m.lm_head, D2, qc->vocab);
-        fprintf(stderr, "[dense-i8] %d Matrizen quantisiert in %.1f s\n", g_qdw_n, now_s()-tq);
+        /* Maßnahme 1: f32-Originale freigeben — die Zeiger dienen in matmul_d
+         * nur noch als Lookup-Schlüssel (werden nie mehr dereferenziert).
+         * COLI_KEEP_F32=1 behält sie (Debug). */
+        double freed = 0;
+        if (!getenv("COLI_KEEP_F32")) {
+            for (int i = 0; i < g_qdw_n; i++) {
+                freed += (double)g_qdw[i].I * g_qdw[i].O * sizeof(float);
+                free((void*)g_qdw[i].w);
+            }
+        }
+        fprintf(stderr, "[dense-i8] %d Matrizen quantisiert in %.1f s, %.1f GB f32 freigegeben\n",
+                g_qdw_n, now_s()-tq, freed/1073741824.0);
     }
 
     /* R2 M-QTIER: CUDA-VRAM-Experten-Tier (COLI_CUDA=1) hat Vorrang; der
@@ -2156,16 +2193,23 @@ int main(int argc, char **argv) {
              * 1-GPU-Lauf); nur die geplanten gehen zusätzlich ins VRAM. */
             uint8_t *planned = calloc((size_t)cap_total, 1);
             for (int i = 0; i < wn; i++) planned[wpl[i]*m.c.n_experts + wpe[i]] = 1;
+            int keep8 = getenv("COLI_KEEP_INT8") != NULL;
             #pragma omp parallel for schedule(dynamic, 16)
             for (int gi = 0; gi < cap_total; gi++) {
                 int l = gi / m.c.n_experts, eidw = gi % m.c.n_experts;
                 Slot *e; expert_get(&m, l, eidw, &e);
-                if (planned[gi] && e->g4)
+                if (planned[gi] && e->g4) {
                     qt_note_planned(l, eidw, e->g4, e->u4, e->d4, e->gs, e->us, e->ds);
+                    /* Maßnahme 2: Staging hat die int4-Kopie übernommen; die
+                     * int8-Kopie SOFORT freigeben, damit sie nie im Peak-RSS
+                     * auftaucht. Bei LFRU-Eviction rematerialisiert
+                     * slot_ensure_int8() aus g4 (kein Disk-Zugriff). */
+                    if (!keep8 && e->g) { free(e->g); e->g = e->u = e->d = NULL; }
+                }
             }
             qt_fill_wait();
             free(wpl); free(wpe); free(planned);
-            fprintf(stderr, "[qtier] Warmstart (parallel): alle %d Experten im RAM, %d davon im VRAM — %.1f s\n",
+            fprintf(stderr, "[qtier] Warmstart (parallel): alle %d Experten im RAM (int8 nur für Nicht-Residente), %d im VRAM — %.1f s\n",
                     cap_total, wn, now_s()-t0);
         }
     }
