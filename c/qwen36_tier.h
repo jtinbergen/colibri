@@ -22,6 +22,7 @@
 int  qt_init(int n_layers, int n_experts, int hidden, int inter,
              int cap_experts_per_layer, int topk);
 int  qt_ready(void);
+int  qt_is_resident(int layer, int eid);
 void qt_shutdown(void);
 
 /* Pro geroutetem Experten einmal je Token aufrufen (Zeiger auf die RAM-Slots,

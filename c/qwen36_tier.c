@@ -163,6 +163,15 @@ int qt_init(int nl, int ne, int D, int Ih, int cap, int topk){
 
 int qt_ready(void){ return G.on; }
 
+/* Ist (layer,eid) aktuell im VRAM resident? (für RAM-Freigabe, Maßnahme 2) */
+int qt_is_resident(int layer,int eid){
+    if(!G.on) return 0;
+    pthread_mutex_lock(&G.mx);
+    int r = qs(layer,eid)->resident;
+    pthread_mutex_unlock(&G.mx);
+    return r;
+}
+
 /* intern: unter gehaltenem G.mx einreihen. victim=-1: normaler Upload
  * (Budget wird reserviert); victim>=0: Swap (Budget neutral). */
 static int enqueue_locked(int layer,int eid,int v_layer,int v_eid,int reserved){
