@@ -1204,19 +1204,27 @@ static void attention(Model *m, Layer *l, int layer, float *x, int S, int pos_ba
             int kvh = hh / q_per_kv;
             int qpos = pos_base + s;
             const float *qv = query + ((int64_t)s*H + hh)*hd;
-            float sc[8192];
+            int scn = qpos + 1;            /* KV length this query attends over.
+                                             * Was a fixed sc[8192] STACK buffer, which
+                                             * overflows past 8192 ctx (cf. main 342ceaf /
+                                             * d439ac8). Size by the true length instead,
+                                             * and heap-allocate so each OpenMP iteration
+                                             * owns its buffer (different hh share the same
+                                             * qpos range -> sharing would race). */
+            float *sc = falloc(scn);
             for (int t = 0; t <= qpos; t++) {
                 const float *kv = m->K[layer] + ((int64_t)kvh*m->max_t + t)*kvd;
                 float acc = 0; for (int dd = 0; dd < kvd; dd++) acc += qv[dd]*kv[dd];
                 sc[t] = acc * scale;
             }
-            softmax_row(sc, qpos+1);
+            softmax_row(sc, scn);
             float *cx = ctx + ((int64_t)s*H + hh)*hd;
             for (int dd = 0; dd < kvd; dd++) cx[dd] = 0;
             for (int t = 0; t <= qpos; t++) {
                 const float *vrow = m->V[layer] + ((int64_t)kvh*m->max_t + t)*kvd;
                 float a = sc[t]; for (int dd = 0; dd < kvd; dd++) cx[dd] += a * vrow[dd];
             }
+            free(sc);
         }
     }
     /* apply attn_output_gate: attn_out *= sigmoid(gate) */
