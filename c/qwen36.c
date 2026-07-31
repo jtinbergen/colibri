@@ -1781,7 +1781,7 @@ static int *read_int_array(jval *o, const char *key, int *n_out) {
 
 /* --- hand-declared minimal Vulkan pieces (avoids needing vulkan.h) --- */
 #define VK_RESULT_SUCCESS 0
-#define VK_QUEUE_COMPUTE_BIT 0x00000020u
+#define VK_QUEUE_COMPUTE_BIT 0x00000002u   /* FIX: was 0x20 (VIDEO_DECODE_BIT); broke gpu_probe on NVIDIA/Linux */
 #define VK_ST_APPLICATION_INFO 0
 #define VK_ST_INSTANCE_CREATE_INFO 1
 #define VK_QF_OFF_FLAGS 0    /* queueFlags is the FIRST field of VkQueueFamilyProperties (it has NO sType/pNext) */

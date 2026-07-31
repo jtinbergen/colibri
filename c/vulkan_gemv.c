@@ -421,6 +421,18 @@ int vg_init(const vg_cfg *cfg){
      *  - g_meta: transient per-matrix metadata */
     {
         VkDeviceSize wsz=(VkDeviceSize)g_nslots*g_slot_wbytes;
+        /* FIX (kreuzzelg): slot byte offsets are computed as uint32_t in the host
+         * upload path and handed to the shader as 32-bit word offsets, so any
+         * weights pool >= 4GB wraps/aliases (layers 32-39 alias layers 0-7 at
+         * cache>=256). Refuse to enable Vulkan and fall back to the CPU MoE path
+         * instead of silently producing wrong results. 64-bit shader offsets are a
+         * follow-up. */
+        if (wsz > 0xFFFFFFFFULL) {
+            fprintf(stderr, "[vg] weights pool %.1f GB exceeds the 4GB Vulkan 32-bit "
+                    "offset limit; falling back to CPU MoE path (64-bit offsets: follow-up).\n",
+                    (double)wsz/(1024.0*1024.0*1024.0));
+            goto fail;
+        }
         if(wsz==0) wsz=16;
         CHECK(vg_create_buf(wsz, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT, &g_w),"buf w");
         VkDeviceSize ssz=(VkDeviceSize)g_nslots*g_slot_sfloats*sizeof(float);
