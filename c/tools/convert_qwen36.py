@@ -243,8 +243,26 @@ def main():
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     import shutil
-    shutil.copy2(cfg_path, out / "config.json")
-    print(f"config -> {out / 'config.json'} (model_type={cfg_full.get('model_type')})")
+    # The engine reads FLAT keys from config.json, but VL checkpoints nest them
+    # under text_config -> write the flattened text config (original kept as
+    # config.hf.json). Fixes "missing hidden_size" on VL models.
+    with open(out / "config.json", "w", encoding="utf-8") as cf:
+        json.dump(mcfg, cf, indent=1)
+    shutil.copy2(cfg_path, out / "config.hf.json")
+    print(f"config -> {out / 'config.json'} (flat; model_type={cfg_full.get('model_type')})")
+    # Bundle tokenizer.json so a container runs out of the box (TOK= still overrides).
+    try:
+        if args.repo:
+            tok_path = hf_hub_download(args.repo, "tokenizer.json", token=token)
+        else:
+            tok_path = str(src_dir / "tokenizer.json")
+        if Path(tok_path).is_file():
+            shutil.copy2(tok_path, out / "tokenizer.json")
+            print(f"tokenizer -> {out / 'tokenizer.json'}")
+        else:
+            print("WARNING: tokenizer.json not found; the engine will need TOK=<path>")
+    except Exception as e:
+        print(f"WARNING: could not fetch tokenizer.json ({e}); the engine will need TOK=<path>")
 
     # ---- build weight map (key -> shard file) ----
     if idx_path:
@@ -527,7 +545,8 @@ def main():
     # ---- final upload (non-stream path) + cleanup ----
     if args.upload_repo:
         print(f"\nUploading to HF Hub: {args.upload_repo}")
-        for f in sorted(out.glob("*.safetensors")) + [out / "config.json",
+        for f in sorted(out.glob("*.safetensors")) + [out / "config.json", out / "config.hf.json",
+                                                       out / "tokenizer.json",
                                                        out / "qwen36_meta.json", out / "README.md"]:
             if f.is_file():
                 stream_api.upload_file(repo_id=args.upload_repo, repo_type="model",
