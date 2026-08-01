@@ -1100,7 +1100,7 @@ extern "C" int coli_cuda_expert_group_issue(ColiCudaTensor *const *gates,
     if (!gates || !ups || !downs || !rows || !x || count < 1 || count > 64) return 0;
     ColiCudaTensor *first=gates[0];
     if (!first) return 0;
-    int device=first->device,D=first->I,I=first->O,total=0,max_rows=0,all_s4=1;
+    int device=first->device,D=first->I,I=first->O,total=0,max_rows=0,all_s4=1,all_q4=1,any_g4=0;
     GroupDesc host[64];
     for(int c=0;c<count;c++){
         ColiCudaTensor *g=gates[c],*u=ups[c],*d=downs[c];
@@ -1110,6 +1110,9 @@ extern "C" int coli_cuda_expert_group_issue(ColiCudaTensor *const *gates,
                  g->fmt,u->fmt,d->fmt,rows[c],total,
                  g->gs,u->gs,d->gs};
         all_s4&=g->fmt==2&&u->fmt==2&&d->fmt==2;
+        all_q4&=(g->fmt==2||g->fmt==4)&&(u->fmt==2||u->fmt==4)&&(d->fmt==2||d->fmt==4)&&
+                !(g->gs&1)&&!(u->gs&1)&&!(d->gs&1);   /* even gs: a packed byte never straddles groups */
+        any_g4|=g->fmt==4||u->fmt==4||d->fmt==4;
         total+=rows[c]; if(rows[c]>max_rows) max_rows=rows[c];
     }
     if(total>8) return 0;                       /* decode-scale only */
@@ -1139,6 +1142,18 @@ extern "C" int coli_cuda_expert_group_issue(ColiCudaTensor *const *gates,
                 ctx->gate,ctx->up,(size_t)total*I);
         }
         grouped_down_w4<<<og,256,0,ctx->stream>>>(ctx->y,ctx->gate,dev,D,I);
+    } else if(all_q4&&any_g4){
+        /* grouped int4 (fmt=4) present in the async decode path: per-group
+         * scales via the #334 kernels (fmt=2 members ride along as ng=1). The
+         * previous fallback ran quant_matmul with gs=0,ng=1, which silently
+         * applied one per-row scale to a grouped container -> wrong output. */
+        GroupDesc *dev=(GroupDesc*)ctx->group_desc;
+        dim3 hg((unsigned)I,(unsigned)max_rows,(unsigned)count);
+        dim3 og((unsigned)D,(unsigned)max_rows,(unsigned)count);
+        grouped_hidden_g4_dual<<<hg,256,0,ctx->stream>>>(ctx->gate,ctx->up,ctx->x,dev,I,D);
+        silu_mul<<<(unsigned)(((size_t)total*I+255)/256),256,0,ctx->stream>>>(
+            ctx->gate,ctx->up,(size_t)total*I);
+        grouped_down_g4<<<og,256,0,ctx->stream>>>(ctx->y,ctx->gate,dev,D,I);
     } else for(int c=0;c<count;c++){
         int r=rows[c];
         float *g16=ctx->gate+(size_t)host[c].offset*I,*u16=ctx->up+(size_t)host[c].offset*I;
