@@ -26,6 +26,9 @@
 #include <stdint.h>
 #include <time.h>
 #include <pthread.h>
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
 #if defined(__APPLE__) || defined(__linux__) || defined(__FreeBSD__)
 #include <sys/resource.h>
 #include <unistd.h>
@@ -669,6 +672,32 @@ static void matmul_q(float *y, const float *x, const int8_t *q, const float *sca
         return;
     }
 #endif
+#if defined(__AVX2__) && defined(__FMA__)
+    /* Hand-vectorized int8->f32 GEMV (gcc does not auto-vectorize the
+     * convert+accumulate chain). 32 weights per iteration, FMA accumulate. */
+    #pragma omp parallel for schedule(static) if(O >= 256)
+    for (int o = 0; o < O; o++) {
+        const int8_t *w = q + (int64_t)o * I;
+        __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
+        __m256 a2 = _mm256_setzero_ps(), a3 = _mm256_setzero_ps();
+        int i = 0;
+        for (; i + 32 <= I; i += 32) {
+            __m128i b0 = _mm_loadu_si128((const __m128i*)(w + i));
+            __m128i b1 = _mm_loadu_si128((const __m128i*)(w + i + 16));
+            a0 = _mm256_fmadd_ps(_mm256_loadu_ps(x+i),    _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(b0)), a0);
+            a1 = _mm256_fmadd_ps(_mm256_loadu_ps(x+i+8),  _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(b0,8))), a1);
+            a2 = _mm256_fmadd_ps(_mm256_loadu_ps(x+i+16), _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(b1)), a2);
+            a3 = _mm256_fmadd_ps(_mm256_loadu_ps(x+i+24), _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(b1,8))), a3);
+        }
+        a0 = _mm256_add_ps(_mm256_add_ps(a0,a1), _mm256_add_ps(a2,a3));
+        __m128 s = _mm_add_ps(_mm256_castps256_ps128(a0), _mm256_extractf128_ps(a0,1));
+        s = _mm_add_ps(s, _mm_movehl_ps(s,s));
+        s = _mm_add_ss(s, _mm_shuffle_ps(s,s,1));
+        float acc = _mm_cvtss_f32(s);
+        for (; i < I; i++) acc += x[i] * (float)w[i];
+        y[o] = acc * scale[o];
+    }
+#else
     #pragma omp parallel for schedule(static)
     for (int o = 0; o < O; o++) {
         const int8_t *w = q + (int64_t)o * I;
@@ -676,6 +705,36 @@ static void matmul_q(float *y, const float *x, const int8_t *q, const float *sca
         for (int i = 0; i < I; i++) acc += x[i] * (float)w[i];
         y[o] = acc * scale[o];
     }
+#endif
+}
+
+/* ---- Dense int8: per-row quantized copies of the large f32 matrices.
+ * matmul_d dispatches via pointer lookup to matmul_q; COLI_DENSE_I8=0 falls
+ * back to f32 (reference path for parity tests). ~4x less memory traffic. */
+#define QDW_MAX 1024
+static struct { const float *w; int8_t *q; float *sc; int I, O; } g_qdw[QDW_MAX];
+static int g_qdw_n = 0;
+static int dense_i8_on(void){ static int v=-1; if(v<0){ const char *e=getenv("COLI_DENSE_I8"); v=!(e&&*e=='0'); } return v; }
+static void qdw_register(const float *W, int I, int O){
+    if (!W || !dense_i8_on() || g_qdw_n >= QDW_MAX) return;
+    int8_t *q = malloc((size_t)O*I); float *sc = malloc((size_t)O*sizeof(float));
+    if (!q || !sc) { free(q); free(sc); return; }
+    #pragma omp parallel for schedule(static)
+    for (int o = 0; o < O; o++) {
+        const float *r = W + (int64_t)o*I; float am = 0.f;
+        for (int i = 0; i < I; i++) { float a = fabsf(r[i]); if (a > am) am = a; }
+        float s = am > 1e-12f ? am/127.f : 1.f; sc[o] = s; float inv = 1.f/s;
+        int8_t *d = q + (int64_t)o*I;
+        for (int i = 0; i < I; i++) { int v = (int)lrintf(r[i]*inv); if (v>127) v=127; if (v<-127) v=-127; d[i] = (int8_t)v; }
+    }
+    g_qdw[g_qdw_n].w=W; g_qdw[g_qdw_n].q=q; g_qdw[g_qdw_n].sc=sc; g_qdw[g_qdw_n].I=I; g_qdw[g_qdw_n].O=O; g_qdw_n++;
+}
+static void matmul_d(float *y, const float *x, const float *W, int S, int I, int O){
+    for (int i = 0; i < g_qdw_n; i++) if (g_qdw[i].w == W && g_qdw[i].I == I) {
+        for (int s = 0; s < S; s++) matmul_q(y+(int64_t)s*O, x+(int64_t)s*I, g_qdw[i].q, g_qdw[i].sc, I, O);
+        return;
+    }
+    matmul(y, x, W, S, I, O);
 }
 
 /* rmsnorm over a row of length D (in-place capable: out may == x).
@@ -1166,9 +1225,9 @@ static void attention(Model *m, Layer *l, int layer, float *x, int S, int pos_ba
     float *q = falloc((int64_t)S*q_out);
     float *k = falloc((int64_t)S*kv_out);
     float *vv= falloc((int64_t)S*kv_out);
-    matmul(q, x, l->q, S, D, q_out);
-    matmul(k, x, l->k, S, D, kv_out);
-    matmul(vv, x, l->v, S, D, kv_out);
+    matmul_d(q, x, l->q, S, D, q_out);
+    matmul_d(k, x, l->k, S, D, kv_out);
+    matmul_d(vv, x, l->v, S, D, kv_out);
     /* split q into query (first hd) and gate (next gate_dim), both per head */
     float *query = falloc((int64_t)S*H*hd);
     float *gate  = falloc((int64_t)S*H*gate_dim);
@@ -1234,7 +1293,7 @@ static void attention(Model *m, Layer *l, int layer, float *x, int S, int pos_ba
         float g = gate_dim ? gate[o] : 0.f;
         ag[o] = ctx[o] * (1.f / (1.f + expf(-g)));
     }
-    matmul(out, ag, l->o, S, H*hd, D);
+    matmul_d(out, ag, l->o, S, H*hd, D);
     free(q); free(k); free(vv); free(query); free(gate); free(ctx); free(ag);
 }
 
@@ -1247,7 +1306,7 @@ static int g_gpu_count   = 0;                 /* # compute-capable devices */
 static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
     Cfg *c = &m->c; int D = c->hidden, E = c->n_experts, K = c->topk, I = c->inter;
     float *logits = falloc((int64_t)S*E);
-    matmul(logits, x, l->gate, S, D, E);
+    matmul_d(logits, x, l->gate, S, D, E);
     if (c->has_bias && l->gate_bias) {
         for (int s = 0; s < S; s++) { float *pr = logits + (int64_t)s*E; for (int e = 0; e < E; e++) pr[e] += l->gate_bias[e]; }
     }
@@ -1360,10 +1419,10 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
         }
         /* shared expert (SwiGLU), sigmoid-gated by shared_expert_gate */
         int Ish = c->shared_inter;
-        matmul(sh, xs, l->sh_g, 1, D, Ish);
-        matmul(shu, xs, l->sh_u, 1, D, Ish);
+        matmul_d(sh, xs, l->sh_g, 1, D, Ish);
+        matmul_d(shu, xs, l->sh_u, 1, D, Ish);
         for (int i = 0; i < Ish; i++) { float sv = sh[i]; sh[i] = (sv / (1.f + expf(-sv))) * shu[i]; }
-        matmul(shd, sh, l->sh_d, 1, Ish, D);
+        matmul_d(shd, sh, l->sh_d, 1, Ish, D);
         float sgate = 1.f;
         if (l->sh_gate) {
             float sg = 0.f; const float *wg = l->sh_gate;
@@ -1419,15 +1478,16 @@ static void deltanet(Model *m, Layer *l, int layer, float *x, int S, int pos_bas
     for (int s = 0; s < S; s++) {
         const float *xs = x + (int64_t)s * H;
         /* projections (single-token matmuls) */
-        matmul(qkv, xs, l->dn_qkv, 1, H, conv_dim);
-        matmul(z,   xs, l->dn_z,   1, H, value_dim);
+        matmul_d(qkv, xs, l->dn_qkv, 1, H, conv_dim);
+        matmul_d(z,   xs, l->dn_z,   1, H, value_dim);
         matmul(b,   xs, l->dn_b,   1, H, vh);
         matmul(a,   xs, l->dn_a,   1, H, vh);
         for (int h = 0; h < vh; h++) {
             beta[h] = 1.f / (1.f + expf(-b[h]));
             gg[h] = -expf(l->dn_alog[h]) * softplus_f(a[h] + l->dn_dtbias[h]);
         }
-        /* causal depthwise conv1d (groups=conv_dim, kernel=convk) with carried ring */
+        /* causal depthwise conv1d (groups=conv_dim, kernel=convk) with carried ring
+         * (serial: ~33k FLOP, an OpenMP fork/join would cost more) */
         for (int cc = 0; cc < conv_dim; cc++) {
             const float *w = l->dn_conv + (int64_t)cc * convk;
             const float *rg = ring + (int64_t)cc * (convk - 1);
@@ -1466,37 +1526,42 @@ static void deltanet(Model *m, Layer *l, int layer, float *x, int S, int pos_bas
             double nk = sqrt(sk);
             for (int d = 0; d < kdim; d++) kh[d] = (float)((double)kh[d] / nk);
         }
-        /* recurrent gated delta rule over the value heads */
+        /* recurrent gated delta rule over the value heads (heads are
+         * independent -> parallel; kv/delta thread-local) */
+        #pragma omp parallel for schedule(static)
         for (int h = 0; h < vh; h++) {
+            float kvl[512], dl[512];   /* vdim <= 512 */
             float *Sh = rec + (int64_t)h * kdim * vdim;
             float egh = expf(gg[h]);
             for (int t = 0; t < kdim * vdim; t++) Sh[t] *= egh;
             const float *kd = k + (int64_t)h * kdim;
             const float *vd = v_in + (int64_t)h * vdim;
             /* kv = kd @ Sh  (length vdim) */
-            for (int vv = 0; vv < vdim; vv++) {
-                float acc = 0.f;
-                for (int kk = 0; kk < kdim; kk++) acc += kd[kk] * Sh[(int64_t)kk * vdim + vv];
-                kv[vv] = acc;
+            for (int vv = 0; vv < vdim; vv++) kvl[vv] = 0.f;
+            for (int kk = 0; kk < kdim; kk++) {
+                float kkd = kd[kk]; const float *Sr = Sh + (int64_t)kk * vdim;
+                for (int vv = 0; vv < vdim; vv++) kvl[vv] += kkd * Sr[vv];
             }
             /* delta = (v - kv) * beta */
-            for (int vv = 0; vv < vdim; vv++) delta[vv] = (vd[vv] - kv[vv]) * beta[h];
+            for (int vv = 0; vv < vdim; vv++) dl[vv] = (vd[vv] - kvl[vv]) * beta[h];
             /* Sh += outer(kd, delta) */
             for (int kk = 0; kk < kdim; kk++) {
-                float kkd = kd[kk];
-                for (int vv = 0; vv < vdim; vv++) Sh[(int64_t)kk * vdim + vv] += kkd * delta[vv];
+                float kkd = kd[kk]; float *Sr = Sh + (int64_t)kk * vdim;
+                for (int vv = 0; vv < vdim; vv++) Sr[vv] += kkd * dl[vv];
             }
             /* out = qd @ Sh */
             const float *qd = q + (int64_t)h * kdim;
-            for (int vv = 0; vv < vdim; vv++) {
-                float acc = 0.f;
-                for (int kk = 0; kk < kdim; kk++) acc += qd[kk] * Sh[(int64_t)kk * vdim + vv];
-                outv[(int64_t)h * vdim + vv] = acc;
+            float *ov = outv + (int64_t)h * vdim;
+            for (int vv = 0; vv < vdim; vv++) ov[vv] = 0.f;
+            for (int kk = 0; kk < kdim; kk++) {
+                float qkd = qd[kk]; const float *Sr = Sh + (int64_t)kk * vdim;
+                for (int vv = 0; vv < vdim; vv++) ov[vv] += qkd * Sr[vv];
             }
         }
         /* per-head Gated RMSNorm (plain weight, r=1/sqrt(mean+eps)) then silu(z) gate, then out_proj.
          * HF Qwen3_5MoeRMSNormGated: out = (o*r)*weight * silu(z) = (o*r)*weight * z/(1+e^-z).
          * NB: it is silu (z in numerator), NOT sigmoid. */
+        #pragma omp parallel for schedule(static)
         for (int h = 0; h < vh; h++) {
             const float *o = outv + (int64_t)h * vdim;
             const float *zr = z + (int64_t)h * vdim;
@@ -1508,7 +1573,7 @@ static void deltanet(Model *m, Layer *l, int layer, float *x, int S, int pos_bas
                 outr[(int64_t)h * vdim + d] = val * zr[d] / (1.f + expf(-zr[d]));
             }
         }
-        matmul(out + (int64_t)s * H, outr, l->dn_out, 1, value_dim, H);
+        matmul_d(out + (int64_t)s * H, outr, l->dn_out, 1, value_dim, H);
         if (layer == 0 && s == 0 && getenv("DN_DBG")) {
             FILE *dbg = fopen(getenv("DN_DBG"), "wb");
             if (dbg) {
@@ -1573,7 +1638,7 @@ static float *step(Model *m, const int *ids, int S, int pos_base) {
     float *last = falloc(D);
     rmsnorm_row(last, x + (int64_t)(S-1)*D, m->final_norm, D, c->eps);
     float *logit = falloc(c->vocab);
-    matmul(logit, last, m->lm_head, 1, D, c->vocab);
+    matmul_d(logit, last, m->lm_head, 1, D, c->vocab);
     free(x); free(nrm); free(tmp); free(last);
     if (lf) fclose(lf);
     if (m->resident_collecting) {
@@ -2059,6 +2124,36 @@ int main(int argc, char **argv) {
 
     Model m; model_init(&m, snap, cap, bits);
     fprintf(stderr, "resident weights loaded in %.1fs | RSS after load: %.2f GB\n", m.dense_load_s, rss_gb());
+    /* quantize the large dense matrices to int8 (COLI_DENSE_I8=0 disables) */
+    if (dense_i8_on()) {
+        double tq = now_s();
+        Cfg *qc = &m.c; int D2 = qc->hidden;
+        int q_out = qc->q_heads * qc->q_head_dim, kv_out = qc->kv_heads * qc->k_head_dim;
+        for (int i = 0; i < qc->n_layers; i++) {
+            Layer *l = &m.L[i];
+            qdw_register(l->q, D2, q_out); qdw_register(l->k, D2, kv_out);
+            qdw_register(l->v, D2, kv_out); qdw_register(l->o, qc->o_in, D2);
+            qdw_register(l->gate, D2, qc->n_experts);
+            qdw_register(l->sh_g, D2, qc->shared_inter); qdw_register(l->sh_u, D2, qc->shared_inter);
+            qdw_register(l->sh_d, qc->shared_inter, D2);
+            qdw_register(l->dn_qkv, D2, qc->dn_conv_dim);
+            qdw_register(l->dn_z, D2, qc->dn_vheads * qc->dn_vdim);
+            qdw_register(l->dn_out, qc->dn_vheads * qc->dn_vdim, D2);
+        }
+        qdw_register(m.lm_head, D2, qc->vocab);
+        /* Free the f32 originals -- the pointers only serve as lookup keys in
+         * matmul_d from here on (never dereferenced again).
+         * COLI_KEEP_F32=1 keeps them (debug). */
+        double freed = 0;
+        if (!getenv("COLI_KEEP_F32")) {
+            for (int i = 0; i < g_qdw_n; i++) {
+                freed += (double)g_qdw[i].I * g_qdw[i].O * sizeof(float);
+                free((void*)g_qdw[i].w);
+            }
+        }
+        fprintf(stderr, "[dense-i8] %d matrices quantized in %.1f s, %.1f GB f32 freed\n",
+                g_qdw_n, now_s()-tq, freed/1073741824.0);
+    }
 
     /* optional transparent Vulkan compute backend for the routed-expert GEMVs.
      * Only attempted when gpu_probe() found a compute-capable device; if vg_init
