@@ -1839,6 +1839,123 @@ static int *read_int_array(jval *o, const char *key, int *n_out) {
 }
 
 #ifndef QWEN36_NO_MAIN
+
+/* ===================== coli serve mode (SERVE=1) ===================== *
+ * Implements the colibri gateway wire protocol so `coli chat` / `coli web` /
+ * `coli serve` can drive this engine. Without it the engine is unreachable:
+ * users run `coli chat`, not the binary directly.
+ * Protocol (matches kimi_k3.c / inkling.c, the other non-GLM engines):
+ *   engine:  \x01\x01READY\x01\x01\n
+ *            STAT 0 0.00 0.0 <rss>\n
+ *   gateway: SUBMIT <id> <slot> <plen> <max_tok> <temp> <top_p>\n <payload bytes>\n
+ *   engine:  ACCEPT <id> <np>\n
+ *            DATA <id> <n>\n <bytes>\n     (repeated per decoded chunk)
+ *            DONE <id> STAT <gen> <tps> <hit%> <rss> <np> <limited>\n
+ *   gateway: CANCEL <id>  (abort current turn)
+ * Windows: stdout/stdin must go binary BEFORE the READY sentinel or the CRT
+ * rewrites the trailing \n as \r\n and the gateway never matches it -> the
+ * session hangs forever (#748). compat.h's coli_serve_binary_mode (#749)
+ * carries that fix for every engine; see its comment for the full story. */
+
+typedef struct { char id[64]; int max_tok; float temp, top_p; char *payload; int plen; } ServeReq;
+
+static int serve_read_req(ServeReq *q){
+    char line[512], cmd[16], id[64];
+    if(!fgets(line,sizeof(line),stdin)) return -1;
+    if(sscanf(line,"%15s %63s",cmd,id)<2) return 0;
+    if(!strcmp(cmd,"CANCEL")||!strcmp(cmd,"STOP")) return 0;
+    if(strcmp(cmd,"SUBMIT")) return 0;
+    int slot, plen, max_tok; float temp, top_p;
+    if(sscanf(line,"%*s %*s %d %d %d %f %f",&slot,&plen,&max_tok,&temp,&top_p)!=5 ||
+       plen<0||plen>(1<<24)||max_tok<1){
+        printf("ERROR %s bad submit header\n",id); fflush(stdout); return 0;
+    }
+    (void)slot;
+    char *payload=malloc((size_t)plen+1);
+    if(!payload){ printf("ERROR %s out of memory\n",id); fflush(stdout); return 0; }
+    if(fread(payload,1,(size_t)plen,stdin)!=(size_t)plen){ free(payload); return -1; }
+    (void)fgetc(stdin); payload[plen]=0;
+    snprintf(q->id,sizeof(q->id),"%s",id);
+    q->max_tok=max_tok; q->temp=temp; q->top_p=top_p;
+    q->payload=payload; q->plen=plen;
+    return 2;
+}
+
+static void serve_data(const char *id, const char *p, int n){
+    if(n<=0) return;
+    printf("DATA %s %d\n",id,n);
+    fwrite(p,1,(size_t)n,stdout); fputc('\n',stdout); fflush(stdout);
+}
+
+/* temperature + top-p sampler (ported from kimi_k3.c; vocab ~250k -> qsort O(V log V) per token) */
+typedef struct { float p; int id; } SampleProb;
+static int sample_prob_desc(const void *a, const void *b){
+    float pa=((const SampleProb*)a)->p, pb=((const SampleProb*)b)->p;
+    return (pb>pa)-(pa>pb);
+}
+static int serve_sample(const float *lo, int V, float temp, float top_p){
+    if(temp<=0.f){ int b=0; for(int i=1;i<V;i++) if(lo[i]>lo[b]) b=i; return b; }
+    SampleProb *rank=malloc((size_t)V*sizeof(SampleProb)); float mx=lo[0];
+    if(!rank){ fprintf(stderr,"OOM sampling\n"); exit(1); }
+    for(int i=1;i<V;i++) if(lo[i]>mx) mx=lo[i];
+    double sum=0;
+    for(int i=0;i<V;i++){ float p=expf((lo[i]-mx)/temp); sum+=p; rank[i]=(SampleProb){p,i}; }
+    qsort(rank,(size_t)V,sizeof(SampleProb),sample_prob_desc);
+    double cut=(top_p>0.f&&top_p<1.f)?top_p*sum:sum, kept=0; int n=0;
+    while(n<V&&kept<cut) kept+=rank[n++].p;
+    double r=((double)rand()/RAND_MAX)*kept, acc=0; int pick=rank[0].id;
+    for(int i=0;i<n;i++){ acc+=rank[i].p; if(acc>=r){ pick=rank[i].id; break; } }
+    free(rank); return pick;
+}
+
+static void serve_one(Model *m, ServeReq *q){
+    int *ids=NULL, np=0;
+    encode_text(q->payload, &ids, &np);          /* payload is raw prompt text; qwen36 adds no BOS */
+    int max_ctx = getenv("Q36_MAXT")?atoi(getenv("Q36_MAXT")):8192;
+    if(np<1 || np+q->max_tok>max_ctx){
+        printf("ERROR %s CONTEXT_EXCEEDED prompt_tokens=%d requested=%d capacity=%d\n",q->id,np,q->max_tok,max_ctx);
+        fflush(stdout); free(ids); return;
+    }
+    printf("ACCEPT %s %d\n",q->id,np); fflush(stdout);
+    m->max_t = np + q->max_tok;
+    reset_recurrent(m); ensure_kv(m); m->kv_len = 0;
+    float *lo = step(m, ids, np, 0);
+    int gen=0, limited=1;
+    int eos_id = getenv("Q36_EOS")?atoi(getenv("Q36_EOS")):151645;   /* Qwen3 <|im_end|> */
+    double t0=now_s();
+    unsigned char sbuf[16]; int sbn=0;
+    for(int s=0;s<q->max_tok;s++){
+        int tk = serve_sample(lo, m->c.vocab, q->temp, q->top_p);
+        free(lo); lo=NULL;
+        if(tk==eos_id){ limited=0; break; }
+        unsigned char tmp[256]; int tn=0; decode_id_to_bytes(tk, tmp, &tn);
+        unsigned char chunk[256]; int cn=0; utf8_drain(sbuf,&sbn,tmp,tn,chunk,&cn);
+        if(cn>0) serve_data(q->id,(char*)chunk,cn);
+        gen++;
+        lo = step(m, &tk, 1, np+s);
+    }
+    if(sbn>0) serve_data(q->id,(char*)sbuf,sbn);   /* flush trailing partial UTF-8 */
+    free(lo); free(ids);
+    double dt=now_s()-t0;
+    printf("DONE %s STAT %d %.3f %.1f %.2f %d %d\n",q->id,gen,
+           dt>0?gen/dt:0.0,0.0,rss_gb(),np,limited);
+    fflush(stdout);
+}
+
+static void serve_loop(Model *m){
+    coli_serve_binary_mode();
+    setvbuf(stdin,NULL,_IONBF,0);
+    fputs("\x01\x01READY\x01\x01\n",stdout);
+    printf("STAT 0 0.00 0.0 %.2f\n",rss_gb());
+    fflush(stdout);
+    for(;;){
+        ServeReq q={0}; int r;
+        do r=serve_read_req(&q); while(r==0);
+        if(r<0) return;
+        if(r==2){ serve_one(m,&q); free(q.payload); }
+    }
+}
+
 int main(int argc, char **argv) {
     const char *snap = getenv("SNAP");
     if (!snap) { fprintf(stderr, "set SNAP=<snapshot directory>\n"); return 1; }
@@ -1931,6 +2048,12 @@ int main(int argc, char **argv) {
                 g_qdw_n, now_s()-tq, freed/1073741824.0);
     }
 
+    /* coli serve mode: speak the gateway wire protocol instead of argv generation */
+    if (getenv("SERVE") && getenv("SERVE")[0] == '1') {
+        if (!g_tok) { fprintf(stderr, "[serve] tokenizer.json required (put in SNAP or set TOK)\n"); return 1; }
+        serve_loop(&m);
+        return 0;
+    }
 
     if (is_ref && getenv("PPL") && atoi(getenv("PPL")) == 1) {
         double nll; double t = now_s();

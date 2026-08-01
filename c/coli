@@ -323,6 +323,8 @@ def model_arch(model):
         return "olmoe"
     if "deepseek_v4" in model_type or ("deepseek" in model_type and "v4" in model_type):
         return "deepseek_v4"
+    if "qwen" in model_type:
+        return "qwen"
     return "glm"
 
 def engine_for(model):
@@ -330,7 +332,7 @@ def engine_for(model):
     if arch == "glm" or os.environ.get("COLI_ENGINE"):
         return GLM
     name = {"inkling": "inkling", "kimi": "kimi_k3", "olmoe": "olmoe",
-            "deepseek_v4": "deepseek_v4"}[arch]
+            "qwen": "qwen36", "deepseek_v4": "deepseek_v4"}[arch]
     local = os.path.join(HERE, name + _EXE)
     return local if os.path.exists(local) else os.path.join(_LIBEXEC, name + _EXE)
 
@@ -346,6 +348,7 @@ def need_model(model, engine=None):
         arch = model_arch(model)
         target = ("kimi_k3" if arch == "kimi" else "inkling" if arch == "inkling" else
                   "olmoe" if arch == "olmoe" else
+                  "qwen36" if arch == "qwen" else
                   "deepseek-v4" if arch == "deepseek_v4" else "colibri")
         sys.exit(f"{C.yel}{target} engine is not built.{C.r} Run: make -C c {target}")
 
@@ -1147,7 +1150,8 @@ def cmd_chat(a):
         need_model(a.model,engine)
         model_id=("kimi-k3-colibri" if arch=="kimi" else
                   "inkling-colibri" if arch=="inkling" else
-                  "olmoe-colibri" if arch=="olmoe" else "deepseek-v4-colibri")
+                  "olmoe-colibri" if arch=="olmoe" else
+                  "qwen36-colibri" if arch=="qwen" else "deepseek-v4-colibri")
         banner(f"chat · {model_id} · local server", model=a.model)
         import openai_server
         # --cap rides along so an explicit `coli chat --cap N` reaches the
