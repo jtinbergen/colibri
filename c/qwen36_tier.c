@@ -20,6 +20,7 @@ typedef struct {
 
 static struct {
     int on, nl, ne, D, Ih, topk, ndev;
+    int egs; size_t sc_gu, sc_d;   /* expert group size + per-matrix scale counts (gs64) */
     int dev[QT_MAX_DEV];
     size_t budget[QT_MAX_DEV], used[QT_MAX_DEV];
     size_t exp_bytes;                     /* VRAM-Bedarf je Experte (geschätzt) */
@@ -58,9 +59,9 @@ static void stage(uint8_t *dw, float *dsc,
     const uint64_t *sg=(const uint64_t*)g4,*su=(const uint64_t*)u4,*sd=(const uint64_t*)d4;
     uint64_t *w0=(uint64_t*)dw,*w1=(uint64_t*)(dw+mb),*w2=(uint64_t*)(dw+2*mb);
     for(size_t i=0;i<mb/8;i++){ w0[i]=sg[i]^X; w1[i]=su[i]^X; w2[i]=sd[i]^X; }
-    memcpy(dsc,            gs, (size_t)G.Ih*sizeof(float));
-    memcpy(dsc+G.Ih,       us, (size_t)G.Ih*sizeof(float));
-    memcpy(dsc+2*G.Ih,     ds, (size_t)G.D *sizeof(float));
+    memcpy(dsc,                 gs, G.sc_gu*sizeof(float));
+    memcpy(dsc+G.sc_gu,         us, G.sc_gu*sizeof(float));
+    memcpy(dsc+2*G.sc_gu,       ds, G.sc_d *sizeof(float));
 }
 
 static void *uploader(void *arg){
@@ -87,9 +88,16 @@ static void *uploader(void *arg){
         int dv = G.dev[home(eid)];
         size_t mb=(size_t)G.D*G.Ih/2;
         ColiCudaTensor *tg=NULL,*tu=NULL,*td=NULL;
-        int ok = coli_cuda_tensor_upload(&tg, w,      sc,          2, G.D,  G.Ih, dv)
+        int ok;
+        if(G.egs){
+            ok = coli_cuda_tensor_upload_g(&tg, w,      sc,             4, G.D,  G.Ih, dv, G.egs)
+              && coli_cuda_tensor_upload_g(&tu, w+mb,   sc+G.sc_gu,     4, G.D,  G.Ih, dv, G.egs)
+              && coli_cuda_tensor_upload_g(&td, w+2*mb, sc+2*G.sc_gu,   4, G.Ih, G.D,  dv, G.egs);
+        } else {
+            ok = coli_cuda_tensor_upload(&tg, w,      sc,          2, G.D,  G.Ih, dv)
               && coli_cuda_tensor_upload(&tu, w+mb,   sc+G.Ih,     2, G.D,  G.Ih, dv)
               && coli_cuda_tensor_upload(&td, w+2*mb, sc+2*G.Ih,   2, G.Ih, G.D,  dv);
+        }
         free(w); free(sc);
         pthread_mutex_lock(&G.mx);
         QSlot *s=qs(layer,eid);
@@ -101,7 +109,7 @@ static void *uploader(void *arg){
     }
 }
 
-int qt_init(int nl, int ne, int D, int Ih, int cap, int topk){
+int qt_init(int nl, int ne, int D, int Ih, int cap, int topk, int expert_gs){
     const char *e=getenv("COLI_CUDA");
     if(!(e && *e=='1')) return 0;
     if(cap != ne){
@@ -123,7 +131,10 @@ int qt_init(int nl, int ne, int D, int Ih, int cap, int topk){
     if(G.ndev<1){ fprintf(stderr,"[qtier] keine CUDA-Devices -> CPU\n"); return 0; }
 
     /* Budget je Device: CUDA_EXPERT_GB oder auto = frei - 1 GB Headroom */
-    G.exp_bytes = 3ull*D*Ih/2 + (size_t)(2*Ih+D)*sizeof(float) + 4096; /* + Alloc-Verschnitt */
+    G.egs = expert_gs;
+    G.sc_gu = expert_gs ? (size_t)Ih * ((D + expert_gs - 1)/expert_gs) : (size_t)Ih;
+    G.sc_d  = expert_gs ? (size_t)D  * ((Ih + expert_gs - 1)/expert_gs) : (size_t)D;
+    G.exp_bytes = 3ull*D*Ih/2 + (2*G.sc_gu+G.sc_d)*sizeof(float) + 4096;
     const char *bg=getenv("CUDA_EXPERT_GB");
     for(int i=0;i<G.ndev;i++){
         size_t freeb=0,totb=0; coli_cuda_mem_info(G.dev[i],&freeb,&totb);
@@ -181,7 +192,7 @@ static int enqueue_locked(int layer,int eid,int v_layer,int v_eid,int reserved){
     int hd=home(eid);
     if(!reserved && v_eid<0 && G.used[hd]+G.exp_bytes>G.budget[hd]) return 0;
     size_t mb=(size_t)G.D*G.Ih/2;
-    uint8_t *w=malloc(3*mb); float *sc=malloc((size_t)(2*G.Ih+G.D)*sizeof(float));
+    uint8_t *w=malloc(3*mb); float *sc=malloc((2*G.sc_gu+G.sc_d)*sizeof(float));
     if(!w||!sc){ free(w); free(sc); return 0; }
     if(!reserved && v_eid<0) G.used[hd]+=G.exp_bytes;
     s->queued=1;

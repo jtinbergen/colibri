@@ -20,7 +20,7 @@
  * cap_experts_per_layer muss == n_experts sein (volle RAM-Residenz, Z5);
  * sonst bleibt der Tier aus (Upload-Zeiger könnten sonst evicted werden). */
 int  qt_init(int n_layers, int n_experts, int hidden, int inter,
-             int cap_experts_per_layer, int topk);
+             int cap_experts_per_layer, int topk, int expert_gs);
 int  qt_ready(void);
 int  qt_is_resident(int layer, int eid);
 void qt_shutdown(void);

@@ -545,6 +545,7 @@ typedef struct {
     uint8_t *is_attn;   /* [n_layers] 1 if Gated Attention layer, 0 if DeltaNet */
     /* Gated DeltaNet (linear_attention) dims, read from qwen36_meta.json. */
     int dn_vheads, dn_kheads, dn_kdim, dn_vdim, dn_convk, dn_conv_dim;
+    int expert_gs;      /* expert scale group size; 0 = per-row */
 } Cfg;
 
 /* ---------- per-layer dense weights ---------- */
@@ -754,6 +755,57 @@ static void matmul_q(float *y, const float *x, const int8_t *q, const float *sca
 #endif
 }
 
+/* Group-scaled int8 GEMV: one f32 scale per `gs` input elements per row
+ * (gs64 containers). Scale row layout [O][I/gs]. */
+static int g_expert_gs = 0;
+static void matmul_q_gs(float *y, const float *x, const int8_t *q, const float *scale,
+                        int I, int O, int gs) {
+    int ng = (I + gs - 1) / gs;
+#if defined(__AVX2__) && defined(__FMA__)
+    if ((gs & 31) == 0) {
+        #pragma omp parallel for schedule(static) if(O >= 256)
+        for (int o = 0; o < O; o++) {
+            const int8_t *w = q + (int64_t)o * I;
+            const float *sc = scale + (int64_t)o * ng;
+            float acc = 0.f;
+            for (int gi = 0; gi < ng; gi++) {
+                __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
+                int base = gi * gs, end = base + gs; if (end > I) end = I;
+                for (int i = base; i + 16 <= end; i += 16) {
+                    __m128i b0 = _mm_loadu_si128((const __m128i*)(w + i));
+                    a0 = _mm256_fmadd_ps(_mm256_loadu_ps(x+i),   _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(b0)), a0);
+                    a1 = _mm256_fmadd_ps(_mm256_loadu_ps(x+i+8), _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(b0,8))), a1);
+                }
+                a0 = _mm256_add_ps(a0, a1);
+                __m128 s = _mm_add_ps(_mm256_castps256_ps128(a0), _mm256_extractf128_ps(a0,1));
+                s = _mm_add_ps(s, _mm_movehl_ps(s,s));
+                s = _mm_add_ss(s, _mm_shuffle_ps(s,s,1));
+                acc += _mm_cvtss_f32(s) * sc[gi];
+            }
+            y[o] = acc;
+        }
+        return;
+    }
+#endif
+    #pragma omp parallel for schedule(static) if(O >= 256)
+    for (int o = 0; o < O; o++) {
+        const int8_t *w = q + (int64_t)o * I;
+        const float *sc = scale + (int64_t)o * ng;
+        float acc = 0.f;
+        for (int gi = 0; gi < ng; gi++) {
+            int base = gi * gs, end = base + gs; if (end > I) end = I;
+            float part = 0.f;
+            for (int i = base; i < end; i++) part += x[i] * (float)w[i];
+            acc += part * sc[gi];
+        }
+        y[o] = acc;
+    }
+}
+static void matmul_qe(float *y, const float *x, const int8_t *q, const float *scale, int I, int O) {
+    if (g_expert_gs) matmul_q_gs(y, x, q, scale, I, O, g_expert_gs);
+    else matmul_q(y, x, q, scale, I, O);
+}
+
 /* ---- M4 (R2): Dense-int8 — per-row-quantisierte Kopien großer f32-Matrizen.
  * matmul_d dispatcht per Zeiger-Lookup auf matmul_q; COLI_DENSE_I8=0 schaltet
  * zurück auf f32 (Referenzpfad für Paritätstests). ~4x weniger Speicherverkehr. */
@@ -858,6 +910,7 @@ static void load_meta(Cfg *c, const char *snap) {
         G("q_heads", q_heads); G("kv_heads", kv_heads); G("head_dim", head_dim);
         G("q_head_dim", q_head_dim); G("k_head_dim", k_head_dim); G("v_head_dim", v_head_dim);
         G("o_in", o_in); G("rope_dim", rope_dim); G("qk_rope_head_dim", rope_dim);
+        G("expert_gs", expert_gs);
         G("num_experts", n_experts); G("topk", topk);
         G("moe_inter", inter); G("shared_inter", shared_inter);
         G("n_group", n_group); G("topk_group", topk_group);
@@ -1013,6 +1066,9 @@ static void model_init(Model *m, const char *snap, int cap, int bits) {
     m->dense_load_s = now_s() - t0;
 }
 
+static int64_t scale_count_gu(const Cfg *c){ return c->expert_gs ? (int64_t)c->inter * ((c->hidden + c->expert_gs - 1) / c->expert_gs) : c->inter; }
+static int64_t scale_count_d (const Cfg *c){ return c->expert_gs ? (int64_t)c->hidden * ((c->inter  + c->expert_gs - 1) / c->expert_gs) : c->hidden; }
+
 static void slot_ensure_allocated(Model *m, Slot *s) {
     if (s->g) return;
     Cfg *c = &m->c;
@@ -1023,10 +1079,10 @@ static void slot_ensure_allocated(Model *m, Slot *s) {
     s->g = w_block;
     s->u = w_block + ng;
     s->d = w_block + ng + ng;
-    float *s_block = falloc(c->inter + c->inter + c->hidden);
+    float *s_block = falloc(2*scale_count_gu(c) + scale_count_d(c));
     s->gs = s_block;
-    s->us = s_block + c->inter;
-    s->ds = s_block + c->inter + c->inter;
+    s->us = s_block + scale_count_gu(c);
+    s->ds = s_block + 2*scale_count_gu(c);
     s->pinned = 0;
     s->is_int4 = 0;
     s->g4 = s->u4 = s->d4 = NULL;   /* packed int4 (allocated on int4 load if GPU int4 active) */
@@ -1040,7 +1096,7 @@ static void load_expert_merged(Model *m, int layer, int eid, Slot *s) {
     Cfg *cc = &m->c;
     int64_t ng = (int64_t)cc->inter * cc->hidden, nd = (int64_t)cc->hidden * cc->inter;
     int64_t want_w = ng + ng + nd;
-    int64_t want_s = (int64_t)cc->inter + cc->inter + cc->hidden;
+    int64_t want_s = 2*scale_count_gu(cc) + scale_count_d(cc);
     st_tensor *tw = st_find(&m->S, nm), *ts = st_find(&m->S, qsnm);
     if (!tw || (tw->nbytes != want_w && tw->nbytes != want_w / 2)) {
         fprintf(stderr, "%s: expert weight is %lld bytes — expected %lld (int8) or %lld (int4)\n",
@@ -1442,10 +1498,10 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
                 if (qmask & (1u<<kk)) continue;
                 Slot *e; expert_get(m, layer, idx[kk], &e);
                 slot_ensure_int8(m, e);
-                matmul_q(g, xs, e->g, e->gs, D, I);
-                matmul_q(u, xs, e->u, e->us, D, I);
+                matmul_qe(g, xs, e->g, e->gs, D, I);
+                matmul_qe(u, xs, e->u, e->us, D, I);
                 for (int i = 0; i < I; i++) { float gv = g[i]; g[i] = (gv / (1.f + expf(-gv))) * u[i]; }
-                matmul_q(hh, g, e->d, e->ds, I, D);
+                matmul_qe(hh, g, e->d, e->ds, I, D);
                 float w = val[kk]; float *os = out + (int64_t)s*D;
                 for (int d = 0; d < D; d++) os[d] += w * hh[d];
             }
@@ -1521,10 +1577,10 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
             for (int kk = 0; kk < K; kk++) {
                 Slot *e; expert_get(m, layer, idx[kk], &e);
                 slot_ensure_int8(m, e);
-                matmul_q(g, xs, e->g, e->gs, D, I);
-                matmul_q(u, xs, e->u, e->us, D, I);
+                matmul_qe(g, xs, e->g, e->gs, D, I);
+                matmul_qe(u, xs, e->u, e->us, D, I);
                 for (int i = 0; i < I; i++) { float gv = g[i]; g[i] = (gv / (1.f + expf(-gv))) * u[i]; }
-                matmul_q(hh, g, e->d, e->ds, I, D);
+                matmul_qe(hh, g, e->d, e->ds, I, D);
                 float w = val[kk];
                 float *os = out + (int64_t)s*D;
                 for (int d = 0; d < D; d++) os[d] += w * hh[d];
@@ -2136,6 +2192,7 @@ int main(int argc, char **argv) {
     }
 
     Model m; model_init(&m, snap, cap, bits);
+    g_expert_gs = m.c.expert_gs;
     fprintf(stderr, "resident weights loaded in %.1fs | RSS after load: %.2f GB\n", m.dense_load_s, rss_gb());
     /* M4 (R2): grosse Dense-Matrizen int8-quantisieren (COLI_DENSE_I8=0 = aus) */
     if (dense_i8_on()) {
@@ -2171,7 +2228,7 @@ int main(int argc, char **argv) {
     /* R2 M-QTIER: CUDA-VRAM-Experten-Tier (COLI_CUDA=1) hat Vorrang; der
      * Vulkan-Pfad bleibt als Fallback (S3) und wird dann gar nicht erst
      * initialisiert. */
-    if (qt_init(m.c.n_layers, m.c.n_experts, m.c.hidden, m.c.inter, cap, m.c.topk)) {
+    if (qt_init(m.c.n_layers, m.c.n_experts, m.c.hidden, m.c.inter, cap, m.c.topk, m.c.expert_gs)) {
         fprintf(stderr, "[gpu] MoE experts -> CUDA VRAM tier\n");
         atexit(qt_shutdown);
         g_gpu_backend = GPU_BACKEND_CPU;   /* Vulkan aus; CPU ist der Miss-Fallback */

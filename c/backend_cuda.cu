@@ -966,13 +966,19 @@ extern "C" int coli_cuda_expert_group_issue(ColiCudaTensor *const *gates,
         int r=rows[c];
         float *g16=ctx->gate+(size_t)host[c].offset*I,*u16=ctx->up+(size_t)host[c].offset*I;
         float *x16=ctx->x+(size_t)host[c].offset*D,*y16=ctx->y+(size_t)host[c].offset*D;
+        /* fmt=4 grouped int4: pass the tensor's real group size + ng so the
+         * per-group scales are applied (was hard-coded 0,1 = per-row -> wrong
+         * results on gs64 grouped containers). */
+        int ggs=host[c].ggs, gng=ggs>0?(D+ggs-1)/ggs:1;
+        int ugs=host[c].ugs, ung=ugs>0?(D+ugs-1)/ugs:1;
+        int dgs=host[c].dgs, dng=dgs>0?(I+dgs-1)/dgs:1;
         quant_matmul<<<dim3((unsigned)I,(unsigned)r),256,0,ctx->stream>>>(g16,x16,
-            host[c].g,host[c].gs,host[c].gf,r,D,I,row_bytes(host[c].gf,D),0,1);
+            host[c].g,host[c].gs,host[c].gf,r,D,I,row_bytes(host[c].gf,D),ggs,gng);
         quant_matmul<<<dim3((unsigned)I,(unsigned)r),256,0,ctx->stream>>>(u16,x16,
-            host[c].u,host[c].us,host[c].uf,r,D,I,row_bytes(host[c].uf,D),0,1);
+            host[c].u,host[c].us,host[c].uf,r,D,I,row_bytes(host[c].uf,D),ugs,ung);
         silu_mul<<<(unsigned)(((size_t)r*I+255)/256),256,0,ctx->stream>>>(g16,u16,(size_t)r*I);
         quant_matmul<<<dim3((unsigned)D,(unsigned)r),256,0,ctx->stream>>>(y16,g16,
-            host[c].d,host[c].ds,host[c].df,r,I,D,row_bytes(host[c].df,I),0,1);
+            host[c].d,host[c].ds,host[c].df,r,I,D,row_bytes(host[c].df,I),dgs,dng);
     }
     if(!cuda_ok(cudaGetLastError(),"expert group issue launch")||
        !cuda_ok(cudaMemcpyAsync(ctx->host_y,ctx->y,xb,cudaMemcpyDeviceToHost,ctx->stream),
