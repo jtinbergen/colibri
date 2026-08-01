@@ -84,7 +84,25 @@ def pack_int4(q: "torch.Tensor") -> "torch.Tensor":
     return (lo | hi).contiguous()
 
 
-def make_merged(gate, up, down, ebits):
+def quantize_row_grouped(w: "torch.Tensor", bits: int, gs: int):
+    """Group-wise symmetric quantization: one f32 scale per `gs` input elements
+    per row (like GLM's gs64 containers). Returns (q int8 [O,I], scales f32
+    [O, ceil(I/gs)] flattened row-major)."""
+    qmax = (1 << (bits - 1)) - 1
+    O, I = w.shape[0], w.reshape(w.shape[0], -1).shape[1]
+    w_f32 = w.reshape(O, -1).float()
+    pad = (-I) % gs
+    if pad:
+        w_f32 = torch.nn.functional.pad(w_f32, (0, pad))
+    ng = w_f32.shape[1] // gs
+    g = w_f32.view(O, ng, gs)
+    scales = g.abs().amax(dim=2, keepdim=True).clamp(min=1e-12) / qmax
+    q = (g / scales).round().clamp(-qmax - 1, qmax).to(torch.int8).view(O, -1)[:, :I]
+    return q, scales.view(O, ng)
+
+
+def make_merged(gate, up, down, ebits, gs=0):
+    gsz = gs   # local `gs` is rebound to the gate scales below -- keep the group size safe
     """gate/up: [inter, H]; down: [H, inter] (torch, any fp).
     -> (merged_weight, qs f32 1D).
 
@@ -96,6 +114,9 @@ def make_merged(gate, up, down, ebits):
     qs (per-row f32 scales) is identical in both cases.
     """
     def q(t):
+        if gsz:
+            qt, s = quantize_row_grouped(t, ebits, gsz)   # [O, ng] scales
+            return qt, s.reshape(-1)
         qt, s = quantize_row(t.reshape(t.shape[0], -1), ebits)  # rows along dim0
         return qt, s
     gq, gs = q(gate)
@@ -189,6 +210,9 @@ def main():
     src.add_argument("--model", help="Local HF checkpoint directory")
     ap.add_argument("--out", required=False, help="Output container directory")
     ap.add_argument("--ebits", type=int, default=4, help="Expert quant bits (2..8, default 4)")
+    ap.add_argument("--gs", type=int, default=0,
+                    help="Group size for expert scales (e.g. 64). 0 = per-row (default). "
+                         "Group-scaled containers need engine support (expert_gs in meta).")
     ap.add_argument("--upload-repo", help="Push the finished container to this HF repo ID")
     ap.add_argument("--hf-token", help="HF token (defaults to HF_TOKEN env / cached login)")
     ap.add_argument("--low-disk", action="store_true",
@@ -430,7 +454,7 @@ def main():
                 dk = k.replace("gate_up_proj", "down_proj")
                 down = get_tensor(dk).float()        # [E, H, inter]
                 for e in range(E):
-                    mw, qs = make_merged(gate[e], up[e], down[e], args.ebits)
+                    mw, qs = make_merged(gate[e], up[e], down[e], args.ebits, gs=args.gs)
                     tens[f"model.layers.{a}.mlp.experts.{e}.merged_weight"] = mw
                     tens[f"model.layers.{a}.mlp.experts.{e}.qs"] = qs
                 continue
@@ -442,7 +466,7 @@ def main():
         for e in sorted(sep):
             d = sep[e]
             if "gate_proj" in d and "up_proj" in d and "down_proj" in d:
-                mw, qs = make_merged(d["gate_proj"], d["up_proj"], d["down_proj"], args.ebits)
+                mw, qs = make_merged(d["gate_proj"], d["up_proj"], d["down_proj"], args.ebits, gs=args.gs)
                 tens[f"model.layers.{a}.mlp.experts.{e}.merged_weight"] = mw
                 tens[f"model.layers.{a}.mlp.experts.{e}.qs"] = qs
             else:
@@ -513,6 +537,7 @@ def main():
             meta["o_in"] = op[1]
         if qn is not None:
             meta["qk_rope_head_dim"] = qn[0]
+        meta["expert_gs"] = args.gs   # 0 = per-row scales; >0 = group size along input dim
         meta["head_dim"] = meta.get("k_head_dim", meta.get("q_head_dim", 256))
         meta["rope_dim"] = meta.get("qk_rope_head_dim", meta["head_dim"] // 4)
     # ---- DeltaNet (linear_attention) dims. From config (authoritative for dn; unlike the
