@@ -162,13 +162,15 @@ def model_arch(model):
         return "inkling"
     if "kimi" in model_type:
         return "kimi"
+    if "qwen" in model_type:
+        return "qwen"
     return "glm"
 
 def engine_for(model):
     arch = model_arch(model)
     if arch == "glm" or os.environ.get("COLI_ENGINE"):
         return GLM
-    name = "inkling" if arch == "inkling" else "kimi_k3"
+    name = "inkling" if arch == "inkling" else "kimi_k3" if arch == "kimi" else "qwen36" if arch == "qwen" else "colibri"
     local = os.path.join(HERE, name + _EXE)
     return local if os.path.exists(local) else os.path.join(_LIBEXEC, name + _EXE)
 
@@ -180,7 +182,7 @@ def need_model(model, engine=None):
     engine = engine or engine_for(model)
     if not os.path.exists(engine):
         arch = model_arch(model)
-        target = "kimi_k3" if arch == "kimi" else "inkling" if arch == "inkling" else "colibri"
+        target = "kimi_k3" if arch == "kimi" else "inkling" if arch == "inkling" else "qwen36" if arch == "qwen" else "colibri"
         sys.exit(f"{C.yel}{target} engine is not built.{C.r} Run: make -C c {target}")
 
 def env_for_engine(a, arch):
@@ -737,7 +739,7 @@ def cmd_chat(a):
     if arch!="glm":
         engine=engine_for(a.model)
         need_model(a.model,engine)
-        model_id="kimi-k3-colibri" if arch=="kimi" else "inkling-colibri"
+        model_id="kimi-k3-colibri" if arch=="kimi" else "inkling-colibri" if arch=="inkling" else "qwen36-colibri" if arch=="qwen" else "colibri-colibri"
         banner(f"chat · {model_id} · local server")
         import openai_server
         cmd=[sys.executable,openai_server.__file__,"--model",a.model,
