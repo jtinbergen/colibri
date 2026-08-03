@@ -541,7 +541,7 @@ def _tool_hold():
     return max(len(m) for m in _tool_stream_markers()) - 1
 
 
-ARCH = "glm"   # set in main(): glm | inkling | kimi | deepseek_v4
+ARCH = "glm"   # set in main(): glm | inkling | kimi | qwen | deepseek_v4
 
 INK_THINK, INK_TEXT = "<|content_thinking|>", "<|content_text|>"
 
@@ -974,6 +974,37 @@ def render_chat_olmoe(messages, enable_thinking=False, reasoning_effort=None, to
     return "".join(parts)
 
 
+def render_chat_qwen(messages, enable_thinking=False, reasoning_effort=None, tools=None,
+                     tool_choice=None):
+    """Text-only subset of Qwen3.6's chat_template: <|im_start|>role\\n ...
+    <|im_end|>\\n frames, then the generation prompt. The official template
+    opens a mandatory <think> block after `<|im_start|>assistant\\n` — the
+    model was never trained on the bare `assistant\\n` state, and greedy
+    argmax there lands on an EOS special (measured: gen=0). With thinking
+    disabled the template pre-closes the block instead; both branches are
+    mirrored here byte for byte."""
+    if not isinstance(messages, list) or not messages:
+        raise APIError(400, "`messages` must be a non-empty array.", "messages")
+    if tools or tool_choice not in (None, "none"):
+        raise APIError(400, "Tool use is not wired up for the qwen36 engine yet.",
+                       "tools", "unsupported_parameter")
+    parts = []
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            raise APIError(400, "Each message must be an object.", f"messages.{index}")
+        role = message.get("role")
+        if role == "developer":
+            role = "system"
+        if role not in ("system", "user", "assistant"):
+            raise APIError(400, f"Unsupported role {role!r}.", f"messages.{index}.role")
+        raw = message.get("content")
+        text = content_text(raw, f"messages.{index}.content") if raw is not None else ""
+        parts.append(f"<|im_start|>{role}\n{text}<|im_end|>\n")
+    parts.append("<|im_start|>assistant\n")
+    parts.append("<think>\n" if enable_thinking else "<think>\n\n</think>\n\n")
+    return "".join(parts)
+
+
 def render_chat_inkling(messages, enable_thinking=False, reasoning_effort=None, tools=None,
                         tool_choice=None, audio_out=None):
     """Text-only subset of Inkling's chat_template.jinja: role tokens with
@@ -1149,6 +1180,7 @@ def render_chat_for_arch(messages, enable_thinking=False, reasoning_effort=None,
         return render_chat_inkling(messages, enable_thinking, reasoning_effort, tools,
                                     tool_choice, audio_out=audio_out)
     renderer = (render_chat_kimi if ARCH == "kimi" else
+                render_chat_qwen if ARCH == "qwen" else
                 render_chat_v4 if ARCH == "deepseek_v4" else
                 render_chat_olmoe if ARCH == "olmoe" else render_chat)
     return renderer(messages, enable_thinking, reasoning_effort, tools, tool_choice)
@@ -1684,6 +1716,8 @@ def model_arch(model):
         return "deepseek_v4"
     if "olmoe" in model_type:
         return "olmoe"
+    if "qwen" in model_type:
+        return "qwen"
     return "glm"
 
 
@@ -3127,7 +3161,7 @@ def serve(model, host="127.0.0.1", port=8000, model_id="glm-5.2-colibri", api_ke
         raise ValueError("queue_timeout must be positive")
     if not 1 <= kv_slots <= 16:
         raise ValueError("kv_slots must be between 1 and 16")
-    if ARCH in ("inkling", "kimi", "deepseek_v4", "olmoe") and kv_slots != 1:
+    if ARCH in ("inkling", "kimi", "qwen", "deepseek_v4", "olmoe") and kv_slots != 1:
         raise ValueError(f"{ARCH} engine currently supports exactly one KV slot")
     if host not in ("127.0.0.1", "localhost", "::1") and not api_key:
         # (#SEC-6) Fail closed: an unauthenticated engine on a non-loopback bind exposes
@@ -3167,7 +3201,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default=os.environ.get("COLI_MODEL"), required=not os.environ.get("COLI_MODEL"))
     parser.add_argument("--engine", default=str(default_engine()))
-    parser.add_argument("--arch", choices=("auto", "glm", "inkling", "kimi", "deepseek_v4", "olmoe"), default="auto",
+    parser.add_argument("--arch", choices=("auto", "glm", "inkling", "kimi", "qwen", "deepseek_v4", "olmoe"), default="auto",
                         help="chat-template family; auto reads model_type from the model's config.json")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
@@ -3197,6 +3231,7 @@ def main():
     if args.model_id is None:
         args.model_id = ("inkling-colibri" if ARCH == "inkling" else
                          "kimi-k3-colibri" if ARCH == "kimi" else
+                         "qwen36-colibri" if ARCH == "qwen" else
                          "deepseek-v4-colibri" if ARCH == "deepseek_v4" else
                          "olmoe-colibri" if ARCH == "olmoe" else
                          "glm-5.2-colibri")
