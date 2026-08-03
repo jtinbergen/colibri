@@ -1966,6 +1966,21 @@ static int serve_sample(const float *lo, int V, float temp, float top_p){
     free(rank); return pick;
 }
 
+/* Chat turns end on <|im_end|>, base completions on <|endoftext|>. Resolve
+ * both ids from the tokenizer's added_tokens: Qwen3.6's 248320-token vocab
+ * puts them at 248044+, so the old hardcoded 151645 (the 151k-vocab Qwen id)
+ * silently never matched and every serve turn ran into max_tok. Q36_EOS
+ * still overrides for experiments. */
+static int serve_eos_ids(int *ids, int cap){
+    int n=0;
+    if(getenv("Q36_EOS")){ ids[n++]=atoi(getenv("Q36_EOS")); return n; }
+    for(int k=0;k<g_nspecial && n<cap;k++)
+        if(!strcmp(g_sp_str[k],"<|im_end|>")||!strcmp(g_sp_str[k],"<|endoftext|>"))
+            ids[n++]=g_sp_id[k];
+    if(!n) ids[n++]=151645;   /* tokenizer without added_tokens: old default */
+    return n;
+}
+
 static void serve_one(Model *m, ServeReq *q){
     int *ids=NULL, np=0;
     encode_text(q->payload, &ids, &np);          /* payload is raw prompt text; qwen36 adds no BOS */
@@ -1979,13 +1994,14 @@ static void serve_one(Model *m, ServeReq *q){
     reset_recurrent(m); ensure_kv(m); m->kv_len = 0;
     float *lo = step(m, ids, np, 0);
     int gen=0, limited=1;
-    int eos_id = getenv("Q36_EOS")?atoi(getenv("Q36_EOS")):151645;   /* Qwen3 <|im_end|> */
+    int eos_ids[4]; int n_eos=serve_eos_ids(eos_ids,4);
     double t0=now_s();
     unsigned char sbuf[16]; int sbn=0;
     for(int s=0;s<q->max_tok;s++){
         int tk = serve_sample(lo, m->c.vocab, q->temp, q->top_p);
         free(lo); lo=NULL;
-        if(tk==eos_id){ limited=0; break; }
+        int is_eos=0; for(int e=0;e<n_eos;e++) if(tk==eos_ids[e]) is_eos=1;
+        if(is_eos){ limited=0; break; }
         unsigned char tmp[256]; int tn=0; decode_id_to_bytes(tk, tmp, &tn);
         unsigned char chunk[256]; int cn=0; utf8_drain(sbuf,&sbn,tmp,tn,chunk,&cn);
         if(cn>0) serve_data(q->id,(char*)chunk,cn);
