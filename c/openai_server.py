@@ -477,7 +477,7 @@ def _tool_hold():
     return max(len(m) for m in _tool_stream_markers()) - 1
 
 
-ARCH = "glm"   # set in main(): glm | inkling | kimi | deepseek_v4
+ARCH = "glm"   # set in main(): glm | inkling | kimi | qwen | deepseek_v4
 
 INK_THINK, INK_TEXT = "<|content_thinking|>", "<|content_text|>"
 
@@ -910,6 +910,37 @@ def render_chat_olmoe(messages, enable_thinking=False, reasoning_effort=None, to
     return "".join(parts)
 
 
+def render_chat_qwen(messages, enable_thinking=False, reasoning_effort=None, tools=None,
+                     tool_choice=None):
+    """Text-only subset of Qwen3.6's chat_template: <|im_start|>role\\n ...
+    <|im_end|>\\n frames, then the generation prompt. The official template
+    opens a mandatory <think> block after `<|im_start|>assistant\\n` — the
+    model was never trained on the bare `assistant\\n` state, and greedy
+    argmax there lands on an EOS special (measured: gen=0). With thinking
+    disabled the template pre-closes the block instead; both branches are
+    mirrored here byte for byte."""
+    if not isinstance(messages, list) or not messages:
+        raise APIError(400, "`messages` must be a non-empty array.", "messages")
+    if tools or tool_choice not in (None, "none"):
+        raise APIError(400, "Tool use is not wired up for the qwen36 engine yet.",
+                       "tools", "unsupported_parameter")
+    parts = []
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            raise APIError(400, "Each message must be an object.", f"messages.{index}")
+        role = message.get("role")
+        if role == "developer":
+            role = "system"
+        if role not in ("system", "user", "assistant"):
+            raise APIError(400, f"Unsupported role {role!r}.", f"messages.{index}.role")
+        raw = message.get("content")
+        text = content_text(raw, f"messages.{index}.content") if raw is not None else ""
+        parts.append(f"<|im_start|>{role}\n{text}<|im_end|>\n")
+    parts.append("<|im_start|>assistant\n")
+    parts.append("<think>\n" if enable_thinking else "<think>\n\n</think>\n\n")
+    return "".join(parts)
+
+
 def render_chat_inkling(messages, enable_thinking=False, reasoning_effort=None, tools=None,
                         tool_choice=None, audio_out=None):
     """Text-only subset of Inkling's chat_template.jinja: role tokens with
@@ -1085,6 +1116,7 @@ def render_chat_for_arch(messages, enable_thinking=False, reasoning_effort=None,
         return render_chat_inkling(messages, enable_thinking, reasoning_effort, tools,
                                     tool_choice, audio_out=audio_out)
     renderer = (render_chat_kimi if ARCH == "kimi" else
+                render_chat_qwen if ARCH == "qwen" else
                 render_chat_v4 if ARCH == "deepseek_v4" else
                 render_chat_olmoe if ARCH == "olmoe" else render_chat)
     return renderer(messages, enable_thinking, reasoning_effort, tools, tool_choice)
