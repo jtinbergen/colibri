@@ -2042,6 +2042,11 @@ int main(int argc, char **argv) {
     int *prompt=NULL, *full=NULL, *out=NULL;
     int np=0, nfull=0, n_new=0;
     char *buf=NULL, *arena=NULL;
+    /* serve mode gets its prompts over the wire: skip the argv prompt file
+     * entirely, or the default "ref.json" kills the engine before serve_loop
+     * is ever reached — which is exactly how `coli` launches it (SERVE=1, no
+     * prompt argument). */
+    int serve_mode = getenv("SERVE") && getenv("SERVE")[0]=='1';
 
     /* load tokenizer early so text-prompt mode can encode before model_init */
     {
@@ -2051,7 +2056,9 @@ int main(int argc, char **argv) {
         else { char tpb[2048]; snprintf(tpb,sizeof tpb,"%s/tokenizer.json",snap); load_tokenizer(tpb); }
     }
 
-    if (is_ref) {
+    if (serve_mode) {
+        /* no argv prompt to load */
+    } else if (is_ref) {
         FILE *f = fopen(refpath, "rb"); if (!f) { perror(refpath); return 1; }
         fseek(f,0,SEEK_END); long n=ftell(f); fseek(f,0,SEEK_SET);
         buf=malloc(n+1); if (fread(buf,1,n,f)!=(size_t)n) {} buf[n]=0; fclose(f);
