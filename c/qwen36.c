@@ -26,9 +26,33 @@
 #include <stdint.h>
 #include <time.h>
 #include <pthread.h>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 #if defined(__AVX2__)
 #include <immintrin.h>
 #endif
+
+/* Hard context ceiling: the model's max_position_embeddings. Every buffer that
+ * scales with position (KV cache, attention score row) is allocated from max_t,
+ * so this is a policy limit, not a buffer limit -- but it is ONE limit, named
+ * once. It used to be the literal 8192 in two unrelated places: the size of a
+ * stack array in attention() and the default of Q36_MAXT in serve_one(). They
+ * agreed by luck, and raising Q36_MAXT moved the guard without moving the
+ * buffer, so a longer prompt overran the stack instead of being refused.
+ * Context costs 40 KB/token in KV (10 attention layers, f32) -- 128k is 5.0 GiB
+ * -- which is why Q36_MAXT still defaults far below this. */
+#define QWEN36_ATTN_MAX_CTX 262144
+#define QWEN36_DEFAULT_MAX_CTX 8192
+
+/* Effective ceiling: Q36_MAXT if set and sane, the conservative default
+ * otherwise; never above the hard limit. */
+static int qwen36_max_ctx(void) {
+    const char *e = getenv("Q36_MAXT");
+    int v = (e && *e) ? atoi(e) : QWEN36_DEFAULT_MAX_CTX;
+    if (v < 1) v = QWEN36_DEFAULT_MAX_CTX;
+    return v > QWEN36_ATTN_MAX_CTX ? QWEN36_ATTN_MAX_CTX : v;
+}
 #if defined(__APPLE__) || defined(__linux__) || defined(__FreeBSD__)
 #include <sys/resource.h>
 #include <unistd.h>
@@ -574,6 +598,8 @@ typedef struct {
     float **DN_conv;        /* [n_layers] conv ring [conv_dim, convk-1] for DeltaNet layers (NULL for attn) */
     uint64_t clock, hits, miss;
     float **K, **V; int kv_len, max_t, kv_cap;
+    float *attn_sc;            /* [attn_sc_thr * kv_cap] score rows, one per thread */
+    int attn_sc_thr;
     double dense_load_s;
     uint32_t *freq;
     int freq_token_count, hot_pinned, hot_n, warmup_tokens, token_count;
@@ -1353,7 +1379,11 @@ static void attention(Model *m, Layer *l, int layer, float *x, int S, int pos_ba
             int kvh = hh / q_per_kv;
             int qpos = pos_base + s;
             const float *qv = query + ((int64_t)s*H + hh)*hd;
-            float sc[8192];
+            int tid = 0;
+#ifdef _OPENMP
+            tid = omp_get_thread_num();
+#endif
+            float *sc = m->attn_sc + (int64_t)tid * m->kv_cap;
             for (int t = 0; t <= qpos; t++) {
                 const float *kv = m->K[layer] + ((int64_t)kvh*m->max_t + t)*kvd;
                 float acc = 0; for (int dd = 0; dd < kvd; dd++) acc += qv[dd]*kv[dd];
@@ -1834,11 +1864,30 @@ static void ensure_kv(Model *m){
             m->V[i] = falloc((int64_t)c->kv_heads * m->max_t * c->k_head_dim);
         } else { m->K[i] = NULL; m->V[i] = NULL; }
     }
+    /* Attention scores: one row per thread, indexed by absolute position, so
+     * each row must hold max_t entries. Sized here rather than in attention()
+     * because it grows with the context exactly like the KV cache does, and
+     * because a per-call allocation would run 10x per token. */
+    free(m->attn_sc);
+    m->attn_sc_thr = 1;
+#ifdef _OPENMP
+    m->attn_sc_thr = omp_get_max_threads();
+    if (m->attn_sc_thr < 1) m->attn_sc_thr = 1;
+#endif
+    m->attn_sc = falloc((int64_t)m->attn_sc_thr * m->max_t);
     m->kv_cap = m->max_t;
 }
 
 static void generate(Model *m, const int *prompt, int np, int n_new, int *out) {
     Cfg *c = &m->c;
+    /* Same ceiling serve_one() enforces. Past max_position_embeddings the RoPE
+     * positions leave the range the model was trained on, so this is a
+     * correctness limit, not just a memory one. */
+    if (np + n_new > QWEN36_ATTN_MAX_CTX) {
+        fprintf(stderr, "[ctx] prompt %d + %d new exceeds the %d-token ceiling\n",
+                np, n_new, QWEN36_ATTN_MAX_CTX);
+        exit(1);
+    }
     m->max_t = np + n_new;
     reset_recurrent(m);
     ensure_kv(m);
@@ -1868,6 +1917,11 @@ static void generate(Model *m, const int *prompt, int np, int n_new, int *out) {
 
 static int tf_nll(Model *m, const int *full, int nfull, int np, double *nll_out) {
     Cfg *c = &m->c;
+    if (nfull > QWEN36_ATTN_MAX_CTX) {
+        fprintf(stderr, "[ctx] %d tokens exceed the %d-token ceiling\n",
+                nfull, QWEN36_ATTN_MAX_CTX);
+        exit(1);
+    }
     m->max_t = nfull;
     reset_recurrent(m);
     ensure_kv(m);
@@ -1984,7 +2038,7 @@ static int serve_eos_ids(int *ids, int cap){
 static void serve_one(Model *m, ServeReq *q){
     int *ids=NULL, np=0;
     encode_text(q->payload, &ids, &np);          /* payload is raw prompt text; qwen36 adds no BOS */
-    int max_ctx = getenv("Q36_MAXT")?atoi(getenv("Q36_MAXT")):8192;
+    int max_ctx = qwen36_max_ctx();
     if(np<1 || np+q->max_tok>max_ctx){
         printf("ERROR %s CONTEXT_EXCEEDED prompt_tokens=%d requested=%d capacity=%d\n",q->id,np,q->max_tok,max_ctx);
         fflush(stdout); free(ids); return;

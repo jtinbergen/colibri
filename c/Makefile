@@ -714,6 +714,11 @@ olmoe$(EXE): olmoe.c st.h json.h compat.h sample.h tok.h tok_unicode.h tok_unico
 qwen36$(EXE): qwen36.c st.h json.h compat.h
 	$(CC) $(CFLAGS) qwen36.c -o qwen36$(EXE) $(LDFLAGS)
 
+# Context-size gates: KV layout, growth across requests, and the attention
+# capacity. Includes qwen36.c directly, so no model file is needed.
+tests/test_qwen36_ctx$(EXE): tests/test_qwen36_ctx.c qwen36.c st.h json.h compat.h
+	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
+
 inkling$(EXE): inkling.c st.h json.h compat.h $(INK_CUDA_OBJ) $(METAL_OBJ)
 	$(CC) $(CFLAGS) inkling.c $(INK_CUDA_OBJ) $(METAL_OBJ) -o inkling$(EXE) $(LDFLAGS)
 
