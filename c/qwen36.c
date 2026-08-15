@@ -1199,11 +1199,11 @@ static void slot_ensure_allocated(Model *m, Slot *s) {
     s->is_int4 = 0;
 }
 
-static void unpack_int4_to_int8(const uint8_t *raw, int8_t *out, int64_t n_out) {
-    int64_t nbytes = n_out / 2, b = 0;
 #if defined(__AVX2__)
+#define UNPACK_CHUNK (64 * 1024)
+static void unpack_int4_block(const uint8_t *raw, int8_t *out, int64_t nbytes) {
     const __m128i mask = _mm_set1_epi8(0x0F), bias = _mm_set1_epi8(8);
-    for (; b + 16 <= nbytes; b += 16) {
+    for (int64_t b = 0; b + 16 <= nbytes; b += 16) {
         __m128i x  = _mm_loadu_si128((const __m128i *)(raw + b));
         __m128i lo = _mm_and_si128(x, mask);
         __m128i hi = _mm_and_si128(_mm_srli_epi16(x, 4), mask);
@@ -1212,6 +1212,19 @@ static void unpack_int4_to_int8(const uint8_t *raw, int8_t *out, int64_t n_out) 
         _mm_storeu_si128((__m128i *)(out + 2*b),      _mm_unpacklo_epi8(lo, hi));
         _mm_storeu_si128((__m128i *)(out + 2*b + 16), _mm_unpackhi_epi8(lo, hi));
     }
+}
+#endif
+
+static void unpack_int4_to_int8(const uint8_t *raw, int8_t *out, int64_t n_out) {
+    int64_t nbytes = n_out / 2, b = 0;
+#if defined(__AVX2__)
+    int64_t vectorised = nbytes & ~(int64_t)15;
+    #pragma omp parallel for schedule(static)
+    for (int64_t c = 0; c < vectorised; c += UNPACK_CHUNK) {
+        int64_t n = vectorised - c < UNPACK_CHUNK ? vectorised - c : UNPACK_CHUNK;
+        unpack_int4_block(raw + c, out + 2*c, n);
+    }
+    b = vectorised;
 #endif
     for (; b < nbytes; b++) {
         uint8_t byte = raw[b];
