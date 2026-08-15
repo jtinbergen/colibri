@@ -29,7 +29,7 @@
 #ifdef _OPENMP
 #include <omp.h>
 #endif
-#if defined(__AVX2__)
+#if defined(__AVX2__) || defined(__SSE2__)
 #include <immintrin.h>
 #endif
 
@@ -1244,7 +1244,10 @@ static void slot_ensure_allocated(Model *m, Slot *s) {
     s->is_int4 = 0;
 }
 
-#if defined(__AVX2__)
+/* SSE2, not AVX2: every intrinsic below is 128-bit and SSE2 is baseline on
+ * x86-64, so guarding this on AVX2 left the scalar tail as the only route on
+ * pre-AVX2 hosts.  Same emitted code on any AVX2 machine. */
+#if defined(__SSE2__)
 #define UNPACK_CHUNK (64 * 1024)
 static void unpack_int4_block(const uint8_t *raw, int8_t *out, int64_t nbytes) {
     const __m128i mask = _mm_set1_epi8(0x0F), bias = _mm_set1_epi8(8);
@@ -1262,7 +1265,7 @@ static void unpack_int4_block(const uint8_t *raw, int8_t *out, int64_t nbytes) {
 
 static void unpack_int4_to_int8(const uint8_t *raw, int8_t *out, int64_t n_out) {
     int64_t nbytes = n_out / 2, b = 0;
-#if defined(__AVX2__)
+#if defined(__SSE2__)
     int64_t vectorised = nbytes & ~(int64_t)15;
     #pragma omp parallel for schedule(static)
     for (int64_t c = 0; c < vectorised; c += UNPACK_CHUNK) {
