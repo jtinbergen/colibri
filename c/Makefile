@@ -998,6 +998,12 @@ tests/test_grammar_cache$(EXE): tests/test_grammar_cache.c colibri.c st.h uring.
 tests/test_ablate$(EXE): tests/test_ablate.c abl.h
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
 
+# Standalone: proves that quantizing a matrix in chunks of WHOLE ROWS is
+# byte-identical to quantizing it in one go -- the assumption the fused
+# f16->int8 load path in qwen36 rests on. Links the SAME rowquant.h/st.h.
+tests/test_rowquant$(EXE): tests/test_rowquant.c rowquant.h st.h json.h compat.h
+	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
+
 tests/test_schema_gbnf$(EXE): tests/test_schema_gbnf.c schema_gbnf.h grammar.h json.h
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
 
