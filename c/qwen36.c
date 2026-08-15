@@ -1199,6 +1199,30 @@ static void slot_ensure_allocated(Model *m, Slot *s) {
     s->is_int4 = 0;
 }
 
+static void unpack_int4_to_int8(const uint8_t *raw, int8_t *out, int64_t n_out) {
+    int64_t nbytes = n_out / 2, b = 0;
+#if defined(__AVX2__)
+    const __m128i mask = _mm_set1_epi8(0x0F), bias = _mm_set1_epi8(8);
+    for (; b + 16 <= nbytes; b += 16) {
+        __m128i x  = _mm_loadu_si128((const __m128i *)(raw + b));
+        __m128i lo = _mm_and_si128(x, mask);
+        __m128i hi = _mm_and_si128(_mm_srli_epi16(x, 4), mask);
+        lo = _mm_sub_epi8(_mm_xor_si128(lo, bias), bias);
+        hi = _mm_sub_epi8(_mm_xor_si128(hi, bias), bias);
+        _mm_storeu_si128((__m128i *)(out + 2*b),      _mm_unpacklo_epi8(lo, hi));
+        _mm_storeu_si128((__m128i *)(out + 2*b + 16), _mm_unpackhi_epi8(lo, hi));
+    }
+#endif
+    for (; b < nbytes; b++) {
+        uint8_t byte = raw[b];
+        int8_t low = (int8_t)(byte & 0xF), high = (int8_t)((byte >> 4) & 0xF);
+        if (low & 8)  low  -= 16;
+        if (high & 8) high -= 16;
+        out[2*b]     = low;
+        out[2*b + 1] = high;
+    }
+}
+
 static void load_expert_merged(Model *m, int layer, int eid, Slot *s) {
     char nm[256], qsnm[256];
     int la = m->active_of[layer];   /* container stores experts under active index */
@@ -1227,12 +1251,7 @@ static void load_expert_merged(Model *m, int layer, int eid, Slot *s) {
         uint8_t *raw = (uint8_t *)malloc((size_t)(want_w / 2));
         if (!raw) { fprintf(stderr, "OOM reading int4 expert %s\n", nm); exit(1); }
         st_read_raw(&m->S, nm, raw, 1);
-        for (int64_t i = 0; i < want_w; i++) {
-            uint8_t byte = raw[i >> 1];
-            int8_t v = (int8_t)((i & 1) ? ((byte >> 4) & 0xF) : (byte & 0xF));
-            if (v & 8) v -= 16;                 /* sign-extend signed 4-bit */
-            s->g[i] = v;
-        }
+        unpack_int4_to_int8(raw, s->g, want_w);
         s->is_int4 = 1;
         /* The packed int4 bytes are NOT kept here. This engine only ever reads
          * the unpacked int8 copy above, so retaining them doubled expert-cache
