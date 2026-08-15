@@ -1145,25 +1145,7 @@ static void load_expert_merged(Model *m, int layer, int eid, Slot *s) {
             s->g[i] = v;
         }
         s->is_int4 = 1;
-        /* Keep the packed bytes for the int4 GPU shader. The unpacked int8 copy
-         * above is retained for the CPU fallback / int8-GPU path. Only allocate
-         * when a GPU int4 backend is actually active, to avoid doubling expert
-         * memory on CPU-only or int8-GPU runs. Free any previous occupant first
-         * (LRU slot reuse). */
         free(s->g4); free(s->u4); free(s->d4); s->g4 = s->u4 = s->d4 = NULL;
-        /* Keep the packed int4 bytes alongside the unpacked int8 copy: they are
-         * the upload source for the (optional) CUDA expert tier and allow int8
-         * rematerialisation without touching the container again. */
-        {
-            int64_t gp = ng / 2, up = ng / 2, dp = nd / 2;   /* gate/up/down packed sizes */
-            s->g4 = (uint8_t *)malloc((size_t)gp);
-            s->u4 = (uint8_t *)malloc((size_t)up);
-            s->d4 = (uint8_t *)malloc((size_t)dp);
-            if (!s->g4 || !s->u4 || !s->d4) { fprintf(stderr, "OOM int4-packed %s\n", nm); exit(1); }
-            memcpy(s->g4, raw,           (size_t)gp);
-            memcpy(s->u4, raw + gp,      (size_t)up);
-            memcpy(s->d4, raw + gp + up, (size_t)dp);
-        }
         free(raw);
     } else {
         s->is_int4 = 0;
