@@ -722,7 +722,7 @@ def _tool_hold():
 
 
 ARCH = "glm"   # set in main(): a family id from family_registry (glm | inkling |
-               # kimi | olmoe | qwen36 | qwen38 | deepseek_v4)
+               # kimi | olmoe | qwen36 | qwen38 | deepseek_v4 | minimax_m3)
 
 INK_THINK, INK_TEXT = "<|content_thinking|>", "<|content_text|>"
 
