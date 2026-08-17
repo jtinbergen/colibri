@@ -106,6 +106,7 @@ static int coli_pin_fast_cores(void)
 {
     const char *off = getenv("COLI_NO_AFFINITY");
     if (off && *off && *off != '0') return 0;
+    if (getenv("OMP_NUM_THREADS")) return 0;   /* l'utente comanda */
 
     cpu_set_t inherited;
     CPU_ZERO(&inherited);
