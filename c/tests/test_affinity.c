@@ -39,6 +39,7 @@
 #define _GNU_SOURCE   /* affinity.h reaches sched_setaffinity; must precede libc */
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "../affinity.h"
 
@@ -150,6 +151,107 @@ int main(void)
         static const int want[] = { 0, 1, 2, 3 };
         CHECK(selects(dual, 4, want, 4),
               "P6 two sockets with equal core ids stay four distinct cores");
+    }
+
+    /* ---- P7: fast_hint overrides an inverted khz signal -------------------
+     * Same physical layout as P1 (Meteor Lake), but khz is deliberately
+     * swapped -- P-cores read as slow, E-cores read as fast -- while
+     * fast_hint (as filled from /sys/devices/cpu_core|cpu_atom/cpus) still
+     * marks the P-cores fast. The selection must follow fast_hint, not khz,
+     * proving the cpu_core/cpu_atom signal takes precedence when present. */
+    {
+        static const ColiCpu hinted[] = {
+            {  0, 16, 0,  100000, COLI_HINT_FAST }, {  1,  8, 0,  100000, COLI_HINT_FAST },
+            {  2,  8, 0,  100000, COLI_HINT_FAST }, {  3, 12, 0,  100000, COLI_HINT_FAST },
+            {  4, 12, 0,  100000, COLI_HINT_FAST }, {  5, 16, 0,  100000, COLI_HINT_FAST },
+            {  6, 20, 0,  100000, COLI_HINT_FAST }, {  7, 20, 0,  100000, COLI_HINT_FAST },
+            {  8, 24, 0,  100000, COLI_HINT_FAST }, {  9, 24, 0,  100000, COLI_HINT_FAST },
+            { 10, 28, 0,  100000, COLI_HINT_FAST }, { 11, 28, 0,  100000, COLI_HINT_FAST },
+            { 12,  0, 0, 9999999, COLI_HINT_SLOW }, { 13,  1, 0, 9999999, COLI_HINT_SLOW },
+            { 14,  2, 0, 9999999, COLI_HINT_SLOW }, { 15,  3, 0, 9999999, COLI_HINT_SLOW },
+            { 16,  4, 0, 9999999, COLI_HINT_SLOW }, { 17,  5, 0, 9999999, COLI_HINT_SLOW },
+            { 18,  6, 0, 9999999, COLI_HINT_SLOW }, { 19,  7, 0, 9999999, COLI_HINT_SLOW },
+            { 20, 32, 0, 9999999, COLI_HINT_SLOW }, { 21, 33, 0, 9999999, COLI_HINT_SLOW },
+        };
+        static const int want[] = { 0, 1, 3, 6, 8, 10 };
+        CHECK(selects(hinted, 22, want, 6),
+              "P7 fast_hint overrides an inverted khz signal (cpu_core/cpu_atom)");
+    }
+
+    /* ---- coli_parse_cpu_list: Linux cpumap-list string parsing ------------ */
+    {
+        unsigned char set[32];
+        memset(set, 0, sizeof set);
+        int n = coli_parse_cpu_list("0-11", set, 32);
+        int ok = (n == 12);
+        for (int c = 0; c <= 11 && ok; c++) if (!set[c]) ok = 0;
+        for (int c = 12; c < 32 && ok; c++) if (set[c]) ok = 0;
+        CHECK(ok, "parse_cpu_list \"0-11\" sets cpus 0..11");
+    }
+    {
+        unsigned char set[32];
+        memset(set, 0, sizeof set);
+        int n = coli_parse_cpu_list("12-21", set, 32);
+        int ok = (n == 10);
+        for (int c = 12; c <= 21 && ok; c++) if (!set[c]) ok = 0;
+        for (int c = 0; c < 12 && ok; c++) if (set[c]) ok = 0;
+        CHECK(ok, "parse_cpu_list \"12-21\" sets cpus 12..21");
+    }
+    {
+        unsigned char set[8];
+        memset(set, 0, sizeof set);
+        int n = coli_parse_cpu_list("", set, 8);
+        int ok = (n == 0);
+        for (int c = 0; c < 8 && ok; c++) if (set[c]) ok = 0;
+        CHECK(ok, "parse_cpu_list empty string sets nothing");
+    }
+    {
+        unsigned char set[8];
+        memset(set, 0, sizeof set);
+        int n = coli_parse_cpu_list("5", set, 8);
+        CHECK(n == 1 && set[5] && !set[0] && !set[4] && !set[6],
+              "parse_cpu_list single cpu \"5\"");
+    }
+    {
+        unsigned char set[32];
+        memset(set, 0, sizeof set);
+        int n = coli_parse_cpu_list("0-5,12-19\n", set, 32);
+        int ok = (n == 14);
+        for (int c = 0; c <= 5 && ok; c++) if (!set[c]) ok = 0;
+        for (int c = 12; c <= 19 && ok; c++) if (!set[c]) ok = 0;
+        for (int c = 6; c <= 11 && ok; c++) if (set[c]) ok = 0;
+        CHECK(ok, "parse_cpu_list handles comma-separated ranges and trailing newline");
+    }
+    {
+        /* Regression: the range-expansion loop must stop at max_cpu instead of
+         * iterating out to hi, or a huge/overflowing sysfs value would hang. */
+        unsigned char set[8];
+        memset(set, 0, sizeof set);
+        int n = coli_parse_cpu_list("5-2000000000", set, 8);
+        int ok = (n == 3) && set[5] && set[6] && set[7] && !set[0] && !set[4];
+        CHECK(ok, "parse_cpu_list bounds the range loop at max_cpu");
+    }
+
+    /* ---- coli_read_sysfs_str: truncation must not look like success ------- */
+    {
+        char path[] = "/tmp/coli_affinity_test_XXXXXX";
+        int fd = mkstemp(path);
+        ssize_t n = write(fd, "0-11", 4); (void)n;
+        close(fd);
+        char buf[5];   /* exactly as long as the content: fits without truncation */
+        int ok = coli_read_sysfs_str(path, buf, sizeof buf) && strcmp(buf, "0-11") == 0;
+        unlink(path);
+        CHECK(ok, "read_sysfs_str reads a file that exactly fits the buffer");
+    }
+    {
+        char path[] = "/tmp/coli_affinity_test_XXXXXX";
+        int fd = mkstemp(path);
+        ssize_t n = write(fd, "0-11,12-21\n", 11); (void)n;
+        close(fd);
+        char buf[5];   /* shorter than the content: must report failure, not a cut string */
+        int ok = !coli_read_sysfs_str(path, buf, sizeof buf);
+        unlink(path);
+        CHECK(ok, "read_sysfs_str rejects a read that would truncate");
     }
 
     printf("\n%s (%d failure%s)\n", fails ? "TEST FAIL" : "ALL PASS",
