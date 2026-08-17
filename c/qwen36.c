@@ -2170,7 +2170,7 @@ int main(int argc, char **argv) {
        cpu count, and does not revisit it when the mask narrows. Sizing the team
        explicitly is therefore part of the pin, not a separate nicety. */
     int fast_cpus = coli_pin_fast_cores();
-    if (fast_cpus > 0 && !getenv("OMP_NUM_THREADS")) {
+    if (fast_cpus > 0) {
         omp_set_num_threads(fast_cpus);
         fprintf(stderr, "[affinity] %d threads on the fastest physical cores\n", fast_cpus);
     }
