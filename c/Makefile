@@ -1028,6 +1028,13 @@ tests/test_qgemv_sse41$(EXE): tests/test_qgemv.c qgemv.h
 tests/test_rowquant$(EXE): tests/test_rowquant.c rowquant.h st.h json.h compat.h
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
 
+# Standalone: proves the OpenMP team is sized to one thread per physical core
+# of the fastest class only -- on a hybrid part, adding an SMT sibling or a
+# slower core makes every static-scheduled matmul wait for it. Pure policy
+# over a recorded topology table, so it needs no cpufreq and no sysfs.
+tests/test_affinity$(EXE): tests/test_affinity.c affinity.h
+	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
+
 tests/test_schema_gbnf$(EXE): tests/test_schema_gbnf.c schema_gbnf.h grammar.h json.h
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
 

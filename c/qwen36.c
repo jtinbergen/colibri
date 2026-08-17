@@ -61,6 +61,7 @@ static int qwen36_max_ctx(void) {
 #include "rowquant.h"
 #include "gsgemv.h"
 #include "qgemv.h"
+#include "affinity.h"
 #include "json.h"   /* tokenizer.json parsing (reuse minimal parser) */
 
 #ifdef _WIN32
@@ -2164,6 +2165,16 @@ static void serve_loop(Model *m){
 }
 
 int main(int argc, char **argv) {
+    /* Before any parallel region, and before anything reads omp_get_max_threads:
+       libgomp fixes its default team size at library init from the machine's
+       cpu count, and does not revisit it when the mask narrows. Sizing the team
+       explicitly is therefore part of the pin, not a separate nicety. */
+    int fast_cpus = coli_pin_fast_cores();
+    if (fast_cpus > 0 && !getenv("OMP_NUM_THREADS")) {
+        omp_set_num_threads(fast_cpus);
+        fprintf(stderr, "[affinity] %d threads on the fastest physical cores\n", fast_cpus);
+    }
+
     const char *snap = getenv("SNAP");
     if (!snap) { fprintf(stderr, "set SNAP=<snapshot directory>\n"); return 1; }
     g_pilot = getenv("PILOT") ? atoi(getenv("PILOT")) : 0;
