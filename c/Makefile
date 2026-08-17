@@ -998,6 +998,18 @@ tests/test_grammar_cache$(EXE): tests/test_grammar_cache.c colibri.c st.h uring.
 tests/test_ablate$(EXE): tests/test_ablate.c abl.h
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
 
+# Standalone: proves the row-interleaved group-scaled int8 GEMV keeps every
+# row's float operations in their original order -- the assumption qwen36's
+# byte-identical output rests on. Links the SAME gsgemv.h the engine links.
+tests/test_gsgemv$(EXE): tests/test_gsgemv.c gsgemv.h
+	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
+
+# Same gate, forced onto the SSE4.1 tier: overrides the host's default -march
+# so the SSE4.1 body in gsgemv.h is actually exercised even on a devbox that
+# would otherwise always pick the AVX2 tier.
+tests/test_gsgemv_sse41$(EXE): tests/test_gsgemv.c gsgemv.h
+	$(CC) $(CFLAGS) -msse4.1 -mno-avx2 -mno-fma $< -o $@ $(LDFLAGS)
+
 # Standalone: proves that quantizing a matrix in chunks of WHOLE ROWS is
 # byte-identical to quantizing it in one go -- the assumption the fused
 # f16->int8 load path in qwen36 rests on. Links the SAME rowquant.h/st.h.
