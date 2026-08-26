@@ -1014,6 +1014,26 @@ tests/test_qwen36_ctx$(EXE): tests/test_qwen36_ctx.c qwen36.c qwen36_tier.h st.h
 tests/test_qwen36_dense_batch$(EXE): tests/test_qwen36_dense_batch.c qwen36.c qwen36_tier.h st.h json.h compat.h $(QWEN36_TIER_SRC) $(CUDA_OBJ)
 	$(CC) $(QWEN36_CFLAGS) $< $(QWEN36_TIER_SRC) $(CUDA_OBJ) -o $@ $(QWEN36_LDFLAGS)
 
+# load_tq (dense weight int8-during-load, see qwen36.c) must be memcmp-exact
+# against an independent per-row abs-max/127 quantizer across a variety of
+# tensor shapes, both its streamed and COLI_KEEP_F32 branches, and the
+# Segment-API (dense_quant=0) / COLI_DENSE_I8=0 exact-f32 fallbacks.
+tests/test_qwen36_load_tq$(EXE): tests/test_qwen36_load_tq.c qwen36.c qwen36_tier.h st.h json.h compat.h $(QWEN36_TIER_SRC) $(CUDA_OBJ)
+	$(CC) $(QWEN36_CFLAGS) $< $(QWEN36_TIER_SRC) $(CUDA_OBJ) -o $@ $(QWEN36_LDFLAGS)
+
+# unpack_int4_to_int8 (shared by load_expert_merged/slot_ensure_int8, see
+# qwen36.c) must be bit-exact against the scalar nibble-decode it replaces --
+# pure integer unpack + sign-extend, no rounding, so this is memcmp-exact
+# like tests/test_olmoe_dot_i8_16.c.
+tests/test_qwen36_int4_unpack$(EXE): tests/test_qwen36_int4_unpack.c qwen36.c qwen36_tier.h st.h json.h compat.h $(QWEN36_TIER_SRC) $(CUDA_OBJ)
+	$(CC) $(QWEN36_CFLAGS) $< $(QWEN36_TIER_SRC) $(CUDA_OBJ) -o $@ $(QWEN36_LDFLAGS)
+
+# Same gate, forced onto the SSE4.1 tier: overrides the host's default -march
+# so the SSE4.1 body in unpack_int4_to_int8 is actually exercised even on a
+# devbox that would otherwise always pick the AVX2 tier.
+tests/test_qwen36_int4_unpack_sse41$(EXE): tests/test_qwen36_int4_unpack.c qwen36.c qwen36_tier.h st.h json.h compat.h $(QWEN36_TIER_SRC) $(CUDA_OBJ)
+	$(CC) $(QWEN36_CFLAGS) -msse4.1 -mno-avx2 -mno-fma $< $(QWEN36_TIER_SRC) $(CUDA_OBJ) -o $@ $(QWEN36_LDFLAGS)
+
 # Reproducible local timing evidence; intentionally not a noisy CI perf gate.
 tests/bench_qwen36_dense_batch$(EXE): tests/bench_qwen36_dense_batch.c qwen36.c qwen36_tier.h st.h json.h compat.h $(QWEN36_TIER_SRC) $(CUDA_OBJ)
 	$(CC) $(QWEN36_CFLAGS) $< $(QWEN36_TIER_SRC) $(CUDA_OBJ) -o $@ $(QWEN36_LDFLAGS)
@@ -1525,6 +1545,20 @@ tests/test_omp_tune$(EXE): tests/test_omp_tune.c omp_tune.h
 
 tests/test_kvb_notice$(EXE): tests/test_kvb_notice.c colibri.c st.h uring.h json.h tok.h tok_unicode.h compat.h grammar.h tier.h quant.h sample.h kv_persist.h telemetry.h
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
+
+# Standalone: proves st.h's bf16_to_f32_batch/f16_to_f32_batch (used by
+# st_read_f32/st_read_slice_f32) are bit-exact against the scalar
+# bf16_to_f32/f16_to_f32 they replace there, over the full 2^16-value space
+# per format -- pure bit manipulation / exact renormalization, no rounding,
+# so exhaustive is cheap and strictly stronger than sampling.
+tests/test_st_half_simd$(EXE): tests/test_st_half_simd.c st.h json.h compat.h
+	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
+
+# Same gate, forced onto the SSE4.1 tier: overrides the host's default -march
+# so the SSE4.1 body in st.h's bf16_to_f32_batch/f16_to_f32_batch is actually
+# exercised even on a devbox that would otherwise always pick the AVX2 tier.
+tests/test_st_half_simd_sse41$(EXE): tests/test_st_half_simd.c st.h json.h compat.h
+	$(CC) $(CFLAGS) -msse4.1 -mno-avx2 -mno-fma $< -o $@ $(LDFLAGS)
 
 # Standalone: proves the group-scaled int8 GEMV keeps every row's float
 # operations in their original order -- the assumption qwen36's byte-identical

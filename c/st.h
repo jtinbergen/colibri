@@ -21,6 +21,9 @@
 #include <sys/stat.h>
 #include "json.h"
 #include "compat.h"
+#if (defined(__AVX2__) && defined(__FMA__)) || defined(__SSE4_1__)
+#include <immintrin.h>
+#endif
 
 /* tetto sulla dimensione dell'header safetensors: gli header reali sono piccoli
  * (KB..pochi MB). Un file crafted che dichiara un hlen enorme causerebbe una
@@ -137,6 +140,110 @@ static inline float f16_to_f32(uint16_t h) {
     }
     float f; memcpy(&f, &u, 4); return f;
 }
+
+/* Batch bf16->f32 / f16->f32 SIMD conversions, used by st_read_f32 and
+ * st_read_slice_f32 below instead of their old per-element scalar loops
+ * (bf16_to_f32/f16_to_f32 above are unchanged -- inkling.c also calls them
+ * directly, so their signature stays a single-value scalar conversion; this
+ * is an additive batch entry point, not a replacement).
+ *
+ * bf16 is a pure left-shift (no rounding, so every tier is trivially exact).
+ *
+ * f16's subnormal case is the one branch worth explaining: f16_to_f32's
+ * scalar loop renormalizes the subnormal by left-shifting the mantissa
+ * until its leading bit reaches position 10, decrementing a running
+ * exponent each shift -- a variable, per-value shift count that has no
+ * direct fixed-width SIMD instruction. Instead, note a subnormal half's
+ * value is exactly mantissa * 2^-24 (mantissa in 0..1023, sign aside): the
+ * unnormalized 10-bit mantissa converts to float exactly (any integer up to
+ * 1023 has an exact float32 representation) and multiplying by a power of
+ * two is exact (changes only the exponent field, and 2^-24 * up to 1023 is
+ * far above float32's subnormal threshold, so no double-rounding). That is
+ * precisely what the scalar renormalization loop computes, just via
+ * "convert integer, scale by a power of two" instead of "shift bits by
+ * hand" -- same result including man=0 (0.0f, matching the scalar u=sign
+ * zero case), so the whole exp==0 branch collapses into one formula with no
+ * special-case for zero. tests/test_st_half_simd.c checks all 2^16 values
+ * per format, every compiled tier, memcmp-exact against the scalar
+ * function above -- not just this reasoning. */
+#if defined(__AVX2__) && defined(__FMA__)
+static void bf16_to_f32_batch(const uint16_t *in, float *out, int64_t n) {
+    int64_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256i h = _mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i*)(in + i)));
+        _mm256_storeu_ps(out + i, _mm256_castsi256_ps(_mm256_slli_epi32(h, 16)));
+    }
+    for (; i < n; i++) out[i] = bf16_to_f32(in[i]);
+}
+static void f16_to_f32_batch(const uint16_t *in, float *out, int64_t n) {
+    int64_t i = 0;
+    const __m256i vsignmask = _mm256_set1_epi32(0x8000);
+    const __m256i v1F   = _mm256_set1_epi32(0x1F);
+    const __m256i v3FF  = _mm256_set1_epi32(0x3FF);
+    const __m256i v112  = _mm256_set1_epi32(112);           /* -15+127 */
+    const __m256i vinfexp = _mm256_set1_epi32(0x7F800000);
+    const __m256  vsubscale = _mm256_set1_ps(1.0f / 16777216.0f);   /* 2^-24, exact */
+    for (; i + 8 <= n; i += 8) {
+        __m256i h = _mm256_cvtepu16_epi32(_mm_loadu_si128((const __m128i*)(in + i)));
+        __m256i sign = _mm256_slli_epi32(_mm256_and_si256(h, vsignmask), 16);
+        __m256i exp  = _mm256_and_si256(_mm256_srli_epi32(h, 10), v1F);
+        __m256i man  = _mm256_and_si256(h, v3FF);
+        __m256i normal_bits = _mm256_or_si256(sign, _mm256_or_si256(
+            _mm256_slli_epi32(_mm256_add_epi32(exp, v112), 23), _mm256_slli_epi32(man, 13)));
+        __m256i infnan_bits = _mm256_or_si256(sign, _mm256_or_si256(vinfexp, _mm256_slli_epi32(man, 13)));
+        __m256i sub_bits = _mm256_or_si256(sign,
+            _mm256_castps_si256(_mm256_mul_ps(_mm256_cvtepi32_ps(man), vsubscale)));
+        __m256i is_zero_exp = _mm256_cmpeq_epi32(exp, _mm256_setzero_si256());
+        __m256i is_infnan   = _mm256_cmpeq_epi32(exp, v1F);
+        __m256i result = _mm256_blendv_epi8(normal_bits, infnan_bits, is_infnan);
+        result = _mm256_blendv_epi8(result, sub_bits, is_zero_exp);
+        _mm256_storeu_ps(out + i, _mm256_castsi256_ps(result));
+    }
+    for (; i < n; i++) out[i] = f16_to_f32(in[i]);
+}
+#elif defined(__SSE4_1__)
+static void bf16_to_f32_batch(const uint16_t *in, float *out, int64_t n) {
+    int64_t i = 0;
+    for (; i + 4 <= n; i += 4) {
+        __m128i h = _mm_cvtepu16_epi32(_mm_loadl_epi64((const __m128i*)(in + i)));
+        _mm_storeu_ps(out + i, _mm_castsi128_ps(_mm_slli_epi32(h, 16)));
+    }
+    for (; i < n; i++) out[i] = bf16_to_f32(in[i]);
+}
+static void f16_to_f32_batch(const uint16_t *in, float *out, int64_t n) {
+    int64_t i = 0;
+    const __m128i vsignmask = _mm_set1_epi32(0x8000);
+    const __m128i v1F   = _mm_set1_epi32(0x1F);
+    const __m128i v3FF  = _mm_set1_epi32(0x3FF);
+    const __m128i v112  = _mm_set1_epi32(112);
+    const __m128i vinfexp = _mm_set1_epi32(0x7F800000);
+    const __m128  vsubscale = _mm_set1_ps(1.0f / 16777216.0f);
+    for (; i + 4 <= n; i += 4) {
+        __m128i h = _mm_cvtepu16_epi32(_mm_loadl_epi64((const __m128i*)(in + i)));
+        __m128i sign = _mm_slli_epi32(_mm_and_si128(h, vsignmask), 16);
+        __m128i exp  = _mm_and_si128(_mm_srli_epi32(h, 10), v1F);
+        __m128i man  = _mm_and_si128(h, v3FF);
+        __m128i normal_bits = _mm_or_si128(sign, _mm_or_si128(
+            _mm_slli_epi32(_mm_add_epi32(exp, v112), 23), _mm_slli_epi32(man, 13)));
+        __m128i infnan_bits = _mm_or_si128(sign, _mm_or_si128(vinfexp, _mm_slli_epi32(man, 13)));
+        __m128i sub_bits = _mm_or_si128(sign,
+            _mm_castps_si128(_mm_mul_ps(_mm_cvtepi32_ps(man), vsubscale)));
+        __m128i is_zero_exp = _mm_cmpeq_epi32(exp, _mm_setzero_si128());
+        __m128i is_infnan   = _mm_cmpeq_epi32(exp, v1F);
+        __m128i result = _mm_blendv_epi8(normal_bits, infnan_bits, is_infnan);
+        result = _mm_blendv_epi8(result, sub_bits, is_zero_exp);
+        _mm_storeu_ps(out + i, _mm_castsi128_ps(result));
+    }
+    for (; i < n; i++) out[i] = f16_to_f32(in[i]);
+}
+#else
+static void bf16_to_f32_batch(const uint16_t *in, float *out, int64_t n) {
+    for (int64_t i = 0; i < n; i++) out[i] = bf16_to_f32(in[i]);
+}
+static void f16_to_f32_batch(const uint16_t *in, float *out, int64_t n) {
+    for (int64_t i = 0; i < n; i++) out[i] = f16_to_f32(in[i]);
+}
+#endif
 
 static int st_open_fd(shards *S, const char *path) {
     for (int i = 0; i < S->nfd; i++) if (!strcmp(S->paths[i], path)) return S->fds[i];
@@ -807,9 +914,9 @@ static int64_t st_read_f32(shards *S, const char *name, float *out, int drop) {
     if (t->dtype == 2) {
         memcpy(out, raw, t->nbytes);
     } else if (t->dtype == 0) {
-        uint16_t *p = (uint16_t *)raw; for (int64_t i = 0; i < t->numel; i++) out[i] = bf16_to_f32(p[i]);
+        bf16_to_f32_batch((uint16_t *)raw, out, t->numel);
     } else {
-        uint16_t *p = (uint16_t *)raw; for (int64_t i = 0; i < t->numel; i++) out[i] = f16_to_f32(p[i]);
+        f16_to_f32_batch((uint16_t *)raw, out, t->numel);
     }
     free(raw);
     if (drop) posix_fadvise(t->fd, t->off, t->nbytes, POSIX_FADV_DONTNEED);
@@ -977,8 +1084,8 @@ static void st_read_slice_f32(shards *S, const char *name, int64_t elem_off, int
     if (!raw) { fprintf(stderr, "malloc %lld bytes for slice %s failed\n", (long long)nb, name); exit(1); }
     st_pread_full(t->fd, raw, nb, boff, "pread slice");   /* dev #331: chunked + EINTR + honest short-read */
     if (t->dtype == 2) memcpy(out, raw, nb);
-    else if (t->dtype == 0) { uint16_t *p = raw; for (int64_t i = 0; i < n_elems; i++) out[i] = bf16_to_f32(p[i]); }
-    else { uint16_t *p = raw; for (int64_t i = 0; i < n_elems; i++) out[i] = f16_to_f32(p[i]); }
+    else if (t->dtype == 0) bf16_to_f32_batch((uint16_t *)raw, out, n_elems);
+    else f16_to_f32_batch((uint16_t *)raw, out, n_elems);
     free(raw);
     if (drop) posix_fadvise(t->fd, boff, nb, POSIX_FADV_DONTNEED);
 }

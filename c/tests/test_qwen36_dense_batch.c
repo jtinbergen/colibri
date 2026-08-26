@@ -61,21 +61,25 @@ static void env_unset(const char *name) {
 #endif
 }
 
-static void clear_qdw(void) {
-    for(int i=0;i<g_qdw_n;i++){free(g_qdw[i].q);free(g_qdw[i].sc);}
-    g_qdw_n=0;
-}
+/* qwen36.c now provides free_qw(QW*) itself (used by the Segment adapter's
+ * teardown) -- reuse it instead of a second, test-local copy. */
 
 static void shared_case(const char *format,int quantized) {
     enum { S=12,D=64,I=32 };
     Model m;memset(&m,0,sizeof(m));m.c.hidden=D;m.c.shared_inter=I;
     Layer l;memset(&l,0,sizeof(l));
-    l.sh_g=falloc((int64_t)I*D);l.sh_u=falloc((int64_t)I*D);
-    l.sh_d=falloc((int64_t)D*I);l.sh_gate=falloc(D);
-    for(int64_t i=0;i<(int64_t)I*D;i++){l.sh_g[i]=input_value(i,2);l.sh_u[i]=input_value(i,3);}
-    for(int64_t i=0;i<(int64_t)D*I;i++)l.sh_d[i]=input_value(i,4);
+    float *sh_g_f32=falloc((int64_t)I*D),*sh_u_f32=falloc((int64_t)I*D),*sh_d_f32=falloc((int64_t)D*I);
+    l.sh_gate=falloc(D);
+    for(int64_t i=0;i<(int64_t)I*D;i++){sh_g_f32[i]=input_value(i,2);sh_u_f32[i]=input_value(i,3);}
+    for(int64_t i=0;i<(int64_t)D*I;i++)sh_d_f32[i]=input_value(i,4);
     for(int i=0;i<D;i++)l.sh_gate[i]=input_value(i,5);
-    if(quantized){qdw_register(l.sh_g,D,I);qdw_register(l.sh_u,D,I);qdw_register(l.sh_d,I,D);}
+    if(quantized){
+        quantize_dense_qw(&l.sh_g,sh_g_f32,D,I);quantize_dense_qw(&l.sh_u,sh_u_f32,D,I);
+        quantize_dense_qw(&l.sh_d,sh_d_f32,I,D);
+        free(sh_g_f32);free(sh_u_f32);free(sh_d_f32);
+    } else {
+        l.sh_g.f32=sh_g_f32;l.sh_u.f32=sh_u_f32;l.sh_d.f32=sh_d_f32;
+    }
     float *x=falloc((int64_t)S*D),*seed=falloc((int64_t)S*D);
     float *ref=falloc((int64_t)S*D),*got=falloc((int64_t)S*D);
     float *g=falloc(I),*u=falloc(I),*hh=falloc(D);
@@ -101,7 +105,9 @@ static void shared_case(const char *format,int quantized) {
           (unsigned long long)g_qwen_matmul_d_calls);
     printf("qwen shared batch exact: format=%s S=%d calls=%d -> 3\n",format,S,S*3);
 
-    clear_qdw();free(l.sh_g);free(l.sh_u);free(l.sh_d);free(l.sh_gate);
+    if(quantized){free_qw(&l.sh_g);free_qw(&l.sh_u);free_qw(&l.sh_d);}
+    else{free(sh_g_f32);free(sh_u_f32);free(sh_d_f32);}
+    free(l.sh_gate);
     free(x);free(seed);free(ref);free(got);free(g);free(u);free(hh);
 }
 
