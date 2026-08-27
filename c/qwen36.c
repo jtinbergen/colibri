@@ -59,7 +59,8 @@ static int qwen36_max_ctx(void) {
 #endif
 #include "st.h"
 #include "json.h"   /* tokenizer.json parsing (reuse minimal parser) */
-#include "qwen36_tier.h"   /* optional transparent Vulkan compute backend for MoE experts */
+#include "qwen36_tier.h"   /* optional CUDA VRAM expert tier (COLI_CUDA=1) */
+#include "qwen36_vk_tier.h" /* optional Vulkan VRAM expert tier (VK=1) -- inline stubs when not built */
 #ifdef COLI_SEGMENT_ADAPTER
 #include "segment_runtime.h"
 #include "segment_adapters.h"
@@ -1892,6 +1893,52 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
                 extern double g_qt_iss, g_qt_cpu, g_qt_tak;
                 g_qt_iss += _q1-_q0; g_qt_cpu += _q2-_q1; g_qt_tak += tm_now()-_q2;
             }
+        } else if (vt_ready()) {
+            /* Vulkan VRAM expert tier: upload + dispatch in one batched submit via
+             * the existing backend_vulkan.c (PR #418). The dispatch already
+             * applies the per-expert router weighting, so this loop only handles
+             * the shared expert. If the dispatch itself fails we fall through to
+             * the CPU per-expert loop below. */
+            for (int kk = 0; kk < K; kk++) {
+                Slot *e; expert_get(m, layer, idx[kk], &e);
+                if (e->g4) vt_expert_upload_int4(layer, idx[kk], idx[kk], e->g4, e->u4, e->d4, e->gs, e->us, e->ds);
+                else       vt_expert_upload     (layer, idx[kk], idx[kk], e->g,  e->u,  e->d,  e->gs, e->us, e->ds);
+            }
+            if (vt_moe_run(layer, idx, K, val, xs, out + (int64_t)s*D)) {
+                /* Vulkan wrote weighted sum into out[]; still need shared expert. */
+                double _ts2 = tm_on() ? tm_now() : 0.0;
+                int Ish = c->shared_inter;
+                matmul_d(sh, xs, l->sh_g, 1, D, Ish);
+                matmul_d(shu, xs, l->sh_u, 1, D, Ish);
+                for (int i = 0; i < Ish; i++) { float sv = sh[i]; sh[i] = (sv / (1.f + expf(-sv))) * shu[i]; }
+                matmul_d(shd, sh, l->sh_d, 1, Ish, D);
+                float sgate = 1.f;
+                if (l->sh_gate) {
+                    float sg = 0.f; const float *wg = l->sh_gate;
+                    for (int i = 0; i < D; i++) sg += xs[i] * wg[i];
+                    sgate = 1.f / (1.f + expf(-sg));
+                }
+                float *os = out + (int64_t)s*D;
+                for (int d = 0; d < D; d++) os[d] += sgate * shd[d];
+                if (tm_on()) tm_add(S, 3, tm_now()-_ts2);
+            } else {
+                /* vt_moe_run returned 0 (e.g. backend went away). Fall through to the
+                 * CPU per-expert loop in the next branch so the token still produces
+                 * output -- but we know we just used the Vulkan path's upload side,
+                 * so the per-expert loop below will redundantly work the CPU path
+                 * for these K experts. Worst case is one redundant dispatch, never
+                 * a missed token. */
+                for (int kk = 0; kk < K; kk++) {
+                    Slot *e; expert_get(m, layer, idx[kk], &e);
+                    slot_ensure_int8(m, e);
+                    matmul_qe(g, xs, e->g, e->gs, D, I);
+                    matmul_qe(u, xs, e->u, e->us, D, I);
+                    for (int i = 0; i < I; i++) { float gv = g[i]; g[i] = (gv / (1.f + expf(-gv))) * u[i]; }
+                    matmul_qe(hh, g, e->d, e->ds, I, D);
+                    float w = val[kk]; float *os = out + (int64_t)s*D;
+                    for (int d = 0; d < D; d++) os[d] += w * hh[d];
+                }
+            }
         } else {
             for (int kk = 0; kk < K; kk++) {
                 Slot *e; expert_get(m, layer, idx[kk], &e);
@@ -2674,12 +2721,26 @@ int main(int argc, char **argv) {
                     if (!keep8 && e->g) { free(e->g); e->g = e->u = e->d = NULL; }
                 }
             }
-            qt_fill_wait();
-            free(wpl); free(wpe); free(planned);
-            fprintf(stderr, "[qtier] warmstart (parallel): all %d experts in RAM (int8 only for non-residents), %d in VRAM -- %.1f s\n",
-                    cap_total, wn, now_s()-t0);
-        }
-    }
+             qt_fill_wait();
+             free(wpl); free(wpe); free(planned);
+             fprintf(stderr, "[qtier] warmstart (parallel): all %d experts in RAM (int8 only for non-residents), %d in VRAM -- %.1f s\n",
+                     cap_total, wn, now_s()-t0);
+         }
+     }
+
+     /* Optional Vulkan VRAM expert tier (VK=1): routed experts live in
+      * the GPU's VRAM, dispatched in one batched submit per token via the
+      * existing backend_vulkan.c (PR #418) — no new backend, no dynamic
+      * library load. Mutually exclusive with the CUDA tier above (one or the
+      * other on the same GPU, never both at once). The vendor/driver picker
+      * in backend_vulkan.c selects qmatmul_safe.spv on Intel Mesa automatically.
+      * On Vulkan init failure we stay CPU-only — same shape as the CUDA tier. */
+     if (vt_init(m.c.n_layers, m.c.n_experts, m.c.hidden, m.c.inter, cap, m.c.topk, m.c.expert_gs)) {
+         fprintf(stderr, "[vk] qwen36 expert tier -> Vulkan VRAM\n");
+         atexit(vt_shutdown);
+     } else {
+         fprintf(stderr, "[vk] vt_init failed or no Vulkan compute device -> CPU MoE path\n");
+     }
 
     /* coli serve mode: speak the gateway wire protocol instead of argv
      * generation. AFTER the tier init: serve sessions ride the VRAM experts
