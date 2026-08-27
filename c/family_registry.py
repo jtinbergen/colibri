@@ -938,6 +938,11 @@ def _qwen38_resident_inventory(name, size, _config, dtype=None):
 
 COMMON_CAP = FamilyCapabilities(False, False, False, True)
 
+# engine_group of the families the colibri binary serves itself. Named for the
+# binary rather than for a family, so callers asking "is this my own engine?"
+# do not have to resolve some other family's id to find out.
+COLIBRI_CORE_GROUP = "colibri-core"
+
 FAMILIES = (
     FamilyDescriptor(
         id="glm53",
@@ -989,7 +994,7 @@ FAMILIES = (
         display_scale="744B",
         engine_artifact="colibri",
         engine_aliases=("glm",),
-        engine_group="colibri-core",
+        engine_group=COLIBRI_CORE_GROUP,
         internal_arch="glm",
         build_target="colibri",
         process_names=("colibri", "glm"),
@@ -1206,7 +1211,7 @@ FAMILIES = (
         # GLM's because it is literally the same artifact on disk.
         engine_artifact="colibri",
         engine_aliases=("glm",),
-        engine_group="colibri-core",
+        engine_group=COLIBRI_CORE_GROUP,
         internal_arch="minimax_m3",
         build_target="colibri",
         process_names=("colibri",),
