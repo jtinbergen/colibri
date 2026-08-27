@@ -1,0 +1,159 @@
+#version 450
+// Quantized mat-vec/mat-mat, SAFE variant: no subgroup ops, shared-memory tree
+// reduction only. Mirrors colibri's CUDA quant_matmul and qmatmul.comp's
+// arithmetic; differs only in the cross-lane reduction so it produces correct
+// results on Intel Mesa 26.0.3 / Intel Arc MTL, where gl_SubgroupInvocationID
+// cycles in [0,16) regardless of gl_SubgroupSize and subgroupAdd only sums
+// the first 16 lanes (Intel Community 2025-04, MoltenVK #1553 — see
+// VULKAN_INVESTIGATION.md). On NVIDIA / AMD / Intel-proprietary / Lunar Lake
+// Xe2 this variant still works but is ~8 barriers + 8 adds slower per output
+// row than qmatmul.comp's single-instruction subgroupAdd. Loaded only when
+// backend_vulkan.c detects (vendorID==0x8086 && driverID==MESA) or when
+// COLI_VK_FORCE_SAFE=1; default is the fast path.
+//
+// One workgroup computes up to ROWS_PER_WG output rows; each row uses 32
+// threads (8 rows * 32 = 256 = nth). Threads within a row stride the weight
+// words, write their partial to shared, then a tree reduction combines them.
+// Same control flow as qmatmul.comp (fmt dispatch, grid-stride, x staging)
+// but every `subgroupAdd` becomes a shared-mem reduction over the row's 32
+// threads, and the `lane == 0` write guard is replaced by a tid-based guard
+// so it doesn't fire twice on Mesa's cycled lane IDs.
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer X  { float x[]; };
+layout(std430, binding = 1) readonly buffer W  { uint  w[]; };   // row o at o*rowWords
+layout(std430, binding = 2) readonly buffer Sc { float scale[]; };
+layout(std430, binding = 3) writeonly buffer Y { float y[]; };
+
+layout(push_constant) uniform P {
+    int fmt;        // 1=int8, 2=int4, 4=grouped int4, 5=int3-g64
+    int S, I, O;
+    int rowWords;   // uint32 words per weight row
+    int gs;         // fmt=4 group size (multiple of 8; host gates otherwise)
+} p;
+
+// Max hidden dim across GLM expert matmuls is 6144 (24 KB LDS); down-proj uses 2048.
+// Rows longer than the staging array (o_proj: I = H*vh = 16384) skip shared staging
+// and read x straight from the storage buffer — an unstaged read is coalesced across
+// the subgroup and still correct, while an unchecked stage would write past xsh.
+shared float xsh[6144];
+
+// Per-thread partial sums for the tree reduction (32 threads per row, 8 rows).
+shared float row_partial[256];
+
+float i8(uint word, int lane) {
+    int b = int((word >> (uint(lane) * 8u)) & 0xffu);
+    if (b >= 128) b -= 256;
+    return float(b);
+}
+float i4(uint word, int lane) {
+    return float(int((word >> (uint(lane) * 4u)) & 0xfu) - 8);
+}
+// fmt=7 MXFP4 (Kimi K3 experts): e2m1 nibble, bit3 = sign, LOW nibble = even
+// column (same packing order as i4). Scales arrive as f32 (host pre-expands
+// the ue8m0 exponents), one per 32-input group.
+float mx4(uint word, int lane) {
+    uint n = (word >> (uint(lane) * 4u)) & 0xfu;
+    const float lut[8] = float[8](0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0);
+    float v = lut[n & 7u];
+    return (n & 8u) != 0u ? -v : v;
+}
+
+void main() {
+    int s   = int(gl_WorkGroupID.y);
+    int tid = int(gl_LocalInvocationID.x);
+    int nth = int(gl_WorkGroupSize.x);
+
+    // Stage x[s,:] into shared once; all rows this workgroup computes reuse it.
+    bool staged = p.I <= 6144;
+    if (staged) for (int i = tid; i < p.I; i += nth) xsh[i] = x[s * p.I + i];
+    barrier();
+    int xoff = s * p.I;
+
+    // 32 threads per output row, 256/nth rows per workgroup. nth must be a power
+    // of 2; production wires nth=256 → ROWS_PER_WG=8 and TPR=32, both powers of 2.
+    const int TPR = 32;
+    const int ROWS_PER_WG = nth / TPR;
+    int row_in_wg = tid / TPR;
+    int lane      = tid - row_in_wg * TPR;   // == tid % TPR; computed without modulo to
+                                            // sidestep any GLSL driver quirks
+    int stride = int(gl_NumWorkGroups.x) * ROWS_PER_WG;
+
+    for (int o = int(gl_WorkGroupID.x) * ROWS_PER_WG + row_in_wg; o < p.O; o += stride) {
+        uint rowBase = uint(o) * uint(p.rowWords);
+        float sum = 0.0;
+        if (p.fmt == 1) {
+            int words = (p.I + 3) / 4;
+            if (staged) for (int wi = lane; wi < words; wi += TPR) {
+                uint pk = w[rowBase + uint(wi)]; int i0 = wi * 4;
+                for (int k = 0; k < 4; k++) { int i = i0 + k; if (i < p.I) sum += xsh[i] * i8(pk, k); }
+            } else for (int wi = lane; wi < words; wi += TPR) {
+                uint pk = w[rowBase + uint(wi)]; int i0 = wi * 4;
+                for (int k = 0; k < 4; k++) { int i = i0 + k; if (i < p.I) sum += x[xoff + i] * i8(pk, k); }
+            }
+        } else if (p.fmt == 5) { // int3-g64
+            int ng = (p.I + 63) >> 6;
+            uint sb = uint(o) * uint(ng);
+            for (int m = lane; m < ng * 4; m += TPR) {
+                int g = m >> 2, mw = m & 3;
+                uint blo = w[rowBase + uint(g) * 6u + uint(mw)];
+                uint bhi = w[rowBase + uint(g) * 6u + 4u + uint(mw >> 1)];
+                int hs = (mw & 1) * 16;
+                int i0 = (g << 6) + (mw << 4);
+                float a = 0.0;
+                for (int k = 0; k < 16; k++) {
+                    int i = i0 + k;
+                    if (i < p.I) {
+                        uint u = ((blo >> uint(k * 2)) & 3u) | (((bhi >> uint(hs + k)) & 1u) << 2);
+                        a += (staged ? xsh[i] : x[xoff + i]) * float(int(u) - 4);
+                    }
+                }
+                sum += a * scale[sb + uint(g)];
+            }
+        } else if (p.fmt == 4 || p.fmt == 7) { // grouped int4 / MXFP4
+            int words = (p.I + 7) / 8, ng = (p.I + p.gs - 1) / p.gs;
+            uint sb = uint(o) * uint(ng);
+            for (int wi = lane; wi < words; wi += TPR) {
+                uint pk = w[rowBase + uint(wi)]; int i0 = wi * 8;
+                float a = 0.0;
+                if (p.fmt == 4) {
+                    for (int k = 0; k < 8; k++) { int i = i0 + k;
+                        if (i < p.I) a += (staged ? xsh[i] : x[xoff + i]) * i4(pk, k); }
+                } else {
+                    for (int k = 0; k < 8; k++) { int i = i0 + k;
+                        if (i < p.I) a += (staged ? xsh[i] : x[xoff + i]) * mx4(pk, k); }
+                }
+                sum += a * scale[sb + uint(i0 / p.gs)];
+            }
+        } else { // int4 (fmt=2)
+            int words = (p.I + 7) / 8;
+            if (staged) for (int wi = lane; wi < words; wi += TPR) {
+                uint pk = w[rowBase + uint(wi)]; int i0 = wi * 8;
+                for (int k = 0; k < 8; k++) { int i = i0 + k; if (i < p.I) sum += xsh[i] * i4(pk, k); }
+            } else for (int wi = lane; wi < words; wi += TPR) {
+                uint pk = w[rowBase + uint(wi)]; int i0 = wi * 8;
+                for (int k = 0; k < 8; k++) { int i = i0 + k; if (i < p.I) sum += x[xoff + i] * i4(pk, k); }
+            }
+        }
+
+        // Shared-memory tree reduction over the row's 32 threads. (Replaces
+        // subgroupAdd — which Mesa silently limits to the first 16 lanes.) Each
+        // partial[tid] has a unique tid, so even if Mesa's cycled lane IDs make
+        // multiple threads see "lane==0", the writes to row_partial don't race:
+        // every tid writes to its own slot.
+        row_partial[tid] = sum;
+        barrier();
+        // 32 → 1 in 5 log2 steps; ROWS_PER_WG rows reduce in parallel (their
+        // partials live in disjoint slots row_in_wg*32 .. +31).
+        for (int s = TPR / 2; s > 0; s >>= 1) {
+            if (lane < s) row_partial[tid] += row_partial[tid + s];
+            barrier();
+        }
+        // Thread 0 of each row writes the result. (Replaces `if (lane == 0)` from
+        // qmatmul.comp — that guard fires twice under Mesa's cycled lane IDs and
+        // races the write. tid is reliable; lane is not.)
+        if (tid == row_in_wg * TPR) {
+            y[s * p.O + o] = (p.fmt == 5 || p.fmt == 4 || p.fmt == 7) ? row_partial[tid] : row_partial[tid] * scale[o];
+        }
+    }
+}

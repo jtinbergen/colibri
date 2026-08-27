@@ -282,13 +282,79 @@ static void derive_dir_file(const char *spv, const char *fname, char *out, size_
     else snprintf(out, n, "%s", fname);
 }
 
+/* Intel Mesa 26.0.3 / Intel Arc MTL — and Gen 9.5 / Gen 12 RPL-P before it —
+ * have a shader-compiler bug where gl_SubgroupInvocationID cycles in [0,16)
+ * regardless of the reported gl_SubgroupSize, and subgroupAdd only sums the
+ * first 16 lanes. The fast qmatmul.spv (one subgroup per output row,
+ * subgroupAdd reduction) is therefore silently wrong on these stacks. The
+ * sibling qmatmul_safe.spv replaces subgroup ops with a shared-memory tree
+ * reduction so it produces correct results. Loaded only for the affected
+ * combo; NVIDIA / AMD / Intel-proprietary / Lunar Lake Xe2 all take the
+ * fast path. Override with COLI_VK_FORCE_SAFE=1 (or =0) to force one side.
+ *
+ * Sources for the bug (multiple reporters across gens, still open):
+ *   - Intel Community 2025-04: gl_SubgroupInvocationID == 31 never fires,
+ *     subgroupAdd(1) returns 16
+ *     https://community.intel.com/t5/Graphics/Intel-R-Iris-R-Xe-Graphics-RPL-P-Vulkan-reports-incorrect/m-p/1681831
+ *   - MoltenVK #1553 (2022-04): same symptom on UHD 630
+ *     https://github.com/KhronosGroup/MoltenVK/issues/1553
+ *
+ * driverID lives in VkPhysicalDeviceDriverProperties (core in 1.3, or
+ * VK_KHR_driver_properties extension in 1.2). Default to fast path if the
+ * extension isn't available — wrong-side default is "works on NVIDIA/AMD,
+ * slower-than-needed on Mesa", which is the safer direction.
+ */
+static int vk_pick_qmatmul_spv(VkPhysicalDevice phys, const char *spv_path, char *out, size_t n) {
+    const char *forced = getenv("COLI_VK_FORCE_SAFE");
+    if (forced && atoi(forced) == 1) {
+        derive_sibling(spv_path, "_safe.spv", out, n);
+        fprintf(stderr, "[VK] COLI_VK_FORCE_SAFE=1: using %s (shared-mem reduction, no subgroup ops)\n", out);
+        return 0;
+    }
+    if (forced && atoi(forced) == 0) {
+        fprintf(stderr, "[VK] COLI_VK_FORCE_SAFE=0: using %s (fast subgroup path, opt-in)\n", spv_path);
+        snprintf(out, n, "%s", spv_path);
+        return 1;
+    }
+    /* Try the 1.3 / driver_properties chain. If the struct is unknown or the
+     * extension isn't enabled, driverID stays 0 and we take the fast path —
+     * the default for NVIDIA/AMD/Intel-proprietary which is what we want. */
+    VkPhysicalDeviceProperties base;
+    vkGetPhysicalDeviceProperties(phys, &base);
+    VkPhysicalDeviceDriverProperties drv = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES,
+    };
+    VkPhysicalDeviceProperties2 p2 = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+        .pNext = &drv,
+    };
+    /* If VK_KHR_get_physical_device_properties2 isn't present this is a
+     * spec-conformant no-op (returns VK_INCOMPATIBLE_DRIVER) — we keep the
+     * defaults and use the fast path. If it IS present, drv is filled in. */
+    PFN_vkGetPhysicalDeviceProperties2 fp2 = (PFN_vkGetPhysicalDeviceProperties2)
+        vkGetInstanceProcAddr(G.inst, "vkGetPhysicalDeviceProperties2");
+    if (fp2) fp2(phys, &p2);
+    int broken = (base.vendorID == 0x8086 &&
+                  drv.driverID == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA);
+    if (broken) {
+        derive_sibling(spv_path, "_safe.spv", out, n);
+        fprintf(stderr, "[VK] Intel Mesa iGPU detected (%s, driverID=%u): using %s\n"
+                        "     (workaround for gl_SubgroupInvocationID cycle bug — see backend_vulkan.c).\n"
+                        "     COLI_VK_FORCE_SAFE=0 to opt back into the fast subgroup path.\n",
+                base.deviceName, (unsigned)drv.driverID, out);
+    } else {
+        snprintf(out, n, "%s", spv_path);
+    }
+    return broken;   // 0 = fast path, 1 = safe path
+}
+
 int coli_vk_init(const char *spv_path) {
     if (G.ready) return 1;
-    VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
-        .apiVersion = VK_API_VERSION_1_2};
-    VkInstanceCreateInfo ici = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-        .pApplicationInfo = &app};
-    VKCHECK(vkCreateInstance(&ici, NULL, &G.inst), "vkCreateInstance");
+    VkApplicationInfo app = {.sType=VK_STRUCTURE_TYPE_APPLICATION_INFO,
+        .apiVersion=VK_API_VERSION_1_2};
+    VkInstanceCreateInfo ici = {.sType=VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+        .pApplicationInfo=&app};
+    VKCHECK(vkCreateInstance(&ici,NULL,&G.inst), "vkCreateInstance");
 
     uint32_t nd = 0;
     vkEnumeratePhysicalDevices(G.inst, &nd, NULL);
@@ -392,13 +458,20 @@ int coli_vk_init(const char *spv_path) {
                     (unsigned long long)(hv_dl >> 20));
     }
 
-    G.shader = load_spv(G.dev, spv_path);
+    /* Pick fast or safe shader: Intel Mesa iGPU has a gl_SubgroupInvocationID
+     * cycle bug (see vk_pick_qmatmul_spv). Fast shader uses subgroupAdd which
+     * is wrong there; safe uses shared-memory tree reduction (slower but
+     * correct). Detected by vendorID + driverID; COLI_VK_FORCE_SAFE override. */
+    char qmatmul_spv[512];
+    vk_pick_qmatmul_spv(G.phys, spv_path, qmatmul_spv, sizeof(qmatmul_spv));
+
+    G.shader = load_spv(G.dev, qmatmul_spv);
     if (!G.shader) return 0;
     if (!build_pipeline(G.dev, 4, sizeof(struct PC), G.shader, &G.dsl, &G.plyt, &G.pipe, &G.dpool, &G.dset)) return 0;
 
     /* Optional fused gate+up pipeline: skip gracefully if its shader isn't present
      * (single-matmul path keeps working). */
-    char gu_path[512]; derive_sibling(spv_path, "_gate_up.spv", gu_path, sizeof(gu_path));
+    char gu_path[512]; derive_sibling(qmatmul_spv, "_gate_up.spv", gu_path, sizeof(gu_path));
     G.shader_gu = load_spv(G.dev, gu_path);
     if (G.shader_gu && !build_pipeline(G.dev, 6, sizeof(struct PC), G.shader_gu, &G.dsl_gu, &G.plyt_gu, &G.pipe_gu, &G.dpool_gu, &G.dset_gu))
         return 0;
@@ -1010,9 +1083,12 @@ int coli_vk_init_dev2(const char *spv_path, int devidx) {
     if (mt < 0) { fprintf(stderr, "[VK] dev2: no host-visible memory\n"); return 0; }
     G2.memtype = (uint32_t)mt;
     G2.memtype_cached = (uint32_t)pick_memtype_cached(G2.phys);
-    G2.sh_qmm = load_spv(G2.dev, spv_path);
+    /* Same fast/safe split as dev0 — Intel Mesa iGPU gets qmatmul_safe.spv
+     * via the sibling rule. Pick happens against G2.phys (different device). */
+    char qmatmul_spv_d2[512]; vk_pick_qmatmul_spv(G2.phys, spv_path, qmatmul_spv_d2, sizeof(qmatmul_spv_d2));
+    G2.sh_qmm = load_spv(G2.dev, qmatmul_spv_d2);
     if (!G2.sh_qmm) return 0;
-    char gu_path[512]; derive_sibling(spv_path, "_gate_up.spv", gu_path, sizeof(gu_path));
+    char gu_path[512]; derive_sibling(qmatmul_spv_d2, "_gate_up.spv", gu_path, sizeof(gu_path));
     G2.sh_gu = load_spv(G2.dev, gu_path);
     if (!G2.sh_gu) { fprintf(stderr, "[VK] dev2: gate_up shader required for the tier\n"); return 0; }
     VkDescriptorPool dp; VkDescriptorSet ds;   /* build_pipeline's singleton set: unused here */
