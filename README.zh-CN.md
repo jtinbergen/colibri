@@ -362,3 +362,4 @@ docs/                     参考文档、实验、媒体文件与 DeepSeek V4 �
 ## 许可证
 
 Apache 2.0。GLM-5.2 权重由 Z.ai 以 MIT 许可发布。
+**MiniMax-M3** is supported by this engine.

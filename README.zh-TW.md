@@ -342,3 +342,4 @@ docs/                     參考文件、實驗與媒體檔
 ## 授權條款
 
 Apache 2.0。GLM-5.2 權重由 Z.ai 以 MIT 授權發布。
+**MiniMax-M3** is supported by this engine.
