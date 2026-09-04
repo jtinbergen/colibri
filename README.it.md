@@ -340,7 +340,7 @@ e per il gateway API opzionale.
   qualsiasi MoE con expert instradati può essere organizzato allo stesso modo.
   Otto famiglie funzionano già (GLM-5.2, GLM-5.3-Flash con la vision,
   Inkling, Kimi K3, DeepSeek V4 Flash, Qwen3.8-Flash-Next, Qwen3.6, OLMoE);
-  altre famiglie open-weight, **MiniMax** tra le candidate, si guadagnano un
+  altre famiglie open-weight, **MiniMax-M3** tra le candidate, si guadagnano un
   engine come le prime otto: quando qualcuno le misura end-to-end.
 
 ## Sostenere il progetto
