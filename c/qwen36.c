@@ -615,7 +615,7 @@ typedef struct {
 } Layer;
 
 /* ---------- LRU expert cache (int8 weights + per-row float scales) ---------- */
-typedef struct { int eid; int pinned; int is_int4; int8_t *g, *u, *d; uint8_t *g4, *u4, *d4; float *gs, *us, *ds; uint64_t used; } Slot;
+typedef struct { int eid; int pinned; int is_int4; int8_t *g, *u, *d; uint8_t *g4, *u4, *d4; float *gs, *us, *ds; uint64_t used; int arena_index; uint8_t arena_owned; } Slot;
 typedef struct {
     Slot *slots;
     int *slot_by_expert;                  /* expert id -> resident slot, -1 if absent */
@@ -629,6 +629,8 @@ typedef struct {
     float *embed, *lm_head, *final_norm;
     Layer *L;
     LCache *cache;          /* [n_layers] */
+    uint8_t *expert_w_arena; float *expert_s_arena;
+    size_t expert_w_stride, expert_s_stride; int expert_arena_slots;
     int *active_of;         /* [n_layers] original->active idx (Phase 2: identity for all layers) */
     float **DN_rec;         /* [n_layers] recurrent state S[h]=[kdim,vdim] for DeltaNet layers (NULL for attn) */
     float **DN_conv;        /* [n_layers] conv ring [conv_dim, convk-1] for DeltaNet layers (NULL for attn) */
@@ -638,6 +640,8 @@ typedef struct {
     int attn_sc_thr;
     double dense_load_s;
     uint32_t *freq;
+    uint64_t *route_count, *gpu_route_count, *cpu_route_count;
+    double *route_cpu_get_ms, *route_cpu_matmul_ms;
     int freq_token_count, hot_pinned, hot_n, warmup_tokens, token_count;
     float *momentum_logits;
     float pilot_smooth, pilot_conf_limit;
@@ -723,20 +727,241 @@ static double rss_gb(void) { struct rusage r; getrusage(RUSAGE_SELF, &r); return
 
 /* ---- M-PROF (R2): per-phase wall-clock accumulators, COLI_TIMERS=1 ---- */
 static int g_timers = -1;
+static int g_island_timing = -1;
 static double g_tm_dec[6], g_tm_pre[6];   /* 0=deltanet 1=attention 2=moe_total 3=shared 4=router 5=lm_head */
 static long g_tm_dec_tokens = 0, g_tm_pre_tokens = 0;
 static double tm_now(void){ struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts); return ts.tv_sec*1e3 + ts.tv_nsec/1e6; }
-static int tm_on(void){ if(g_timers<0){ const char *e=getenv("COLI_TIMERS"); g_timers = (e && *e=='1'); } return g_timers; }
+static int tm_on(void){ if(g_timers<0){ const char *e=getenv("COLI_TIMERS"); g_timers = (e && *e=='1'); if (g_timers) fprintf(stderr,"[timers] COLI_TIMERS=1 enabled\n"); } return g_timers; }
+static int island_timing_on(void){
+    if(g_island_timing<0){
+        const char *e=getenv("COLI_ISLAND_TIMING");
+        g_island_timing=(e && atoi(e)!=0);
+    }
+    return g_island_timing;
+}
 double g_qt_iss=0, g_qt_cpu=0, g_qt_tak=0;   /* QTIER-Phasen (Decode) */
+double g_qt_get_ms=0, g_qt_matmul_ms=0;        /* Split of cpu-miss: get+lookup vs matmul+silu */
+double g_qt_lookup_ms=0;                       /* expert_get + qt_note before issue */
+static uint64_t g_qt_layer_calls[1024], g_qt_layer_routes[1024], g_qt_layer_gpu[1024], g_qt_layer_cpu_routes[1024];
+static double g_qt_layer_issue_ms[1024], g_qt_layer_cpu_ms[1024];
+static double g_qt_layer_get_ms[1024], g_qt_layer_matmul_ms[1024];
+static double g_qt_layer_moe_ms[1024];
+static double g_qt_layer_shared_ms[1024], g_qt_layer_cpu_window_ms[1024];
+static double g_qt_layer_gpu_event_ms[1024], g_qt_layer_gpu_sync_ms[1024];
+static double g_qt_layer_gpu_cpu_overlap_ms[1024];
+static double g_qt_layer_issue_to_complete_ms[1024];
+static int compute_islands_v0_on(void);
+static uint64_t g_cpu_island_v0_calls, g_cpu_island_v0_routes;
+static FILE *g_qt_overlap_fp = NULL;
+static uint64_t g_qt_overlap_rows = 0;
+static uint64_t g_qt_overlap_token_index = 0;
+
+typedef struct {
+    int valid, layer, gpu_present, cpu_present;
+    uint64_t token;
+    double layer_begin_ms, gpu_runnable_ms, gpu_submit_ms;
+    double gpu_complete_ms, cpu_begin_ms, cpu_complete_ms;
+    double merge_begin_ms, layer_complete_ms;
+} Q36IslandLayerTrace;
+static Q36IslandLayerTrace g_island_layer_trace;
+static FILE *g_island_timing_fp = NULL;
+
+static void qwen36_island_trace_open(void){
+    if(g_island_timing_fp){ fclose(g_island_timing_fp); g_island_timing_fp=NULL; }
+    memset(&g_island_layer_trace,0,sizeof g_island_layer_trace);
+    if(!island_timing_on()) return;
+    const char *path=getenv("COLI_ISLAND_TIMING_FILE");
+    if(!path || !*path) path="compute_islands_v0.csv";
+    g_island_timing_fp=fopen(path,"wb");
+    if(!g_island_timing_fp){
+        fprintf(stderr,"[islands-v0] cannot write timing trace: %s\n",path);
+        return;
+    }
+    fprintf(g_island_timing_fp,
+            "token,layer,layer_begin_ms,gpu_runnable_ms,gpu_submit_ms,gpu_complete_ms,"
+            "cpu_begin_ms,cpu_complete_ms,merge_begin_ms,layer_complete_ms,"
+            "gpu_dispatch_delay_ms,gpu_lane_ms,cpu_lane_ms,imbalance_ms,"
+            "exposed_merge_ms,layer_makespan_ms,gpu_slack_ms\n");
+    setvbuf(g_island_timing_fp,NULL,_IOLBF,0);
+}
+
+static void qwen36_island_trace_write(void){
+    Q36IslandLayerTrace *t=&g_island_layer_trace;
+    if(!g_island_timing_fp || !t->valid || !t->layer_complete_ms) return;
+    double gpu_end=t->gpu_present?t->gpu_complete_ms:0.0;
+    double cpu_end=t->cpu_present?t->cpu_complete_ms:0.0;
+    double dispatch=(t->gpu_present && t->gpu_submit_ms>=t->gpu_runnable_ms)
+                   ?t->gpu_submit_ms-t->gpu_runnable_ms:0.0;
+    double gpu_lane=t->gpu_present?t->gpu_complete_ms-t->gpu_submit_ms:0.0;
+    double cpu_lane=t->cpu_present?t->cpu_complete_ms-t->cpu_begin_ms:0.0;
+    double critical_end=gpu_end>cpu_end?gpu_end:cpu_end;
+    double boundary=critical_end>0.0?t->layer_complete_ms-critical_end:0.0;
+    if(boundary<0.0) boundary=0.0;
+    double imbalance=(t->gpu_present && t->cpu_present)
+                   ?fabs(cpu_end-gpu_end):0.0;
+    fprintf(g_island_timing_fp,
+            "%llu,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
+            "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n",
+            (unsigned long long)t->token,t->layer,t->layer_begin_ms,
+            t->gpu_runnable_ms,t->gpu_submit_ms,t->gpu_complete_ms,
+            t->cpu_begin_ms,t->cpu_complete_ms,t->merge_begin_ms,
+            t->layer_complete_ms,dispatch,gpu_lane,cpu_lane,
+            imbalance,boundary,
+            t->layer_complete_ms-t->layer_begin_ms,
+            t->gpu_present?t->layer_complete_ms-gpu_end:0.0);
+}
+
+static void qwen36_island_trace_close(void){
+    if(g_island_timing_fp){ fclose(g_island_timing_fp); g_island_timing_fp=NULL; }
+}
+
+/* Optional deterministic route replay for execution-plane A/B tests.  It is
+ * deliberately outside the hot production configuration: the trace stores
+ * only decode-time routing decisions, while the normal router still runs on
+ * replay so mismatches are detected rather than hidden. */
+#define Q36_ROUTE_TRACE_MAGIC 0x51333652u
+#define Q36_ROUTE_TRACE_VERSION 1u
+typedef struct {
+    uint32_t magic, version, n_layers, n_experts, topk;
+} Q36RouteTraceHeader;
+typedef struct {
+    uint32_t step, layer, topk;
+    int32_t idx[32];
+    float val[32];
+} Q36RouteTraceRecord;
+static FILE *g_q36_route_trace_fp = NULL;
+static FILE *g_q36_route_replay_fp = NULL;
+static uint32_t g_q36_route_step = 0;
+static int g_q36_route_replay_error = 0;
+
+static void qwen36_route_trace_close(void) {
+    if (g_q36_route_trace_fp) {
+        fclose(g_q36_route_trace_fp);
+        g_q36_route_trace_fp = NULL;
+    }
+    if (g_q36_route_replay_fp) {
+        fclose(g_q36_route_replay_fp);
+        g_q36_route_replay_fp = NULL;
+    }
+    g_q36_route_replay_error = 0;
+}
+
+static void qwen36_route_trace_open(Model *m) {
+    qwen36_route_trace_close();
+    g_q36_route_step = 0;
+    const char *out = getenv("QWEN_ROUTE_TRACE_FILE");
+    if (out && *out) {
+        g_q36_route_trace_fp = fopen(out, "wb");
+        if (!g_q36_route_trace_fp) {
+            fprintf(stderr, "[qwen-route] cannot write trace: %s\n", out);
+        } else {
+            Q36RouteTraceHeader h = {Q36_ROUTE_TRACE_MAGIC,
+                                     Q36_ROUTE_TRACE_VERSION,
+                                     (uint32_t)m->c.n_layers,
+                                     (uint32_t)m->c.n_experts,
+                                     (uint32_t)m->c.topk};
+            if (fwrite(&h, sizeof h, 1, g_q36_route_trace_fp) != 1) {
+                fprintf(stderr, "[qwen-route] cannot write trace header\n");
+                qwen36_route_trace_close();
+            }
+        }
+    }
+    const char *in = getenv("QWEN_ROUTE_REPLAY_FILE");
+    if (in && *in) {
+        g_q36_route_replay_fp = fopen(in, "rb");
+        if (!g_q36_route_replay_fp) {
+            fprintf(stderr, "[qwen-route] cannot read replay: %s\n", in);
+        } else {
+            Q36RouteTraceHeader h;
+            int valid = fread(&h, sizeof h, 1, g_q36_route_replay_fp) == 1 &&
+                        h.magic == Q36_ROUTE_TRACE_MAGIC &&
+                        h.version == Q36_ROUTE_TRACE_VERSION &&
+                        h.n_layers == (uint32_t)m->c.n_layers &&
+                        h.n_experts == (uint32_t)m->c.n_experts &&
+                        h.topk == (uint32_t)m->c.topk;
+            if (!valid) {
+                fprintf(stderr, "[qwen-route] replay header mismatch; replay disabled\n");
+                fclose(g_q36_route_replay_fp);
+                g_q36_route_replay_fp = NULL;
+                g_q36_route_replay_error = 1;
+            }
+        }
+    }
+    if (g_q36_route_trace_fp || g_q36_route_replay_fp)
+        fprintf(stderr, "[qwen-route] decode route %s%s\n",
+                g_q36_route_trace_fp ? "trace" : "",
+                g_q36_route_replay_fp ? "replay" : "");
+}
+
+static void qwen36_route_trace_record(int layer, const int *idx,
+                                      const float *val, int K) {
+    if (!g_q36_route_trace_fp || !idx || !val || K < 1 || K > 32) return;
+    Q36RouteTraceRecord r;
+    memset(&r, 0, sizeof r);
+    r.step = g_q36_route_step;
+    r.layer = (uint32_t)layer;
+    r.topk = (uint32_t)K;
+    for (int k = 0; k < K; k++) {
+        r.idx[k] = idx[k];
+        r.val[k] = val[k];
+    }
+    if (fwrite(&r, sizeof r, 1, g_q36_route_trace_fp) != 1)
+        fprintf(stderr, "[qwen-route] trace write failed\n");
+}
+
+static int qwen36_route_replay(int layer, int *idx, float *val, int K) {
+    if (!g_q36_route_replay_fp || g_q36_route_replay_error) return 0;
+    Q36RouteTraceRecord r;
+    if (fread(&r, sizeof r, 1, g_q36_route_replay_fp) != 1 ||
+        r.step != g_q36_route_step || r.layer != (uint32_t)layer ||
+        r.topk != (uint32_t)K) {
+        fprintf(stderr, "[qwen-route] replay mismatch at step=%u layer=%d\n",
+                (unsigned)g_q36_route_step, layer);
+        g_q36_route_replay_error = 1;
+        return 0;
+    }
+    for (int k = 0; k < K; k++) {
+        if (r.idx[k] < 0) {
+            fprintf(stderr, "[qwen-route] invalid replay expert at step=%u layer=%d\n",
+                    (unsigned)g_q36_route_step, layer);
+            g_q36_route_replay_error = 1;
+            return 0;
+        }
+        idx[k] = r.idx[k];
+        val[k] = r.val[k];
+    }
+    return 1;
+}
+
+/* serve/argv-generate only call tm_report() from the argv exit path. Serve
+ * mode skips that exit path entirely (serve_loop never returns), so when
+ * COLI_TIMERS=1 in a serve session we still want the breakdown. Hook a
+ * late atexit that fires after qt_stats() and prints whatever the M-PROF
+ * accumulators hold. */
+static void tm_report(void);   /* forward decl: defined below near the rest of M-PROF */
+static void tm_report_atexit(void) {
+    tm_report();
+}
 double g_dn_sub[4];                           /* DN: proj, conv+split, l2n+rec, norm+out */
 double g_tm_step=0;                           /* step() total (decode) */
 static double g_tm_win_moe=0; static int g_tm_win_n=0;
+
+/* CUDA tier hit/miss counters -- separate from m->hits/miss which are
+ * LCache-only. These count ACTUAL routed-expert invocations, so the hit_rate
+ * is the real "GPU acceleration" fraction, not a capacity fraction. */
+static uint64_t g_qt_inv_total = 0;     /* routed (layer,expert) pairs decoded */
+static uint64_t g_qt_gpu_hits = 0;      /* served by VRAM */
+static uint64_t g_qt_cpu_misses = 0;    /* fell back to CPU scratch */
+static uint64_t g_qt_sync_count = 0;    /* qt_issue + qt_take pairs (sync ops) */
 static void tm_add(int S, int idx, double ms){
     if(S==1){
         g_tm_dec[idx]+=ms;
         if(idx==2) g_tm_win_moe+=ms;
-        if(idx==5 && ++g_tm_win_n==32){
-            fprintf(stderr,"[timers] window: moe %.0f ms/token (last 32)\n", g_tm_win_moe/32.0);
+        if(idx==5 && ++g_tm_win_n==4){
+            /* Tight window (4 tokens) so a short bench surfaces the
+             * per-phase breakdown without waiting 30+ seconds for the
+             * default 32-token window to fill. */
+            fprintf(stderr,"[timers] window: moe %.1f ms/token (last 4)\n", g_tm_win_moe/4.0);
             g_tm_win_moe=0; g_tm_win_n=0;
         }
     } else g_tm_pre[idx]+=ms;
@@ -760,12 +985,103 @@ static void tm_report(void){
         fprintf(stderr,"[timers]   dn-sub: proj %.1f | conv %.1f | l2n+rec %.1f | norm+out %.1f ms/token\n",
             g_dn_sub[0]/g_tm_dec_tokens,g_dn_sub[1]/g_tm_dec_tokens,g_dn_sub[2]/g_tm_dec_tokens,g_dn_sub[3]/g_tm_dec_tokens);
     if(g_qt_iss+g_qt_cpu+g_qt_tak>0)
-        fprintf(stderr,"[timers]   qtier: issue %.2f | cpu-miss %.2f | take %.2f ms/token\n",
+        fprintf(stderr,"[timers]   qtier-legacy: issue %.2f | cpu-miss-direct %.2f | take-wrapper %.2f ms/token\n",
                 g_qt_iss/g_tm_dec_tokens, g_qt_cpu/g_tm_dec_tokens, g_qt_tak/g_tm_dec_tokens);
+    if (g_qt_cpu > 0.0 && tm_on()) {
+        fprintf(stderr,"[timers]   cpu-miss split: get+lookup %.2f | matmul+silu %.2f ms/token (g_qt_get_ms=%.1f g_qt_matmul_ms=%.1f g_qt_cpu=%.1f tm=%d)\n",
+                g_qt_get_ms/g_tm_dec_tokens, g_qt_matmul_ms/g_tm_dec_tokens,
+                g_qt_get_ms, g_qt_matmul_ms, g_qt_cpu, tm_on());
+    }
+    if (compute_islands_v0_on())
+        fprintf(stderr,"[islands-v0] CPU descriptors=%llu routes=%llu (existing exact batch executor)\n",
+                (unsigned long long)g_cpu_island_v0_calls,
+                (unsigned long long)g_cpu_island_v0_routes);
+    if (g_qt_inv_total > 0) {
+        double hit_rate = 100.0 * (double)g_qt_gpu_hits / (double)g_qt_inv_total;
+        double sync_per_tok = (double)g_qt_sync_count / (double)(g_tm_dec_tokens > 0 ? g_tm_dec_tokens : 1);
+        fprintf(stderr,"[timers]   qtier-invoc: %llu routed | gpu %llu (%.1f%%) | cpu-fallback %llu | sync-pairs %.1f/token\n",
+                (unsigned long long)g_qt_inv_total,
+                (unsigned long long)g_qt_gpu_hits, hit_rate,
+                (unsigned long long)g_qt_cpu_misses,
+                sync_per_tok);
+    }
+    {
+        double r_gpu=0.0,r_wait=0.0,r_api=0.0,r_reduce=0.0,r_d2h=0.0,r_total=0.0;
+        uint64_t r_calls=0;
+        double qtake_direct=0.0; uint64_t qtake_calls=0;
+        qt_resident_timing_totals(&r_gpu,&r_wait,&r_api,&r_reduce,&r_d2h,&r_total,
+                                  &r_calls,&qtake_direct,&qtake_calls);
+        if (r_total > 0.0 && g_tm_dec_tokens > 0) {
+            double n=(double)g_tm_dec_tokens;
+            fprintf(stderr,"[timers]   resident-take: calls %.1f/token | gpu-event %.2f | sync-wait %.2f | "
+                    "take-api %.2f | reduce-event %.2f | d2h %.2f | host-other %.2f ms/token\n",
+                    (double)r_calls/n,r_gpu/(1000.0*n),r_wait/(1000.0*n),r_api/(1000.0*n),
+                    r_reduce/(1000.0*n),r_d2h/(1000.0*n),
+                    (r_total-r_wait-r_api-r_d2h)/(1000.0*n));
+            fprintf(stderr,"[timers]   qt-take-direct: %.2f ms/token | calls %.1f/token | "
+                    "wrapper-delta %.2f ms/token\n",
+                    qtake_direct/(1000.0*n),(double)qtake_calls/n,
+                    g_qt_tak/n-qtake_direct/(1000.0*n));
+            fprintf(stderr,"[timers]   resident-sync-gap: %.2f ms/token "
+                    "(sync-wait - gpu-event - reduce-event)\n",
+                    (r_wait-r_gpu-r_reduce)/(1000.0*n));
+
+            /* Wall-clock accounting for the MoE envelope.  GPU event time is
+             * deliberately reported separately: it overlaps the CPU path and
+             * must not be added to this critical-path sum. */
+            double moe_ms=g_tm_dec[2]/n;
+            double router_ms=g_tm_dec[4]/n;
+            double shared_ms=g_tm_dec[3]/n;
+            double lookup_ms=g_qt_lookup_ms/n;
+            double issue_ms=g_qt_iss/n;
+            double cpu_ms=g_qt_cpu/n;
+            double take_ms=qtake_direct/(1000.0*n);
+            double accounted=router_ms+shared_ms+lookup_ms+issue_ms+cpu_ms+take_ms;
+            fprintf(stderr,"[timers]   moe-wall-accounting: total %.2f | router %.2f | shared %.2f | "
+                    "expert-lookup %.2f | issue %.2f | cpu-fallback %.2f | resident-take %.2f | other %.2f ms/token\n",
+                    moe_ms,router_ms,shared_ms,lookup_ms,issue_ms,cpu_ms,take_ms,moe_ms-accounted);
+            qt_resident_timing_call_report();
+            if (getenv("COLI_TIMERS_DETAIL") && atoi(getenv("COLI_TIMERS_DETAIL"))) {
+                for (int l=0; l<1024; l++) if (g_qt_layer_calls[l]) {
+                    double nlayer=(double)g_qt_layer_calls[l];
+                    fprintf(stderr,"[timers]   qtier-layer: layer=%d routes=%llu gpu=%llu cpu=%llu "
+                            "issue=%.2f cpu-total=%.2f cpu-get=%.2f cpu-matmul=%.2f ms/call\n",
+                            l,(unsigned long long)g_qt_layer_routes[l],
+                            (unsigned long long)g_qt_layer_gpu[l],
+                            (unsigned long long)g_qt_layer_cpu_routes[l],
+                            g_qt_layer_issue_ms[l]/nlayer,g_qt_layer_cpu_ms[l]/nlayer,
+                            g_qt_layer_get_ms[l]/nlayer,g_qt_layer_matmul_ms[l]/nlayer);
+                }
+            }
+        }
+    }
     fprintf(stderr,"[timers] prefill: %ld tokens  dn=%.0f attn=%.0f moe=%.0f(sh=%.0f rt=%.0f) head=%.0f ms\n",
             g_tm_pre_tokens,g_tm_pre[0],g_tm_pre[1],g_tm_pre[2],g_tm_pre[3],g_tm_pre[4],g_tm_pre[5]);
 }
 static float *falloc(int64_t n) { float *p = malloc(n*sizeof(float)); if(!p){fprintf(stderr,"OOM %ld\n",(long)n);exit(1);} return p; }
+
+/* A decode token is a narrow, latency-sensitive workload: most GEMVs have
+ * only one row and the routed expert batch is normally eight experts.  Keep a
+ * separate opt-in thread setting for that phase so callers can leave a larger
+ * OpenMP team enabled for prompt processing.  This is process-wide because
+ * Qwen's decode loop is single-threaded; NUMA deployments can set the value
+ * to the number of cores assigned to the local CPU island. */
+static void qwen_decode_threads_apply(int S) {
+#ifdef _OPENMP
+    if (S == 1) {
+        const char *e = getenv("COLI_QWEN_DECODE_THREADS");
+        /* A single decode row is a GEMV-heavy latency workload.  The old
+         * process-wide team (often 10 threads) oversubscribes the tiny
+         * per-layer work and hurts both CPU fallback and host orchestration.
+         * Keep the island width configurable for NUMA deployments, but use
+         * the measured four-thread default when no policy is supplied. */
+        int n = (e && *e) ? atoi(e) : 4;
+        if (n > 0) omp_set_num_threads(n);
+    }
+#else
+    (void)S;
+#endif
+}
 
 /* y[S,O] = x[S,I] @ W^T,  W is [O,I] row-major */
 static void matmul(float *y, const float *x, const float *W, int S, int I, int O) {
@@ -1000,6 +1316,27 @@ static void matmul_qe(float *y, const float *x, const int8_t *q, const float *sc
     else matmul_q(y, x, q, scale, I, O);
 }
 
+/* Decode-time fallback batches contain at most the routed experts for one
+ * token (normally eight).  Letting every small projection fan out to the full
+ * process-wide OpenMP team oversubscribes this island and costs more in team
+ * wakeup/cache traffic than it saves in arithmetic.  Keep the limit local to
+ * the expert executor so dense attention/DeltaNet and prefill retain their
+ * existing OpenMP policy.  A NUMA deployment can assign a larger or smaller
+ * local team explicitly. */
+static int cpu_expert_threads(void) {
+    const char *e = getenv("COLI_CPU_EXPERT_THREADS");
+    if (e && *e) {
+        int n = atoi(e);
+        if (n > 0) return n;
+    }
+#ifdef _OPENMP
+    int n = omp_get_max_threads();
+    return n > 4 ? 4 : (n > 0 ? n : 1);
+#else
+    return 1;
+#endif
+}
+
 /* ---- Dense int8: per-row quantized copies of the large f32 matrices.
  * matmul_d dispatches via pointer lookup to matmul_q; COLI_DENSE_I8=0 falls
  * back to f32 (reference path for parity tests). ~4x less memory traffic. */
@@ -1037,6 +1374,22 @@ static void matmul_d(float *y, const float *x, const float *W, int S, int I, int
         return;
     }
     matmul(y, x, W, S, I, O);
+}
+
+/* Export the persistent dense-int8 copy to an execution island without
+ * dereferencing the original f32 key.  The f32 matrices may already have
+ * been released after quantisation, so pointer identity is intentional here. */
+static int qdw_export(const float *W, int I, const int8_t **q_out,
+                      const float **sc_out, int *O_out){
+    for(int i=0;i<g_qdw_n;i++){
+        if(g_qdw[i].w==W && g_qdw[i].I==I){
+            if(q_out) *q_out=g_qdw[i].q;
+            if(sc_out) *sc_out=g_qdw[i].sc;
+            if(O_out) *O_out=g_qdw[i].O;
+            return 1;
+        }
+    }
+    return 0;
 }
 
 /* rmsnorm over a row of length D (in-place capable: out may == x).
@@ -1269,7 +1622,28 @@ static void model_init_range(Model *m, const char *snap, int cap, int bits,
     if (m->c.rotary_dim > m->c.head_dim || m->c.rotary_dim % 2 != 0) {
         fprintf(stderr, "rotary_dim %d invalid for head_dim %d\n", m->c.rotary_dim, m->c.head_dim); exit(1);
     }
-    st_init(&m->S, snap);
+    /* Match GLM's storage topology contract: extra roots are split shards,
+     * while mirrors are optional read-only replicas validated by st.h. */
+    {
+        const char *dirs = getenv("COLI_MODEL_DIRS");
+        st_init_multi(&m->S, snap, dirs && *dirs ? dirs : NULL);
+        const char *mir = getenv("COLI_MODEL_MIRROR");
+        if (!mir || !*mir) mir = getenv("SNAP_MIRROR");
+        if (mir && *mir) {
+            char buf[4096];
+            snprintf(buf, sizeof(buf), "%s", mir);
+            for (char *p = buf; *p && m->S.nrep < ST_MAX_MIR; ) {
+                char *end = strpbrk(p, ";,");
+                if (end) *end = '\0';
+                while (*p == ' ') p++;
+                size_t n = strlen(p);
+                while (n && p[n-1] == ' ') p[--n] = '\0';
+                if (*p) st_mirror_add(&m->S, p);
+                if (!end) break;
+                p = end + 1;
+            }
+        }
+    }
     Cfg *c = &m->c;
     if (layer_end == 0) layer_end = c->n_layers;
     if (layer_begin < 0 || layer_end > c->n_layers ||
@@ -1365,6 +1739,11 @@ static void model_init_range(Model *m, const char *snap, int cap, int bits,
         m->DN_conv[i] = calloc((size_t)c->dn_conv_dim * (c->dn_convk - 1), sizeof(float));
     }
     m->freq = calloc((size_t)c->n_layers * c->n_experts, sizeof(uint32_t));
+    m->route_count = calloc((size_t)c->n_layers * c->n_experts, sizeof(uint64_t));
+    m->gpu_route_count = calloc((size_t)c->n_layers * c->n_experts, sizeof(uint64_t));
+    m->cpu_route_count = calloc((size_t)c->n_layers * c->n_experts, sizeof(uint64_t));
+    m->route_cpu_get_ms = calloc((size_t)c->n_layers * c->n_experts, sizeof(double));
+    m->route_cpu_matmul_ms = calloc((size_t)c->n_layers * c->n_experts, sizeof(double));
     m->hot_pinned = 0; m->freq_token_count = 0;
     m->hot_n         = getenv("HOT")    ? atoi(getenv("HOT"))    : 0;
     m->warmup_tokens = getenv("WARMUP") ? atoi(getenv("WARMUP")) : 5;
@@ -1393,16 +1772,284 @@ static void model_init(Model *m, const char *snap, int cap, int bits) {
 static int64_t scale_count_gu(const Cfg *c){ return c->expert_gs ? (int64_t)c->inter * ((c->hidden + c->expert_gs - 1) / c->expert_gs) : c->inter; }
 static int64_t scale_count_d (const Cfg *c){ return c->expert_gs ? (int64_t)c->hidden * ((c->inter  + c->expert_gs - 1) / c->expert_gs) : c->hidden; }
 
+/* ----- CPU int8 execution scratch (transient, NOT a slot property) -----
+ *
+ * When the CUDA tier is active, the slot's int8 fields (g/u/d) stay NULL --
+ * packed int4 (g4/u4/d4) is the canonical host representation. On CPU
+ * fallback the engine rematerialises int4 -> int8 into one of these
+ * scratch slots, executes, and returns. The slot does NOT keep an int8
+ * copy, so the engine never holds 6,659 redundant 3 MB expansions.
+ *
+ * Single shared pool, mutex-protected. Default N=64 entries (QT_CPU_SCRATCH_N
+ * overrides) ~=192 MB working set on Qwen3.6 (inter=512, hidden=2048). LRU
+ * eviction on miss. CPU-only mode never calls this; the scratch is wired up
+ * after qt_init() succeeds.
+ *
+ * Memory hierarchy this implements:
+ *   VRAM        : selected experts, execution-ready
+ *   RAM int8    : tiny working set of CPU fallback experts (this pool)
+ *   RAM int4    : complete canonical expert set (every slot's g4/u4/d4)
+ *   disk        : no decode traffic
+ */
+typedef struct {
+    int layer, eid;          /* -1, -1 == empty */
+    uint64_t used;
+    int pinned;              /* temporarily leased by a CPU execution batch */
+    int8_t *buf;             /* (ng + ng + nd) bytes; g/u/d slice into it */
+    int8_t *g, *u, *d;
+} QtScratch;
+
+static pthread_mutex_t g_qt_scratch_mx = PTHREAD_MUTEX_INITIALIZER;
+static QtScratch *g_qt_scratch = NULL;
+static int g_qt_scratch_n = 0;            /* total slots = slots_per_layer * n_layers */
+static int g_qt_scratch_slots_per_layer = 0;
+static int g_qt_scratch_n_layers = 0;
+static int64_t g_qt_scratch_ng = 0, g_qt_scratch_nd = 0;
+
+/* Instrumentation: per-process counters and rematerialise time.
+ * Reuses the file's existing now_s() (declared forward at line 339,
+ * defined at line 698 with clock_gettime under POSIX and QueryPerformanceCounter
+ * under Windows). */
+static uint64_t g_qt_scratch_hits = 0;
+static uint64_t g_qt_scratch_misses = 0;
+static double g_qt_scratch_remat_ms = 0.0;
+
+static void qt_scratch_init(int64_t ng, int64_t nd, int n_layers) {
+    /* Layer-aware subpools. With global LRU, layer 0's experts were evicted
+     * by the ~200 intervening fallbacks before layer 0 saw its next access.
+     * Per-layer LRU keeps each layer's working set (~8 routed experts, ~5
+     * CPU fallbacks each) isolated from the other 39. QT_CPU_SCRATCH_N is
+     * now interpreted as PER-LAYER slots; default 8. */
+    g_qt_scratch_slots_per_layer = 8;
+    const char *e = getenv("QT_CPU_SCRATCH_N");
+    if (e && *e) { int v = atoi(e); if (v > 0 && v <= 1024) g_qt_scratch_slots_per_layer = v; }
+    g_qt_scratch_n_layers = n_layers;
+    g_qt_scratch_n = g_qt_scratch_slots_per_layer * n_layers;
+    g_qt_scratch_ng = ng;
+    g_qt_scratch_nd = nd;
+    g_qt_scratch = (QtScratch *)calloc((size_t)g_qt_scratch_n, sizeof(QtScratch));
+    if (!g_qt_scratch) { fprintf(stderr, "OOM qt_scratch init\n"); exit(1); }
+    for (int i = 0; i < g_qt_scratch_n; i++) {
+        g_qt_scratch[i].layer = -1;
+        g_qt_scratch[i].eid = -1;
+    }
+    fprintf(stderr, "[qtier] CPU scratch pool: %d layers x %d slots = %d total, %.1f MB\n",
+            n_layers, g_qt_scratch_slots_per_layer, g_qt_scratch_n,
+            (double)(g_qt_scratch_n * (ng + ng + nd)) / (1024.0 * 1024.0));
+}
+
+static void qt_scratch_shutdown(void) {
+    uint64_t hits, misses;
+    double remat_ms;
+    pthread_mutex_lock(&g_qt_scratch_mx);
+    hits = g_qt_scratch_hits;
+    misses = g_qt_scratch_misses;
+    remat_ms = g_qt_scratch_remat_ms;
+    if (g_qt_scratch) {
+        for (int i = 0; i < g_qt_scratch_n; i++) free(g_qt_scratch[i].buf);
+        free(g_qt_scratch);
+        g_qt_scratch = NULL;
+    }
+    g_qt_scratch_n = 0;
+    pthread_mutex_unlock(&g_qt_scratch_mx);
+    if (hits + misses > 0) {
+        fprintf(stderr, "[scratch] hits=%llu misses=%llu hit_rate=%.1f%% remat_ms=%.1f\n",
+                (unsigned long long)hits, (unsigned long long)misses,
+                100.0 * hits / (hits + misses), remat_ms);
+    }
+}
+
+/* Rematerialise int4 -> int8 in place. Reuses the existing AVX2 fast path in
+ * unpack_int4_to_int8 (qwen36.c:1614). A first cut used pure scalar and
+ * measured ~1.1 ms/fallback on Qwen3.6 (3 * 1M int4 ops). The shared
+ * vectorised path does the same work in ~150 us. */
+static void unpack_int4_to_int8(int8_t *out, const uint8_t *raw, int64_t n);
+static void qt_unpack_int4(int8_t *dst,
+                           const uint8_t *g4, const uint8_t *u4, const uint8_t *d4) {
+    unpack_int4_to_int8(dst,                   g4, g_qt_scratch_ng);
+    unpack_int4_to_int8(dst + g_qt_scratch_ng, u4, g_qt_scratch_ng);
+    unpack_int4_to_int8(dst + 2*g_qt_scratch_ng, d4, g_qt_scratch_nd);
+}
+
+/* Acquire a scratch slot for (layer, eid) using the canonical int4 sources.
+ * Returns int8 pointers via the out_g / out_u / out_d parameters. The slot's scales stay
+ * with the LSlot the caller already holds (e->gs/us/ds); the scratch only
+ * carries the int8 weights.
+ *
+ * Per-layer subpool LRU: the array is laid out as
+ *     [layer 0 slots 0..spl-1] [layer 1 slots 0..spl-1] ...
+ * where spl = g_qt_scratch_slots_per_layer. Hit/miss/victim selection stays
+ * inside the requesting layer's slice, so layer 0's hot experts do not
+ * get evicted by the ~200 intervening fallbacks of layers 1..39.
+ *
+ * Hit  : mark used, return existing buffers.
+ * Miss : pick LRU victim WITHIN the layer (lowest `used` counter; ties
+ *        break to lowest index). Allocate buffer on first use of a slot,
+ *        rematerialise int4 -> int8, register, return. */
+static void qt_scratch_get(int layer, int eid,
+                           const uint8_t *g4, const uint8_t *u4, const uint8_t *d4,
+                           int8_t **out_g, int8_t **out_u, int8_t **out_d) {
+    const int spl = g_qt_scratch_slots_per_layer;
+    const int sub_lo = layer * spl;
+    const int sub_hi = sub_lo + spl;
+
+    pthread_mutex_lock(&g_qt_scratch_mx);
+
+    /* hit? (scan only this layer's slice) */
+    for (int i = sub_lo; i < sub_hi; i++) {
+        if (g_qt_scratch[i].layer == layer && g_qt_scratch[i].eid == eid) {
+            g_qt_scratch[i].used++;
+            g_qt_scratch_hits++;
+            *out_g = g_qt_scratch[i].g;
+            *out_u = g_qt_scratch[i].u;
+            *out_d = g_qt_scratch[i].d;
+            pthread_mutex_unlock(&g_qt_scratch_mx);
+            return;
+        }
+    }
+
+    /* miss: pick LRU victim WITHIN this layer's slice (or first empty). */
+    int victim = -1;
+    for (int i = sub_lo; i < sub_hi; i++) {
+        if (g_qt_scratch[i].layer == -1) { victim = i; break; }   /* empty wins */
+    }
+    if (victim < 0) {
+        victim = sub_lo;
+        for (int i = sub_lo + 1; i < sub_hi; i++) {
+            if (g_qt_scratch[i].used < g_qt_scratch[victim].used) victim = i;
+        }
+    }
+
+    /* allocate buffer on first use of this slot */
+    if (!g_qt_scratch[victim].buf) {
+        int64_t wlen = g_qt_scratch_ng + g_qt_scratch_ng + g_qt_scratch_nd;
+        g_qt_scratch[victim].buf = (int8_t *)malloc((size_t)wlen);
+        if (!g_qt_scratch[victim].buf) { fprintf(stderr, "OOM qt_scratch slot\n"); exit(1); }
+        g_qt_scratch[victim].g = g_qt_scratch[victim].buf;
+        g_qt_scratch[victim].u = g_qt_scratch[victim].buf + g_qt_scratch_ng;
+        g_qt_scratch[victim].d = g_qt_scratch[victim].buf + g_qt_scratch_ng + g_qt_scratch_ng;
+    }
+
+    g_qt_scratch[victim].layer = layer;
+    g_qt_scratch[victim].eid = eid;
+    g_qt_scratch[victim].used++;
+    g_qt_scratch_misses++;
+
+    double t0 = now_s();
+    qt_unpack_int4(g_qt_scratch[victim].buf, g4, u4, d4);
+    g_qt_scratch_remat_ms += (now_s() - t0) * 1000.0;
+
+    *out_g = g_qt_scratch[victim].g;
+    *out_u = g_qt_scratch[victim].u;
+    *out_d = g_qt_scratch[victim].d;
+    pthread_mutex_unlock(&g_qt_scratch_mx);
+}
+
+/* Acquire one scratch entry for a batched CPU fallback and pin it until the
+ * batch has consumed the returned pointers.  The ordinary qt_scratch_get()
+ * contract is intentionally unchanged: its pointers are valid for the
+ * immediate scalar expert operation.  A batch, however, keeps several
+ * pointers live at once, so its entries must be protected from same-layer LRU
+ * replacement.  Returning zero means the configured subpool cannot hold the
+ * whole batch; the caller must use the established scalar path. */
+static int qt_scratch_get_pinned(int layer, int eid,
+                                 const uint8_t *g4, const uint8_t *u4, const uint8_t *d4,
+                                 int8_t **out_g, int8_t **out_u, int8_t **out_d,
+                                 QtScratch **out_slot) {
+    const int spl = g_qt_scratch_slots_per_layer;
+    const int sub_lo = layer * spl;
+    const int sub_hi = sub_lo + spl;
+    if (!g_qt_scratch || spl <= 0 || sub_lo < 0 || sub_hi > g_qt_scratch_n) return 0;
+
+    pthread_mutex_lock(&g_qt_scratch_mx);
+    for (int i = sub_lo; i < sub_hi; i++) {
+        if (g_qt_scratch[i].layer == layer && g_qt_scratch[i].eid == eid) {
+            g_qt_scratch[i].used++;
+            g_qt_scratch[i].pinned++;
+            g_qt_scratch_hits++;
+            *out_g = g_qt_scratch[i].g;
+            *out_u = g_qt_scratch[i].u;
+            *out_d = g_qt_scratch[i].d;
+            if (out_slot) *out_slot = &g_qt_scratch[i];
+            pthread_mutex_unlock(&g_qt_scratch_mx);
+            return 1;
+        }
+    }
+
+    int victim = -1;
+    for (int i = sub_lo; i < sub_hi; i++) {
+        if (!g_qt_scratch[i].pinned && g_qt_scratch[i].layer == -1) { victim = i; break; }
+    }
+    if (victim < 0) {
+        for (int i = sub_lo; i < sub_hi; i++) {
+            if (g_qt_scratch[i].pinned) continue;
+            if (victim < 0 || g_qt_scratch[i].used < g_qt_scratch[victim].used) victim = i;
+        }
+    }
+    if (victim < 0) {
+        pthread_mutex_unlock(&g_qt_scratch_mx);
+        return 0;
+    }
+
+    if (!g_qt_scratch[victim].buf) {
+        int64_t wlen = g_qt_scratch_ng + g_qt_scratch_ng + g_qt_scratch_nd;
+        g_qt_scratch[victim].buf = (int8_t *)malloc((size_t)wlen);
+        if (!g_qt_scratch[victim].buf) { fprintf(stderr, "OOM qt_scratch batch slot\n"); exit(1); }
+        g_qt_scratch[victim].g = g_qt_scratch[victim].buf;
+        g_qt_scratch[victim].u = g_qt_scratch[victim].buf + g_qt_scratch_ng;
+        g_qt_scratch[victim].d = g_qt_scratch[victim].buf + g_qt_scratch_ng + g_qt_scratch_ng;
+    }
+    g_qt_scratch[victim].layer = layer;
+    g_qt_scratch[victim].eid = eid;
+    g_qt_scratch[victim].used++;
+    g_qt_scratch[victim].pinned = 1;
+    g_qt_scratch_misses++;
+    double t0 = now_s();
+    qt_unpack_int4(g_qt_scratch[victim].buf, g4, u4, d4);
+    g_qt_scratch_remat_ms += (now_s() - t0) * 1000.0;
+    *out_g = g_qt_scratch[victim].g;
+    *out_u = g_qt_scratch[victim].u;
+    *out_d = g_qt_scratch[victim].d;
+    if (out_slot) *out_slot = &g_qt_scratch[victim];
+    pthread_mutex_unlock(&g_qt_scratch_mx);
+    return 1;
+}
+
+static void qt_scratch_release_pinned(QtScratch *slot) {
+    if (!slot) return;
+    pthread_mutex_lock(&g_qt_scratch_mx);
+    if (slot->pinned > 0) slot->pinned--;
+    pthread_mutex_unlock(&g_qt_scratch_mx);
+}
+
 static void slot_ensure_allocated(Model *m, Slot *s) {
-    if (s->g) return;
+    if (s->gs) return;       /* already set up: int8+scales (CPU path) or scales-only (CUDA tier) */
     Cfg *c = &m->c;
     int64_t ng = (int64_t)c->inter * c->hidden;
     int64_t nd = (int64_t)c->hidden * c->inter;
-    int8_t *w_block = malloc(ng + ng + nd);
-    if (!w_block) { fprintf(stderr, "Error: OOM allocating slot weights\n"); exit(1); }
-    s->g = w_block;
-    s->u = w_block + ng;
-    s->d = w_block + ng + ng;
+    int is_cuda_tier = qt_ready();
+    if (is_cuda_tier && m->expert_w_arena && s->arena_owned) {
+        uint8_t *wb=m->expert_w_arena+(size_t)s->arena_index*m->expert_w_stride;
+        float *sb=(float*)((uint8_t*)m->expert_s_arena+(size_t)s->arena_index*m->expert_s_stride);
+        s->g4=wb; s->u4=wb+ng/2; s->d4=wb+(ng+ng)/2;
+        s->gs=sb; s->us=sb+scale_count_gu(c); s->ds=sb+2*scale_count_gu(c);
+        s->arena_owned=1; s->pinned=0; s->is_int4=0;
+        return;
+    }
+    if (!is_cuda_tier) {
+        /* CPU-only path: allocate the int8 block. This is the
+         * ~3 MB / slot that historically made full residency impossible
+         * on tight-RAM hosts; kept for backwards compatibility when
+         * the CUDA tier is not running. */
+        int8_t *w_block = malloc(ng + ng + nd);
+        if (!w_block) { fprintf(stderr, "Error: OOM allocating slot weights\n"); exit(1); }
+        s->g = w_block;
+        s->u = w_block + ng;
+        s->d = w_block + ng + ng;
+    }
+    /* Under the CUDA tier the int8 block lives in the transient CPU
+     * scratch pool (qt_scratch_*), not here. s->g/u/d stay NULL and the
+     * decode path acquires scratch slots per expert. */
     float *s_block = falloc(2*scale_count_gu(c) + scale_count_d(c));
     s->gs = s_block;
     s->us = s_block + scale_count_gu(c);
@@ -1470,6 +2117,11 @@ static void unpack_int4_to_int8(int8_t *out, const uint8_t *raw, int64_t n)
     }
 }
 
+static void slot_clear_int4(Slot *s){
+    if(!s->arena_owned){ free(s->g4); free(s->u4); free(s->d4); }
+    if(!s->arena_owned) s->g4=s->u4=s->d4=NULL;
+}
+
 static void load_expert_merged(Model *m, int layer, int eid, Slot *s) {
     char nm[256], qsnm[256];
     int la = m->active_of[layer];   /* container stores experts under active index */
@@ -1480,6 +2132,10 @@ static void load_expert_merged(Model *m, int layer, int eid, Slot *s) {
     int64_t want_w = ng + ng + nd;
     int64_t want_s = 2*scale_count_gu(cc) + scale_count_d(cc);
     st_tensor *tw = st_find(&m->S, nm), *ts = st_find(&m->S, qsnm);
+    const char *qwen_shard_path = NULL;
+    for (int fi = 0; fi < m->S.nfd; fi++)
+        if (tw && m->S.fds[fi] == tw->fd) { qwen_shard_path = m->S.paths[fi]; break; }
+    qt_set_expert_storage(layer, eid, qwen_shard_path);
     if (!tw || (tw->nbytes != want_w && tw->nbytes != want_w / 2)) {
         fprintf(stderr, "%s: expert weight is %lld bytes — expected %lld (int8) or %lld (int4)\n",
                 nm, (long long)(tw ? tw->nbytes : -1), (long long)want_w, (long long)(want_w / 2)); exit(1); }
@@ -1497,20 +2153,24 @@ static void load_expert_merged(Model *m, int layer, int eid, Slot *s) {
         if (!noted) { fprintf(stderr, "[qwen36] int4 packed weights detected — unpacking to int8 in slot\n"); noted = 1; }
         uint8_t *raw = (uint8_t *)malloc((size_t)(want_w / 2));
         if (!raw) { fprintf(stderr, "OOM reading int4 expert %s\n", nm); exit(1); }
+        double tio = now_s();
         st_read_raw(&m->S, nm, raw, 1);
-        unpack_int4_to_int8(s->g, raw, want_w);
+        uint64_t busy=(uint64_t)((now_s()-tio)*1e9);
+        if(st_last_read_replica) qt_record_storage_read(st_last_read_replica,(uint64_t)tw->nbytes,busy);
+        else qt_record_storage_read_path(qwen_shard_path,(uint64_t)tw->nbytes,busy);
+        qt_set_expert_storage_source(layer,eid,qwen_shard_path,st_last_read_replica);
         s->is_int4 = 1;
         /* Free any previous occupant first (LRU slot reuse). */
-        free(s->g4); free(s->u4); free(s->d4); s->g4 = s->u4 = s->d4 = NULL;
-        /* Keep the packed int4 bytes alongside the unpacked int8 copy only when
-         * the CUDA tier is actually running: they are its upload source, and
-         * they let slot_ensure_int8() rematerialize an evicted expert whose
-         * int8 copy the warmstart freed. Without the tier nothing ever reads
-         * them, and keeping them would add ~50% to expert-cache RSS on the
-         * recommended gs64 container -- so qt_ready() gates the allocation.
-         * Under CUDA=0 that is an inline `return 0` and this costs nothing. */
+        slot_clear_int4(s);
+        /* Two paths from here:
+         *  - CUDA tier (qt_ready()): skip the int8 unpack entirely. s->g/u/d
+         *    are NULL under the tier; int4 packed (s->g4/u4/d4) is the
+         *    canonical host representation and is consumed by qt_scratch_get
+         *    on CPU fallback.
+         *  - CPU-only: unpack into s->g/u/d as before. The tier's int4
+         *    capture is unnecessary here (no CUDA path consumes it). */
         if (qt_ready()) {
-            int64_t gp = ng / 2, up = ng / 2, dp = nd / 2;   /* gate/up/down packed sizes */
+            int64_t gp = ng / 2, up = ng / 2, dp = nd / 2;
             s->g4 = (uint8_t *)malloc((size_t)gp);
             s->u4 = (uint8_t *)malloc((size_t)up);
             s->d4 = (uint8_t *)malloc((size_t)dp);
@@ -1518,14 +2178,32 @@ static void load_expert_merged(Model *m, int layer, int eid, Slot *s) {
             memcpy(s->g4, raw,           (size_t)gp);
             memcpy(s->u4, raw + gp,      (size_t)up);
             memcpy(s->d4, raw + gp + up, (size_t)dp);
+        } else {
+            unpack_int4_to_int8(s->g, raw, want_w);
         }
         free(raw);
     } else {
         s->is_int4 = 0;
-        free(s->g4); free(s->u4); free(s->d4); s->g4 = s->u4 = s->d4 = NULL;
+        slot_clear_int4(s);
+        double tio = now_s();
         st_read_raw(&m->S, nm, s->g, 1);
+        uint64_t busy=(uint64_t)((now_s()-tio)*1e9);
+        if(st_last_read_replica) qt_record_storage_read(st_last_read_replica,(uint64_t)tw->nbytes,busy);
+        else qt_record_storage_read_path(qwen_shard_path,(uint64_t)tw->nbytes,busy);
+        qt_set_expert_storage_source(layer,eid,qwen_shard_path,st_last_read_replica);
     }
-    st_read_f32(&m->S, qsnm, s->gs, 0);
+    {
+        double tio = now_s();
+        st_read_f32(&m->S, qsnm, s->gs, 0);
+        int scale_replica=st_last_read_replica;
+        const char *scale_path = NULL;
+        for (int fi = 0; fi < m->S.nfd; fi++)
+            if (ts && m->S.fds[fi] == ts->fd) { scale_path = m->S.paths[fi]; break; }
+        uint64_t busy=(uint64_t)((now_s()-tio)*1e9);
+        if(scale_replica) qt_record_storage_read(scale_replica,(uint64_t)ts->nbytes,busy);
+        else qt_record_storage_read_path(scale_path ? scale_path : qwen_shard_path,
+                                         (uint64_t)ts->nbytes,busy);
+    }
 }
 
 /* Robust int4 detection by on-disk size of one expert tensor (ignores a possibly
@@ -1544,29 +2222,78 @@ static int container_layer_is_int4(Model *m, int layer) {
     return (tw->nbytes == want_w / 2) ? 1 : 0;
 }
 
-/* Rematerialize a slot's int8 block from its packed int4 copy on demand
- * (~0.5 ms, no container access). Needed after the warmstart freed the int8
- * copies of VRAM-resident experts and one of them got LFRU-evicted. */
-static void slot_ensure_int8(Model *m, Slot *s) {
-    if (s->g || !s->g4) return;
-    Cfg *c = &m->c;
-    int64_t ng = (int64_t)c->inter * c->hidden, nd = (int64_t)c->hidden * c->inter;
-    int8_t *w = malloc((size_t)(ng + ng + nd));
-    if (!w) { fprintf(stderr, "OOM slot_ensure_int8\n"); exit(1); }
-    const uint8_t *src4[3] = { s->g4, s->u4, s->d4 };
-    int64_t lens[3] = { ng, ng, nd };
-    int8_t *dst = w;
-    for (int t = 0; t < 3; t++) {
-        const uint8_t *p = src4[t];
-        for (int64_t i = 0; i < lens[t]; i += 2) {
-            uint8_t b = p[i >> 1];
-            int8_t lo = (int8_t)(b & 0xF); if (lo & 8) lo -= 16;
-            int8_t hi = (int8_t)((b >> 4) & 0xF); if (hi & 8) hi -= 16;
-            dst[i] = lo; dst[i + 1] = hi;
-        }
-        dst += lens[t];
+/* Qwen's CUDA tier keeps every packed expert in RAM while only a hot subset is
+ * promoted to VRAM. Pack those fixed-size slot payloads into two long-lived
+ * arenas so Linux can interleave them with one GLM-style mbind per arena. */
+static void qwen_expert_arena_init(Model *m){
+    if(!qt_ready() || !m || !m->cache || m->c.n_layers<1 ||
+       m->cache[0].cap!=m->c.n_experts) return;
+    for(int l=0;l<m->c.n_layers;l++) if(!container_layer_is_int4(m,l)) return;
+    size_t ng=(size_t)m->c.inter*m->c.hidden, nd=ng;
+    size_t wb=(ng+ng+nd)/2;
+    size_t sc=(size_t)(2*scale_count_gu(&m->c)+scale_count_d(&m->c))*sizeof(float);
+    size_t slots=(size_t)m->c.n_layers*(size_t)m->c.n_experts;
+    if(!wb || !sc || slots>SIZE_MAX/wb || slots>SIZE_MAX/sc) return;
+    m->expert_w_stride=wb; m->expert_s_stride=sc; m->expert_arena_slots=(int)slots;
+    m->expert_w_arena=(uint8_t*)malloc(slots*wb);
+    m->expert_s_arena=(float*)malloc(slots*sc);
+    if(!m->expert_w_arena || !m->expert_s_arena){
+        free(m->expert_w_arena); free(m->expert_s_arena);
+        m->expert_w_arena=NULL; m->expert_s_arena=NULL; return;
     }
-    s->g = w; s->u = w + ng; s->d = w + ng + ng;
+    for(int l=0;l<m->c.n_layers;l++) for(int i=0;i<m->cache[l].cap;i++){
+        Slot *s=&m->cache[l].slots[i]; s->arena_index=l*m->cache[l].cap+i; s->arena_owned=1;
+    }
+    int nw=qt_numa_bind_arena(m->expert_w_arena,slots*wb);
+    int ns=qt_numa_bind_arena(m->expert_s_arena,slots*sc);
+    fprintf(stderr,"[qtier] resident expert arenas: %.2f GB weights + %.2f GB scales%s\n",
+            (double)(slots*wb)/1073741824.0,(double)(slots*sc)/1073741824.0,
+            (nw&&ns)?", NUMA interleaved":"");
+    (void)nw; (void)ns;
+}
+
+/* Acquire int8 weights for an expert. Behaviour depends on tier:
+ *
+ *   CUDA tier active (qt_ready()): acquire a transient scratch slot,
+ *      rematerialising int4 -> int8 in place. The slot's s->g/u/d stay NULL;
+ *      pointers come back through the out params.
+ *
+ *   CPU-only path: s->g/u/d are the canonical int8 block owned by the slot.
+ *      If they've been freed by an LRU eviction, malloc + unpack the int4
+ *      packed copy on demand (~0.5 ms, no container access). After the warmstart
+ *      freed the int8 copies of VRAM-resident experts and one of them got
+ *      LFRU-evicted from VRAM, this rematerialises them.
+ *
+ * Returns int8 pointers via the out params in both cases. */
+static void slot_ensure_int8(Model *m, Slot *s, int layer, int eid,
+                             int8_t **out_g, int8_t **out_u, int8_t **out_d) {
+    if (qt_ready()) {
+        qt_scratch_get(layer, eid, s->g4, s->u4, s->d4, out_g, out_u, out_d);
+        return;
+    }
+    if (!s->g && s->g4) {
+        Cfg *c = &m->c;
+        int64_t ng = (int64_t)c->inter * c->hidden, nd = (int64_t)c->hidden * c->inter;
+        int8_t *w = malloc((size_t)(ng + ng + nd));
+        if (!w) { fprintf(stderr, "OOM slot_ensure_int8\n"); exit(1); }
+        const uint8_t *src4[3] = { s->g4, s->u4, s->d4 };
+        int64_t lens[3] = { ng, ng, nd };
+        int8_t *dst = w;
+        for (int t = 0; t < 3; t++) {
+            const uint8_t *p = src4[t];
+            for (int64_t i = 0; i < lens[t]; i += 2) {
+                uint8_t b = p[i >> 1];
+                int8_t lo = (int8_t)(b & 0xF); if (lo & 8) lo -= 16;
+                int8_t hi = (int8_t)((b >> 4) & 0xF); if (hi & 8) hi -= 16;
+                dst[i] = lo; dst[i + 1] = hi;
+            }
+            dst += lens[t];
+        }
+        s->g = w; s->u = w + ng; s->d = w + ng + ng;
+    }
+    *out_g = s->g;
+    *out_u = s->u;
+    *out_d = s->d;
 }
 
 static void expert_get(Model *m, int layer, int eid, Slot **out) {
@@ -1747,9 +2474,29 @@ static void attention(Model *m, Layer *l, int layer, float *x, int S, int pos_ba
     float *q = falloc((int64_t)S*q_out);
     float *k = falloc((int64_t)S*kv_out);
     float *vv= falloc((int64_t)S*kv_out);
-    matmul_d(q, x, l->q, S, D, q_out);
-    matmul_d(k, x, l->k, S, D, kv_out);
-    matmul_d(vv, x, l->v, S, D, kv_out);
+    int dense_attn_proj = S==1 && qt_dense_attention_proj(layer,x,q,k,vv);
+    if (!dense_attn_proj) {
+        matmul_d(q, x, l->q, S, D, q_out);
+        matmul_d(k, x, l->k, S, D, kv_out);
+        matmul_d(vv, x, l->v, S, D, kv_out);
+    } else if (getenv("COLI_DENSE_ATTN_CHECK")) {
+        static uint8_t checked_attn[1024];
+        if (layer>=0 && layer<1024 &&
+            (getenv("COLI_DENSE_ATTN_CHECK_ALL") || !checked_attn[layer])) {
+            float *rq=falloc(q_out), *rk=falloc(kv_out), *rv=falloc(kv_out);
+            matmul_d(rq,x,l->q,1,D,q_out);
+            matmul_d(rk,x,l->k,1,D,kv_out);
+            matmul_d(rv,x,l->v,1,D,kv_out);
+            float mq=0.f,mk=0.f,mv=0.f;
+            for(int j=0;j<q_out;j++){float e=fabsf(q[j]-rq[j]);if(e>mq)mq=e;}
+            for(int j=0;j<kv_out;j++){float e=fabsf(k[j]-rk[j]);if(e>mk)mk=e;}
+            for(int j=0;j<kv_out;j++){float e=fabsf(vv[j]-rv[j]);if(e>mv)mv=e;}
+            if (mq!=0.f || mk!=0.f || mv!=0.f || !checked_attn[layer])
+                fprintf(stderr,"[qtier-dense-attn-check] layer=%d q_max=%.9g k_max=%.9g v_max=%.9g\n",
+                        layer,mq,mk,mv);
+            free(rq);free(rk);free(rv);checked_attn[layer]=1;
+        }
+    }
     /* split q into query (first hd) and gate (next gate_dim), both per head */
     float *query = falloc((int64_t)S*H*hd);
     float *gate  = falloc((int64_t)S*H*gate_dim);
@@ -1811,7 +2558,20 @@ static void attention(Model *m, Layer *l, int layer, float *x, int S, int pos_ba
         float g = gate_dim ? gate[o] : 0.f;
         ag[o] = ctx[o] * (1.f / (1.f + expf(-g)));
     }
-    matmul_d(out, ag, l->o, S, H*hd, D);
+    int dense_attn_out = S==1 && qt_dense_attention_out(layer,ag,out);
+    if (!dense_attn_out)
+        matmul_d(out, ag, l->o, S, H*hd, D);
+    else if (getenv("COLI_DENSE_ATTN_CHECK")) {
+        static uint8_t checked_o[1024];
+        if (layer>=0 && layer<1024 &&
+            (getenv("COLI_DENSE_ATTN_CHECK_ALL") || !checked_o[layer])) {
+            float *ro=falloc(D); matmul_d(ro,ag,l->o,1,H*hd,D);
+            float mo=0.f; for(int j=0;j<D;j++){float e=fabsf(out[j]-ro[j]);if(e>mo)mo=e;}
+            if (mo!=0.f || !checked_o[layer])
+                fprintf(stderr,"[qtier-dense-attn-check] layer=%d o_max=%.9g\n",layer,mo);
+            free(ro); checked_o[layer]=1;
+        }
+    }
     free(q); free(k); free(vv); free(query); free(gate); free(ctx); free(ag);
 }
 
@@ -1836,7 +2596,7 @@ static int qwen_shared_batch_rows(int S, int D, int I) {
     return S;
 }
 
-static void qwen_shared_experts_cpu(Model *m, Layer *l, const float *x, int S,
+static void qwen_shared_experts_cpu(Model *m, Layer *l, int layer, const float *x, int S,
                                     float *out, float *g, float *u, float *hh) {
     Cfg *c=&m->c; int D=c->hidden, I=c->shared_inter;
     int B=qwen_shared_batch_rows(S,D,I);
@@ -1844,10 +2604,13 @@ static void qwen_shared_experts_cpu(Model *m, Layer *l, const float *x, int S,
     if (B == 1) {
         for (int s=0;s<S;s++) {
             const float *xs=x+(int64_t)s*D;
-            matmul_d(g,xs,l->sh_g,1,D,I);
-            matmul_d(u,xs,l->sh_u,1,D,I);
-            for(int i=0;i<I;i++){float sv=g[i];g[i]=(sv/(1.f+expf(-sv)))*u[i];}
-            matmul_d(hh,g,l->sh_d,1,I,D);
+            int dense_shared = S==1 && qt_dense_shared(layer,xs,hh);
+            if (!dense_shared) {
+                matmul_d(g,xs,l->sh_g,1,D,I);
+                matmul_d(u,xs,l->sh_u,1,D,I);
+                for(int i=0;i<I;i++){float sv=g[i];g[i]=(sv/(1.f+expf(-sv)))*u[i];}
+                matmul_d(hh,g,l->sh_d,1,I,D);
+            }
             float sgate=1.f;
             if(l->sh_gate){float sg=0.f;for(int i=0;i<D;i++)sg+=xs[i]*l->sh_gate[i];sgate=1.f/(1.f+expf(-sg));}
             float *os=out+(int64_t)s*D;
@@ -1875,6 +2638,326 @@ static void qwen_shared_experts_cpu(Model *m, Layer *l, const float *x, int S,
     if(tm_on())tm_add(S,3,tm_now()-_ts);
 }
 
+/* CPU execution-island batch for decode-time fallback experts.  The old path
+ * enters the OpenMP loop three times per miss and immediately discards each
+ * expert's gate/up/down intermediates.  Keep the exact per-output quantized
+ * reduction used by matmul_q/matmul_q_gs, but schedule the complete local
+ * expert set as one batch.  Aggregation remains in route order, so this is an
+ * execution-structure change rather than a numerical reduction change. */
+static void matmul_qe_batch(float *y, const float *x,
+                            int8_t *const *q, const float *const *scale,
+                            int B, int I, int O, int shared_input) {
+    if (getenv("COLI_CPU_EXPERT_BATCH_SAFE") &&
+        atoi(getenv("COLI_CPU_EXPERT_BATCH_SAFE"))) {
+        for (int b=0;b<B;b++)
+            matmul_qe(y+(int64_t)b*O,shared_input?x:x+(int64_t)b*I,
+                      q[b],scale[b],I,O);
+        return;
+    }
+    int total=B*O;
+    #pragma omp parallel for schedule(static) if(total >= 256) num_threads(cpu_expert_threads())
+    for(int bo=0;bo<total;bo++) {
+        int b=bo/O, o=bo%O;
+        const float *xb=shared_input ? x : x+(int64_t)b*I;
+        const int8_t *w=q[b]+(int64_t)o*I;
+        if(g_expert_gs) {
+            int ng=(I+g_expert_gs-1)/g_expert_gs;
+            const float *sc=scale[b]+(int64_t)o*ng;
+            float acc=0.f;
+#if defined(__AVX2__) && defined(__FMA__)
+            if((g_expert_gs&31)==0) {
+                for(int gi=0;gi<ng;gi++) {
+                    __m256 a0=_mm256_setzero_ps(),a1=_mm256_setzero_ps();
+                    int base=gi*g_expert_gs,end=base+g_expert_gs;
+                    if(end>I)end=I;
+                    int i=base;
+                    for(;i+16<=end;i+=16) {
+                        __m128i b0=_mm_loadu_si128((const __m128i*)(w+i));
+                        a0=_mm256_fmadd_ps(_mm256_loadu_ps(xb+i),
+                            _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(b0)),a0);
+                        a1=_mm256_fmadd_ps(_mm256_loadu_ps(xb+i+8),
+                            _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(b0,8))),a1);
+                    }
+                    a0=_mm256_add_ps(a0,a1);
+                    __m128 s=_mm_add_ps(_mm256_castps256_ps128(a0),_mm256_extractf128_ps(a0,1));
+                    s=_mm_add_ps(s,_mm_movehl_ps(s,s));
+                    s=_mm_add_ss(s,_mm_shuffle_ps(s,s,1));
+                    acc+=_mm_cvtss_f32(s)*sc[gi];
+                    for(;i<end;i++) acc+=xb[i]*(float)w[i]*sc[gi];
+                }
+            } else
+#endif
+            {
+                for(int gi=0;gi<ng;gi++) {
+                    int base=gi*g_expert_gs,end=base+g_expert_gs;
+                    if(end>I)end=I;
+                    float part=0.f;
+                    for(int i=base;i<end;i++)part+=xb[i]*(float)w[i];
+                    acc+=part*sc[gi];
+                }
+            }
+            y[(int64_t)b*O+o]=acc;
+        } else {
+#if defined(__AVX2__) && defined(__FMA__)
+            __m256 a0=_mm256_setzero_ps(),a1=_mm256_setzero_ps();
+            __m256 a2=_mm256_setzero_ps(),a3=_mm256_setzero_ps();
+            int i=0;
+            for(;i+32<=I;i+=32) {
+                __m128i b0=_mm_loadu_si128((const __m128i*)(w+i));
+                __m128i b1=_mm_loadu_si128((const __m128i*)(w+i+16));
+                a0=_mm256_fmadd_ps(_mm256_loadu_ps(xb+i),
+                    _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(b0)),a0);
+                a1=_mm256_fmadd_ps(_mm256_loadu_ps(xb+i+8),
+                    _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(b0,8))),a1);
+                a2=_mm256_fmadd_ps(_mm256_loadu_ps(xb+i+16),
+                    _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(b1)),a2);
+                a3=_mm256_fmadd_ps(_mm256_loadu_ps(xb+i+24),
+                    _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(b1,8))),a3);
+            }
+            a0=_mm256_add_ps(_mm256_add_ps(a0,a1),_mm256_add_ps(a2,a3));
+            __m128 s=_mm_add_ps(_mm256_castps256_ps128(a0),_mm256_extractf128_ps(a0,1));
+            s=_mm_add_ps(s,_mm_movehl_ps(s,s));
+            s=_mm_add_ss(s,_mm_shuffle_ps(s,s,1));
+            float acc=_mm_cvtss_f32(s);
+            for(;i<I;i++)acc+=xb[i]*(float)w[i];
+#else
+            float acc=0.f; for(int i=0;i<I;i++)acc+=xb[i]*(float)w[i];
+#endif
+            y[(int64_t)b*O+o]=acc*scale[b][o];
+        }
+    }
+}
+
+static int moe_cpu_expert_batch(Model *m, int layer, const int *route,
+                                const float *weights, int nroutes,
+                                const float *x, float *out) {
+    if(!m || !route || !weights || !x || !out || nroutes<1 || nroutes>32) return 0;
+    Cfg *c=&m->c; int D=c->hidden,I=c->inter;
+    int8_t *gq[32],*uq[32],*dq[32];
+    const float *gs[32],*us[32],*ds[32]; int B=0;
+    QtScratch *leases[32] = {0};
+    int debug = getenv("COLI_CPU_EXPERT_BATCH_DEBUG") &&
+                atoi(getenv("COLI_CPU_EXPERT_BATCH_DEBUG"));
+    if(debug) fprintf(stderr,"[cpu-batch] begin layer=%d routes=%d\n",layer,nroutes);
+    for(int r=0;r<nroutes;r++) {
+        Slot *e=NULL; expert_get(m,layer,route[r],&e);
+        if(!e) {
+            for (int j=0;j<B;j++) qt_scratch_release_pinned(leases[j]);
+            return 0;
+        }
+        if (qt_ready()) {
+            if (!qt_scratch_get_pinned(layer, route[r], e->g4, e->u4, e->d4,
+                                       &gq[B], &uq[B], &dq[B], &leases[B])) {
+                for (int j=0;j<B;j++) qt_scratch_release_pinned(leases[j]);
+                return 0;
+            }
+        } else {
+            slot_ensure_int8(m,e,layer,route[r],&gq[B],&uq[B],&dq[B]);
+        }
+        if(!gq[B] || !uq[B] || !dq[B]) {
+            for (int j=0;j<=B;j++) qt_scratch_release_pinned(leases[j]);
+            return 0;
+        }
+        gs[B]=e->gs; us[B]=e->us; ds[B]=e->ds; B++;
+    }
+    if(debug) fprintf(stderr,"[cpu-batch] prepared layer=%d batch=%d q0=%p s0=%p gs=%d\n",
+                      layer,B,(void*)gq[0],(void*)gs[0],g_expert_gs);
+    float *bg=falloc((int64_t)B*I), *bu=falloc((int64_t)B*I), *bh=falloc((int64_t)B*D);
+    matmul_qe_batch(bg,x,gq,gs,B,D,I,1);
+    if(debug) fprintf(stderr,"[cpu-batch] gate layer=%d\n",layer);
+    matmul_qe_batch(bu,x,uq,us,B,D,I,1);
+    if(debug) fprintf(stderr,"[cpu-batch] up layer=%d\n",layer);
+    for(int b=0;b<B;b++) for(int i=0;i<I;i++) {
+        float sv=bg[(int64_t)b*I+i];
+        bg[(int64_t)b*I+i]=(sv/(1.f+expf(-sv)))*bu[(int64_t)b*I+i];
+    }
+    matmul_qe_batch(bh,bg,dq,ds,B,I,D,0);
+    if(debug) fprintf(stderr,"[cpu-batch] down layer=%d\n",layer);
+    if (getenv("COLI_CPU_EXPERT_BATCH_CHECK") &&
+        atoi(getenv("COLI_CPU_EXPERT_BATCH_CHECK"))) {
+        static int checked_once=0;
+        int check_all = getenv("COLI_CPU_EXPERT_BATCH_CHECK_ALL") &&
+                        atoi(getenv("COLI_CPU_EXPERT_BATCH_CHECK_ALL"));
+        if (!checked_once || check_all) {
+            float *rg=falloc(I), *ru=falloc(I), *rh=falloc(D);
+            float mg=0.f,mu=0.f,mh=0.f;
+            for (int b=0;b<B;b++) {
+                matmul_qe(rg,x,gq[b],gs[b],D,I);
+                matmul_qe(ru,x,uq[b],us[b],D,I);
+                for (int i=0;i<I;i++) {
+                    float sv=rg[i]; rg[i]=(sv/(1.f+expf(-sv)))*ru[i];
+                }
+                matmul_qe(rh,rg,dq[b],ds[b],I,D);
+                for (int i=0;i<I;i++) {
+                    float e=fabsf(rg[i]-bg[(int64_t)b*I+i]); if(e>mg)mg=e;
+                    e=fabsf(ru[i]-bu[(int64_t)b*I+i]); if(e>mu)mu=e;
+                }
+                for (int i=0;i<D;i++) {
+                    float e=fabsf(rh[i]-bh[(int64_t)b*D+i]); if(e>mh)mh=e;
+                }
+            }
+            if (mg!=0.f || mu!=0.f || mh!=0.f || !checked_once)
+                fprintf(stderr,"[cpu-batch-check] layer=%d batch=%d gate_max=%.9g up_max=%.9g down_max=%.9g\n",
+                        layer,B,mg,mu,mh);
+            free(rg);free(ru);free(rh);checked_once=1;
+        }
+    }
+    for(int b=0;b<B;b++) {
+        float *dst=out;
+        const float *src=bh+(int64_t)b*D; float w=weights[b];
+        for(int d=0;d<D;d++) dst[d]+=w*src[d];
+    }
+    for (int b=0;b<B;b++) qt_scratch_release_pinned(leases[b]);
+    free(bg);free(bu);free(bh);
+    return 1;
+}
+
+/* Compute-Islands v0: the control plane has already chosen these routed
+ * experts for the CPU.  Keep the descriptor deliberately small and borrow
+ * the existing exact batch executor; this first spike changes ownership of
+ * the execution boundary, not arithmetic, placement, or scheduling. */
+typedef struct {
+    Model *model;
+    int layer;
+    int count;
+    const int *expert_ids;
+    const float *route_weights;
+    const float *input;
+    float *output;
+} CpuIslandWork;
+
+static int compute_islands_v0_on(void) {
+    const char *e = getenv("COLI_COMPUTE_ISLANDS_V0");
+    return e && atoi(e) != 0;
+}
+
+static int qwen_execute_cpu_island(const CpuIslandWork *work) {
+    if (!work || !work->model || work->layer < 0 || work->count < 1 || work->count > 32 ||
+        !work->expert_ids || !work->route_weights || !work->input ||
+        !work->output)
+        return 0;
+    g_cpu_island_v0_calls++;
+    g_cpu_island_v0_routes += (uint64_t)work->count;
+    return moe_cpu_expert_batch(work->model, work->layer, work->expert_ids,
+                                work->route_weights, work->count,
+                                work->input, work->output);
+}
+
+/* The packed CPU island is now the production default.  Set
+ * COLI_CPU_EXPERT_BATCH=0 for the old per-expert path when doing an A/B or
+ * investigating a regression.  It remains disabled while host timers are
+ * active because the timer path intentionally measures the established
+ * scalar accounting points. */
+static int cpu_expert_batch_on(void) {
+    const char *e = getenv("COLI_CPU_EXPERT_BATCH");
+    return !(e && *e == '0');
+}
+
+/* One-shot decode diagnostic for the CPU/GPU MoE boundary.  It deliberately
+ * records the routed input and the final accumulated row, rather than adding
+ * timing or per-expert logging to the hot path.  This is useful when a dense
+ * island probe has exact local projection checks but a later token diverges:
+ * the dump tells us whether routing changed or the resident/fallback result
+ * changed for the same routing decision. */
+static void moe_debug_dump(const char *path, int layer, int token_count,
+                           int D, int E, int K, const float *x,
+                           const int *idx, const float *val, uint32_t qmask,
+                           const float *out) {
+    static int done;
+    const char *all_env = getenv("COLI_MOE_DEBUG_ALL");
+    int all = all_env && atoi(all_env);
+    const char *want_env = getenv("COLI_MOE_DEBUG_TOKEN");
+    int want = want_env && *want_env ? atoi(want_env) : -1;
+    if ((done && !all) || !path || !*path || layer != 0 ||
+        (want >= 0 && token_count != want) || !x || !idx || !val || !out)
+        return;
+    FILE *f = fopen(path, all ? "ab" : "wb");
+    if (!f) return;
+    uint32_t hdr[6] = {0x4d4f4544u, (uint32_t)layer, (uint32_t)token_count,
+                       (uint32_t)D, (uint32_t)E, (uint32_t)K};
+    fwrite(hdr, sizeof(*hdr), 6, f);
+    fwrite(&qmask, sizeof(qmask), 1, f);
+    fwrite(x, sizeof(float), (size_t)D, f);
+    fwrite(idx, sizeof(int), (size_t)K, f);
+    fwrite(val, sizeof(float), (size_t)K, f);
+    fwrite(out, sizeof(float), (size_t)D, f);
+    fclose(f);
+    done = 1;
+}
+
+/* Execute a bounded prompt chunk after routing all rows.  The routing math is
+ * intentionally kept byte-for-byte equivalent to the scalar path below;
+ * only expert execution is rearranged into packed rows for the CUDA tier. */
+static int moe_cuda_prefill_batch(Model *m, Layer *l, int layer,
+                                  float *x, int S, float *out, float *logits) {
+    Cfg *c=&m->c; int D=c->hidden, E=c->n_experts, K=c->topk, I=c->inter;
+    if(S<2 || S>8 || K<1 || K>32) return 0;
+    int routes=S*K;
+    int *idx_all=(int*)malloc((size_t)routes*sizeof(int));
+    float *val_all=falloc(routes);
+    if(!idx_all){free(val_all);return 0;}
+    for(int s=0;s<S;s++){
+        float *pr=logits+(int64_t)s*E;
+        if(m->momentum_logits && m->pilot_smooth>0.f){
+            float *ema=m->momentum_logits+(int64_t)layer*E; int z=1;
+            for(int e=0;e<E;e++) if(ema[e]!=0.f){z=0;break;}
+            if(z) for(int e=0;e<E;e++) ema[e]=pr[e];
+            else for(int e=0;e<E;e++) ema[e]=(1.f-m->pilot_smooth)*pr[e]+m->pilot_smooth*ema[e];
+        }
+        softmax_row(pr,E);
+        uint8_t keep[1024]; int Ec=E<1024?E:1024;
+        if(c->n_group>1 && c->n_group<=Ec){
+            int per=E/c->n_group; float gs[1024];
+            for(int gi=0;gi<c->n_group;gi++){
+                float b1=-1e30f,b2=-1e30f;
+                for(int e=gi*per;e<gi*per+per;e++){float v=pr[e];if(v>b1){b2=b1;b1=v;}else if(v>b2)b2=v;}
+                gs[gi]=b1+b2;
+            }
+            uint8_t gkeep[1024]={0};
+            for(int kk=0;kk<c->topk_group;kk++){
+                int bg=-1;float bv=-1e30f;
+                for(int gi=0;gi<c->n_group;gi++)if(!gkeep[gi]&&gs[gi]>bv){bv=gs[gi];bg=gi;}
+                if(bg<0)break;gkeep[bg]=1;
+            }
+            for(int e=0;e<Ec;e++)keep[e]=0;
+            for(int gi=0;gi<c->n_group;gi++)if(gkeep[gi])for(int e=gi*per;e<gi*per+per;e++)keep[e]=1;
+        } else for(int e=0;e<Ec;e++)keep[e]=1;
+        int *idx=idx_all+s*K; float *val=val_all+s*K;
+        for(int kk=0;kk<K;kk++){
+            int best=-1;float bv=-1e30f;
+            for(int e=0;e<E;e++)if(keep[e]){
+                int taken=0;for(int j=0;j<kk;j++)if(idx[j]==e){taken=1;break;}
+                if(!taken&&pr[e]>bv){bv=pr[e];best=e;}
+            }
+            idx[kk]=best;val[kk]=bv;
+        }
+        if(m->resident_collecting)for(int kk=0;kk<K;kk++)if(idx[kk]>=0)m->seen[(int64_t)layer*E+idx[kk]]=1;
+        {float sm=0;for(int kk=0;kk<K;kk++)sm+=val[kk];if(sm>0)for(int kk=0;kk<K;kk++)val[kk]/=sm;}
+        if(!m->hot_pinned&&m->freq){uint32_t *f=m->freq+(int64_t)layer*E;for(int kk=0;kk<K;kk++)if(idx[kk]>=0)f[idx[kk]]++;}
+    }
+    for(int r=0;r<routes;r++){
+        Slot *e; expert_get(m,layer,idx_all[r],&e);
+        if(e->g4)qt_note(layer,idx_all[r],e->g4,e->u4,e->d4,e->gs,e->us,e->ds);
+    }
+    uint64_t qmask=qt_issue_batch(layer,idx_all,routes,x,S);
+    float *g=falloc(I),*u=falloc(I),*hh=falloc(D);
+    for(int r=0;r<routes;r++){
+        if(qmask&(1ull<<r))continue;
+        int s=r/K; Slot *e; expert_get(m,layer,idx_all[r],&e);
+        int8_t *sg,*su,*sd; slot_ensure_int8(m,e,layer,idx_all[r],&sg,&su,&sd);
+        const float *xs=x+(int64_t)s*D;
+        matmul_qe(g,xs,sg,e->gs,D,I); matmul_qe(u,xs,su,e->us,D,I);
+        for(int i=0;i<I;i++){float gv=g[i];g[i]=(gv/(1.f+expf(-gv)))*u[i];}
+        matmul_qe(hh,g,sd,e->ds,I,D);
+        float *os=out+(int64_t)s*D;float w=val_all[r];
+        for(int d=0;d<D;d++)os[d]+=w*hh[d];
+    }
+    qwen_shared_experts_cpu(m,l,layer,x,S,out,g,u,hh);
+    qt_take_batch(qmask,val_all,routes,out,S);
+    free(g);free(u);free(hh);free(idx_all);free(val_all);
+    return 1;
+}
+
 /* MoE: grouped top-k routing (+ optional router bias) + shared expert.
  * Mirrors HF Qwen3 MoE: softmax(gate), optional group-limited top-k, normalized
  * weights, sum routed experts, then add the un-gated shared expert. */
@@ -1888,11 +2971,16 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
         for (int s = 0; s < S; s++) { float *pr = logits + (int64_t)s*E; for (int e = 0; e < E; e++) pr[e] += l->gate_bias[e]; }
     }
     memset(out, 0, (int64_t)S*D*sizeof(float));
+    if (S > 1 && S <= 8 && qt_ready() && getenv("COLI_CUDA_PREFILL_BATCH") &&
+        atoi(getenv("COLI_CUDA_PREFILL_BATCH"))) {
+        if (moe_cuda_prefill_batch(m,l,layer,x,S,out,logits)) { free(logits); return; }
+    }
     float *g = falloc(I), *u = falloc(I), *hh = falloc(D);
     float *sh = falloc(I), *shu = falloc(I), *shd = falloc(D);  /* shared expert scratch */
     int use_qt = qt_ready();
     for (int s = 0; s < S; s++) {
         float *pr = logits + (int64_t)s*E;
+        double _trsel = tm_on() ? tm_now() : 0.0;
         if (m->momentum_logits && m->pilot_smooth > 0.f) {
             float *ema = m->momentum_logits + (int64_t)layer * E;
             int is_zero = 1; for (int e = 0; e < E; e++) if (ema[e] != 0.f) { is_zero = 0; break; }
@@ -1936,42 +3024,142 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
         }
         /* HF renormalizes the top-k router weights unconditionally */
         { float sm=0; for (int kk=0;kk<K;kk++) sm+=val[kk]; if (sm>0) for (int kk=0;kk<K;kk++) val[kk]/=sm; }
+        if (S == 1 && qwen36_route_replay(layer, idx, val, K)) {
+            /* The replay record already contains normalized weights.
+             * Everything below now observes exactly the recorded workset. */
+        }
+        if (S == 1) qwen36_route_trace_record(layer, idx, val, K);
         if (!m->hot_pinned && m->freq) {
             uint32_t *freq_l = m->freq + (int64_t)layer * E;
             for (int kk = 0; kk < K; kk++) if (idx[kk] >= 0) freq_l[idx[kk]]++;
         }
+        if (S==1 && m->route_count) {
+            for (int kk=0; kk<K; kk++) if (idx[kk]>=0)
+                m->route_count[(int64_t)layer*E+idx[kk]]++;
+        }
+        if (tm_on()) tm_add(S, 4, tm_now()-_trsel);
         const float *xs = x + (int64_t)s*D;
         if (use_qt) {
             /* CUDA expert tier: run the resident experts as async groups on
              * all devices, compute the misses on the CPU (overlapped), then
              * collect the GPU results. */
+            double _ql0 = tm_on() ? tm_now() : 0.0;
             for (int kk = 0; kk < K; kk++) {
                 Slot *e; expert_get(m, layer, idx[kk], &e);
                 if (e->g4) qt_note(layer, idx[kk], e->g4, e->u4, e->d4, e->gs, e->us, e->ds);
             }
-            double _q0 = tm_on()? tm_now():0;
-            uint32_t qmask = qt_issue(layer, idx, K, xs);
-            double _q1 = tm_on()? tm_now():0;
-            for (int kk = 0; kk < K; kk++) {
+            if (tm_on() && S==1) g_qt_lookup_ms += tm_now()-_ql0;
+            if (S == 1 && island_timing_on()) {
+                g_island_layer_trace.gpu_runnable_ms=tm_now();
+            }
+            double _q0 = (tm_on() || island_timing_on()) ? tm_now():0;
+            uint32_t qmask = qt_issue(layer, idx, K, val, xs);
+            double _q1 = (tm_on() || island_timing_on()) ? tm_now():0;
+            if (S == 1 && island_timing_on()) {
+                g_island_layer_trace.gpu_submit_ms=_q1;
+                g_island_layer_trace.gpu_present=qmask!=0;
+                uint32_t route_mask=K<32 ? ((1u<<K)-1u) : 0xffffffffu;
+                g_island_layer_trace.cpu_present=(qmask & route_mask)!=route_mask;
+                g_island_layer_trace.cpu_begin_ms=_q1;
+            }
+            if (S == 1 && tm_on()) {
+                g_qt_inv_total += K;
+                g_qt_layer_calls[layer]++;
+                g_qt_layer_routes[layer] += (uint64_t)K;
+                for (int b = 0; b < K; b++) if (qmask & (1u<<b)) {
+                    g_qt_gpu_hits++; g_qt_layer_gpu[layer]++;
+                    if (m->gpu_route_count && idx[b]>=0)
+                        m->gpu_route_count[(int64_t)layer*E+idx[b]]++;
+                } else {
+                    g_qt_cpu_misses++; g_qt_layer_cpu_routes[layer]++;
+                    if (m->cpu_route_count && idx[b]>=0)
+                        m->cpu_route_count[(int64_t)layer*E+idx[b]]++;
+                }
+                g_qt_sync_count += 2;   /* one qt_issue, one qt_take */
+            }
+            int used_cpu_batch=0;
+            if (S==1 && !tm_on() && cpu_expert_batch_on()) {
+                int miss_idx[32], miss_n=0;
+                for (int kk=0;kk<K;kk++) if (!(qmask&(1u<<kk))) miss_idx[miss_n++]=idx[kk];
+                if (miss_n) {
+                    float miss_w[32];
+                    for (int j=0;j<miss_n;j++) {
+                        int kk=0; while(kk<K && idx[kk]!=miss_idx[j]) kk++;
+                        miss_w[j]=kk<K?val[kk]:0.f;
+                    }
+                    if (compute_islands_v0_on()) {
+                        CpuIslandWork cpu_work = {
+                            m, layer, miss_n, miss_idx, miss_w, xs,
+                            out + (int64_t)s * D
+                        };
+                        used_cpu_batch = qwen_execute_cpu_island(&cpu_work);
+                    } else {
+                        used_cpu_batch=moe_cpu_expert_batch(m,layer,miss_idx,miss_w,miss_n,xs,
+                                                             out+(int64_t)s*D);
+                    }
+                }
+            }
+            if (!used_cpu_batch) for (int kk = 0; kk < K; kk++) {
                 if (qmask & (1u<<kk)) continue;
+                double _fg0 = tm_on() ? tm_now() : 0.0;
                 Slot *e; expert_get(m, layer, idx[kk], &e);
-                slot_ensure_int8(m, e);
-                matmul_qe(g, xs, e->g, e->gs, D, I);
-                matmul_qe(u, xs, e->u, e->us, D, I);
+                int8_t *sg, *su, *sd;
+                slot_ensure_int8(m, e, layer, idx[kk], &sg, &su, &sd);
+                double _fg1 = tm_on() ? tm_now() : 0.0;
+                matmul_qe(g, xs, sg, e->gs, D, I);
+                matmul_qe(u, xs, su, e->us, D, I);
                 for (int i = 0; i < I; i++) { float gv = g[i]; g[i] = (gv / (1.f + expf(-gv))) * u[i]; }
-                matmul_qe(hh, g, e->d, e->ds, I, D);
+                matmul_qe(hh, g, sd, e->ds, I, D);
                 float w = val[kk]; float *os = out + (int64_t)s*D;
                 for (int d = 0; d < D; d++) os[d] += w * hh[d];
+                if (tm_on()) {
+                    /* g_qt_get_ms counts expert_get + slot_ensure_int8 (lookup + unpack).
+                     * g_qt_matmul_ms counts the three matmul_qe + the silu epilogue. */
+                    g_qt_get_ms    += _fg1 - _fg0;
+                    g_qt_matmul_ms += tm_now() - _fg1;
+                    if (S==1) {
+                        int64_t ri=(int64_t)layer*E+idx[kk];
+                        if (m->route_cpu_get_ms) m->route_cpu_get_ms[ri] += _fg1-_fg0;
+                        if (m->route_cpu_matmul_ms) m->route_cpu_matmul_ms[ri] += tm_now()-_fg1;
+                        g_qt_layer_get_ms[layer] += _fg1 - _fg0;
+                        g_qt_layer_matmul_ms[layer] += tm_now() - _fg1;
+                    }
+                }
             }
+            double _q2 = (tm_on() || island_timing_on()) ? tm_now():0;
+            if (tm_on() && S==1) {
+                g_qt_cpu += _q2-_q1;
+                g_qt_layer_cpu_ms[layer] += _q2-_q1;
+            }
+            if (S == 1 && island_timing_on())
+                g_island_layer_trace.cpu_complete_ms=_q2;
+
             /* Compute the shared expert NOW so it overlaps with the GPU
              * groups; the common block below is skipped. */
             {
                 double _ts2 = tm_on() ? tm_now() : 0.0;
+                double _shared_ms = 0.0;
                 int Ish = c->shared_inter;
-                matmul_d(sh, xs, l->sh_g, 1, D, Ish);
-                matmul_d(shu, xs, l->sh_u, 1, D, Ish);
-                for (int i = 0; i < Ish; i++) { float sv = sh[i]; sh[i] = (sv / (1.f + expf(-sv))) * shu[i]; }
-                matmul_d(shd, sh, l->sh_d, 1, Ish, D);
+                int dense_shared = qt_dense_shared(layer,xs,shd);
+                if (!dense_shared) {
+                    matmul_d(sh, xs, l->sh_g, 1, D, Ish);
+                    matmul_d(shu, xs, l->sh_u, 1, D, Ish);
+                    for (int i = 0; i < Ish; i++) { float sv = sh[i]; sh[i] = (sv / (1.f + expf(-sv))) * shu[i]; }
+                    matmul_d(shd, sh, l->sh_d, 1, Ish, D);
+                } else if (getenv("COLI_DENSE_SHARED_CHECK")) {
+                    static uint8_t checked_shared[1024];
+                    if (layer >= 0 && layer < 1024 && !checked_shared[layer]) {
+                        float *rg=falloc(Ish), *ru=falloc(Ish), *rd=falloc(D);
+                        matmul_d(rg,xs,l->sh_g,1,D,Ish);
+                        matmul_d(ru,xs,l->sh_u,1,D,Ish);
+                        for (int j=0;j<Ish;j++) { float sv=rg[j]; rg[j]=(sv/(1.f+expf(-sv)))*ru[j]; }
+                        matmul_d(rd,rg,l->sh_d,1,Ish,D);
+                        float md=0.f;
+                        for (int j=0;j<D;j++) { float ed=fabsf(shd[j]-rd[j]); if(ed>md)md=ed; }
+                        fprintf(stderr,"[qtier-dense-shared-check] layer=%d down_max=%.9g\n",layer,md);
+                        free(rg); free(ru); free(rd); checked_shared[layer]=1;
+                    }
+                }
                 float sgate = 1.f;
                 if (l->sh_gate) {
                     float sg = 0.f; const float *wg = l->sh_gate;
@@ -1980,22 +3168,102 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
                 }
                 float *os = out + (int64_t)s*D;
                 for (int d = 0; d < D; d++) os[d] += sgate * shd[d];
-                if (tm_on()) tm_add(S, 3, tm_now()-_ts2);
+                if (tm_on()) {
+                    _shared_ms=tm_now()-_ts2;
+                    tm_add(S, 3, _shared_ms);
+                    if (S==1) g_qt_layer_shared_ms[layer] += _shared_ms;
+                }
             }
-            double _q2 = tm_on()? tm_now():0;
+            double _q3 = (tm_on() || island_timing_on()) ? tm_now():0;
+            if (S == 1 && island_timing_on())
+                g_island_layer_trace.merge_begin_ms=tm_now();
             qt_take(qmask, val, K, out + (int64_t)s*D);
+            double _q4 = (tm_on() || island_timing_on()) ? tm_now():0;
+            if (S == 1 && island_timing_on()) {
+                double gpu_complete=0.0, merge_begin=0.0;
+                qt_resident_timing_last_boundaries(&gpu_complete,&merge_begin);
+                if (g_island_layer_trace.gpu_present && gpu_complete>0.0)
+                    g_island_layer_trace.gpu_complete_ms=gpu_complete;
+                if (merge_begin>0.0)
+                    g_island_layer_trace.merge_begin_ms=merge_begin;
+                if (g_island_layer_trace.gpu_present &&
+                    g_island_layer_trace.gpu_complete_ms<=0.0)
+                    g_island_layer_trace.gpu_complete_ms=_q4;
+            }
             if (tm_on() && S==1) {
                 extern double g_qt_iss, g_qt_cpu, g_qt_tak;
-                g_qt_iss += _q1-_q0; g_qt_cpu += _q2-_q1; g_qt_tak += tm_now()-_q2;
+                g_qt_iss += _q1-_q0;
+                g_qt_layer_issue_ms[layer] += _q1-_q0;
+                g_qt_tak += _q4-_q3;
+                g_qt_layer_cpu_window_ms[layer] += _q3-_q1;
+                g_qt_layer_issue_to_complete_ms[layer] += _q4-_q0;
+                double gpu_us=0.0, sync_us=0.0, take_us=0.0; int gpu_valid=0;
+                qt_resident_timing_last(&gpu_us,&sync_us,&take_us,&gpu_valid);
+                double gpu_end_host_lower_ms=0.0, gpu_end_host_upper_ms=0.0;
+                double reduce_end_host_lower_ms=0.0, reduce_end_host_upper_ms=0.0;
+                qt_resident_timing_last_host(&gpu_end_host_lower_ms,&gpu_end_host_upper_ms,
+                                             &reduce_end_host_lower_ms,&reduce_end_host_upper_ms);
+                double gpu_start_host_lower_ms=0.0, gpu_start_host_upper_ms=0.0;
+                double host_overlap_lower_ms=0.0, host_overlap_upper_ms=0.0;
+                int host_clock_valid = gpu_valid && gpu_end_host_lower_ms>0.0 &&
+                                       gpu_end_host_upper_ms>=gpu_end_host_lower_ms;
+                if (gpu_valid) {
+                    double gpu_ms=gpu_us/1000.0;
+                    g_qt_layer_gpu_event_ms[layer] += gpu_ms;
+                    g_qt_layer_gpu_sync_ms[layer] += sync_us/1000.0;
+                    double cpu_lo=_q1, cpu_hi=_q3;
+                    double gpu_lo=_q0, gpu_hi=_q0+gpu_ms;
+                    if (host_clock_valid) {
+                        gpu_start_host_lower_ms=gpu_end_host_lower_ms-gpu_ms;
+                        gpu_start_host_upper_ms=gpu_end_host_upper_ms-gpu_ms;
+                        double lo=cpu_lo>gpu_start_host_upper_ms?cpu_lo:gpu_start_host_upper_ms;
+                        double hi=cpu_hi<gpu_end_host_lower_ms?cpu_hi:gpu_end_host_lower_ms;
+                        if (hi>lo) host_overlap_lower_ms=hi-lo;
+                        lo=cpu_lo>gpu_start_host_lower_ms?cpu_lo:gpu_start_host_lower_ms;
+                        hi=cpu_hi<gpu_end_host_upper_ms?cpu_hi:gpu_end_host_upper_ms;
+                        if (hi>lo) host_overlap_upper_ms=hi-lo;
+                    }
+                    double lo=cpu_lo>gpu_lo?cpu_lo:gpu_lo;
+                    double hi=cpu_hi<gpu_hi?cpu_hi:gpu_hi;
+                    if (host_clock_valid) g_qt_layer_gpu_cpu_overlap_ms[layer] +=
+                        0.5*(host_overlap_lower_ms+host_overlap_upper_ms);
+                    else if (hi>lo) g_qt_layer_gpu_cpu_overlap_ms[layer] += hi-lo;
+                }
+                if (g_qt_overlap_fp) {
+                    fprintf(g_qt_overlap_fp,
+                            "%llu,%llu,%d,%llu,%d,%d,"
+                            "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
+                            "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
+                            "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n",
+                            (unsigned long long)g_qt_overlap_rows++,
+                            (unsigned long long)g_qt_overlap_token_index, layer,
+                            (unsigned long long)(g_qt_layer_calls[layer]-1),
+                            (int)__builtin_popcount(qmask), K-(int)__builtin_popcount(qmask),
+                            _q0,_q1,_q1,_q3,_q3,_q4,
+                            gpu_us/1000.0,sync_us/1000.0,
+                            (_q3-_q1),(_q4-_q0),
+                            (gpu_valid && gpu_us>0.0) ?
+                                (_q0 + gpu_us/1000.0) : 0.0,
+                            take_us/1000.0,
+                            gpu_end_host_lower_ms,gpu_end_host_upper_ms,
+                            reduce_end_host_lower_ms,reduce_end_host_upper_ms,
+                            gpu_start_host_lower_ms,gpu_start_host_upper_ms,
+                            host_overlap_lower_ms,host_overlap_upper_ms);
+                }
             }
+            if (S == 1 && getenv("COLI_MOE_DEBUG"))
+                moe_debug_dump(getenv("COLI_MOE_DEBUG"), layer, m->token_count,
+                               D, E, K, xs, idx, val, qmask,
+                               out + (int64_t)s * D);
         } else {
             for (int kk = 0; kk < K; kk++) {
                 Slot *e; expert_get(m, layer, idx[kk], &e);
-                slot_ensure_int8(m, e);
-                matmul_qe(g, xs, e->g, e->gs, D, I);
-                matmul_qe(u, xs, e->u, e->us, D, I);
+                int8_t *sg, *su, *sd;
+                slot_ensure_int8(m, e, layer, idx[kk], &sg, &su, &sd);
+                matmul_qe(g, xs, sg, e->gs, D, I);
+                matmul_qe(u, xs, su, e->us, D, I);
                 for (int i = 0; i < I; i++) { float gv = g[i]; g[i] = (gv / (1.f + expf(-gv))) * u[i]; }
-                matmul_qe(hh, g, e->d, e->ds, I, D);
+                matmul_qe(hh, g, sd, e->ds, I, D);
                 float w = val[kk];
                 float *os = out + (int64_t)s*D;
                 for (int d = 0; d < D; d++) os[d] += w * hh[d];
@@ -2005,7 +3273,7 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out) {
     /* The CUDA tier keeps its per-token shared block above because it overlaps
      * resident GPU experts.  CPU prefill instead traverses each shared matrix
      * once per bounded chunk. */
-    if (!use_qt) qwen_shared_experts_cpu(m,l,x,S,out,sh,shu,shd);
+    if (!use_qt) qwen_shared_experts_cpu(m,l,layer,x,S,out,sh,shu,shd);
     free(logits); free(g); free(u); free(hh); free(sh); free(shu); free(shd);
 }
 
@@ -2051,14 +3319,54 @@ static void deltanet(Model *m, Layer *l, int layer, float *x, int S, int pos_bas
 
     for (int s = 0; s < S; s++) {
         const float *xs = x + (int64_t)s * H;
+        /* Optional layer-scale executor. It owns the complete DeltaNet
+         * recurrent state and conv ring on one device, so the host sees only
+         * the layer input/output boundary. The fallback below is untouched. */
+        if (S == 1 && getenv("COLI_DENSE_FULL") && atoi(getenv("COLI_DENSE_FULL")) &&
+            qt_dense_deltanet_full(layer,xs,out + (int64_t)s*H))
+                continue;
         extern double g_dn_sub[4];
         double _d0 = tm_on()? tm_now():0;
-        /* projections (single-token matmuls) */
-        matmul_d(qkv, xs, l->dn_qkv, 1, H, conv_dim);
-        matmul_d(z,   xs, l->dn_z,   1, H, value_dim);
+        /* Projections share the same input and are the first coarse-island
+         * execution unit.  The executor preserves the two existing
+         * quant_matmul kernel boundaries and returns both outputs in one
+         * backend submission; b/a remain on the CPU because they are tiny and
+         * are not part of the dense-int8 table. */
+        /* State-only mode deliberately leaves all four projections on the
+         * established CPU path. It isolates the recurrent state executor
+         * from the sensitive dense projection/reduction contract. */
+        int dense_state = getenv("COLI_DENSE_STATE") && atoi(getenv("COLI_DENSE_STATE"));
+        int dense_skip_dn = getenv("COLI_DENSE_NO_DN_PROJ") && atoi(getenv("COLI_DENSE_NO_DN_PROJ"));
+        int dense_proj = (dense_state || dense_skip_dn) ? 0 : qt_dense_deltanet_proj(layer,xs,qkv,z);
+        if (!dense_proj) {
+            matmul_d(qkv, xs, l->dn_qkv, 1, H, conv_dim);
+            matmul_d(z,   xs, l->dn_z,   1, H, value_dim);
+        } else if (getenv("COLI_DENSE_GPU_CHECK")) {
+            static uint8_t checked[1024];
+            if (layer>=0 && layer<1024 &&
+                (getenv("COLI_DENSE_GPU_CHECK_ALL") || !checked[layer])) {
+                float *rq=falloc(conv_dim), *rz=falloc(value_dim);
+                matmul_d(rq,xs,l->dn_qkv,1,H,conv_dim);
+                matmul_d(rz,xs,l->dn_z,1,H,value_dim);
+                float mq=0.f,mz=0.f; double sq=0.0,sz=0.0;
+                for (int j=0;j<conv_dim;j++){ float e=fabsf(qkv[j]-rq[j]); if(e>mq)mq=e; sq+=(double)e*e; }
+                for (int j=0;j<value_dim;j++){ float e=fabsf(z[j]-rz[j]); if(e>mz)mz=e; sz+=(double)e*e; }
+                if (mq!=0.f || mz!=0.f || !checked[layer])
+                    fprintf(stderr,"[qtier-dense-check] layer=%d qkv max=%.9g rms=%.9g z max=%.9g rms=%.9g\n",
+                            layer,mq,sqrt(sq/(double)conv_dim),mz,sqrt(sz/(double)value_dim));
+                free(rq); free(rz); checked[layer]=1;
+            }
+        }
         matmul(b,   xs, l->dn_b,   1, H, vh);
         matmul(a,   xs, l->dn_a,   1, H, vh);
         if (tm_on() && S==1){ double t=tm_now(); g_dn_sub[0]+=t-_d0; _d0=t; }
+        if (dense_state && qt_dense_deltanet_state(layer,qkv,z,b,a,outr)) {
+            /* The out projection remains on CPU, preserving its established
+             * quantized reduction order. */
+            matmul_d(out + (int64_t)s * H, outr, l->dn_out, 1, value_dim, H);
+            if (tm_on() && S==1) g_dn_sub[3] += tm_now()-_d0;
+            continue;
+        }
         for (int h = 0; h < vh; h++) {
             beta[h] = 1.f / (1.f + expf(-b[h]));
             gg[h] = -expf(l->dn_alog[h]) * softplus_f(a[h] + l->dn_dtbias[h]);
@@ -2182,6 +3490,13 @@ static void layers_forward_range(Model *m, float *x, int S, int pos_base,
     int D = c->hidden;
     float *nrm = falloc((int64_t)S*D), *tmp = falloc((int64_t)S*D);
     for (int i = layer_begin; i < layer_end; i++) {
+        if (S == 1 && island_timing_on()) {
+            memset(&g_island_layer_trace,0,sizeof g_island_layer_trace);
+            g_island_layer_trace.valid=1;
+            g_island_layer_trace.layer=i;
+            g_island_layer_trace.token=g_q36_route_step;
+            g_island_layer_trace.layer_begin_ms=tm_now();
+        }
         Layer *l = &m->L[i];
         for (int s = 0; s < S; s++) rmsnorm_row(nrm + (int64_t)s*D, x + (int64_t)s*D, l->in_ln, D, c->eps);
         double _t0 = tm_on() ? tm_now() : 0.0;
@@ -2200,8 +3515,16 @@ static void layers_forward_range(Model *m, float *x, int S, int pos_base,
         for (int s = 0; s < S; s++) rmsnorm_row(nrm + (int64_t)s*D, x + (int64_t)s*D, l->post_ln, D, c->eps);
         _t0 = tm_on() ? tm_now() : 0.0;
         moe(m, l, i, nrm, S, tmp);
-        if (tm_on()) tm_add(S, 2, tm_now()-_t0);
+        if (tm_on()) {
+            double _moe_ms=tm_now()-_t0;
+            tm_add(S, 2, _moe_ms);
+            if (S==1 && i<1024) g_qt_layer_moe_ms[i]+=_moe_ms;
+        }
         for (int64_t j = 0; j < (int64_t)S*D; j++) x[j] += tmp[j];
+        if (S == 1 && island_timing_on()) {
+            g_island_layer_trace.layer_complete_ms=tm_now();
+            qwen36_island_trace_write();
+        }
         if (lf) fwrite(x + (int64_t)(S-1)*D, sizeof(float), D, lf);
         if (allow_prefetch && g_pilot >= 2 && S <= 8 && i + 2 < c->n_layers)
             pilot_prefetch(m, i + 2, x, S);
@@ -2213,11 +3536,22 @@ static void layers_forward_range(Model *m, float *x, int S, int pos_base,
 
 static float *step(Model *m, const int *ids, int S, int pos_base) {
     Cfg *c = &m->c; int D = c->hidden;
+    /* Decode route traces use the model position as a stable request-local
+     * key. Prefill is intentionally not recorded; the execution A/B target
+     * is the steady S=1 decode path. */
+    g_q36_route_step = S == 1 ? (uint32_t)pos_base : UINT32_MAX;
+    qwen_decode_threads_apply(S);
+    if (S==1) g_qt_overlap_token_index++;
+    if (tm_on() || island_timing_on()) qt_resident_timing_scope(S==1);
     if (m->resident_mode && m->first_step) m->resident_collecting = 1;
     /* Per-layer residual dump (last token) for torch-free cosine debugging.
      * Set DUMP_LAYERS=<path> to write n_layers * D raw float32 rows. */
     FILE *lf = NULL; const char *lfn = getenv("DUMP_LAYERS");
-    if (lfn) { lf = fopen(lfn, "wb"); if (!lf) fprintf(stderr, "DUMP_LAYERS: cannot open %s\n", lfn); }
+    if (lfn) {
+        const char *append = getenv("DUMP_LAYERS_APPEND");
+        lf = fopen(lfn, append && atoi(append) ? "ab" : "wb");
+        if (!lf) fprintf(stderr, "DUMP_LAYERS: cannot open %s\n", lfn);
+    }
     if (g_pilot && m->token_count > 0) {
         pthread_mutex_lock(&g_pilot_mx);
         memset(m->is_queued, 0, (size_t)c->n_layers * c->n_experts);
@@ -2244,8 +3578,18 @@ static float *step(Model *m, const int *ids, int S, int pos_base) {
     rmsnorm_row(last, x + (int64_t)(S-1)*D, m->final_norm, D, c->eps);
     float *logit = falloc(c->vocab);
     double _th = tm_on() ? tm_now() : 0.0;
-    matmul_d(logit, last, m->lm_head, 1, D, c->vocab);
-    if (tm_on()) { tm_add(S, 5, tm_now()-_th); if (S==1) g_tm_dec_tokens++; else g_tm_pre_tokens += S; }
+    if (!qt_dense_lm_head(last,logit,c->vocab))
+        matmul_d(logit, last, m->lm_head, 1, D, c->vocab);
+    if (tm_on()) {
+        tm_add(S, 5, tm_now()-_th);
+        if (S==1) {
+            g_tm_dec_tokens++;
+            /* Periodic full report so serve-mode benches see the breakdown
+             * without waiting for atexit. Every 8 tokens is enough
+             * resolution to localise the bottleneck without spamming. */
+            if ((g_tm_dec_tokens & 7) == 0) tm_report();
+        } else g_tm_pre_tokens += S;
+    }
     free(x); free(last);
     if (lf) fclose(lf);
     if (m->resident_collecting) {
@@ -2589,6 +3933,103 @@ static int serve_cancel_pending(const char *id){
         if((!strcmp(cmd,"CANCEL")||!strcmp(cmd,"STOP")) && !strcmp(who,id)) cancelled = 1;
     }
     return cancelled;
+static void qwen36_reset_routing_stats(Model *m){
+    size_t n=(size_t)m->c.n_layers*m->c.n_experts;
+    if(m->route_count) memset(m->route_count,0,n*sizeof(uint64_t));
+    if(m->gpu_route_count) memset(m->gpu_route_count,0,n*sizeof(uint64_t));
+    if(m->cpu_route_count) memset(m->cpu_route_count,0,n*sizeof(uint64_t));
+    if(m->route_cpu_get_ms) memset(m->route_cpu_get_ms,0,n*sizeof(double));
+    if(m->route_cpu_matmul_ms) memset(m->route_cpu_matmul_ms,0,n*sizeof(double));
+    memset(g_qt_layer_calls,0,sizeof g_qt_layer_calls);
+    memset(g_qt_layer_routes,0,sizeof g_qt_layer_routes);
+    memset(g_qt_layer_gpu,0,sizeof g_qt_layer_gpu);
+    memset(g_qt_layer_cpu_routes,0,sizeof g_qt_layer_cpu_routes);
+    memset(g_qt_layer_issue_ms,0,sizeof g_qt_layer_issue_ms);
+    memset(g_qt_layer_cpu_ms,0,sizeof g_qt_layer_cpu_ms);
+    memset(g_qt_layer_get_ms,0,sizeof g_qt_layer_get_ms);
+    memset(g_qt_layer_matmul_ms,0,sizeof g_qt_layer_matmul_ms);
+    memset(g_qt_layer_moe_ms,0,sizeof g_qt_layer_moe_ms);
+    memset(g_qt_layer_shared_ms,0,sizeof g_qt_layer_shared_ms);
+    memset(g_qt_layer_cpu_window_ms,0,sizeof g_qt_layer_cpu_window_ms);
+    memset(g_qt_layer_gpu_event_ms,0,sizeof g_qt_layer_gpu_event_ms);
+    memset(g_qt_layer_gpu_sync_ms,0,sizeof g_qt_layer_gpu_sync_ms);
+    memset(g_qt_layer_gpu_cpu_overlap_ms,0,sizeof g_qt_layer_gpu_cpu_overlap_ms);
+    memset(g_qt_layer_issue_to_complete_ms,0,sizeof g_qt_layer_issue_to_complete_ms);
+    qt_resident_timing_reset();
+    if (g_qt_overlap_fp) { fclose(g_qt_overlap_fp); g_qt_overlap_fp=NULL; }
+    g_qt_overlap_rows=0;
+    g_qt_overlap_token_index=0;
+    qwen36_island_trace_open();
+    qwen36_route_trace_open(m);
+    const char *of=getenv("QTIER_OVERLAP_FILE");
+    if (of && *of) {
+        g_qt_overlap_fp=fopen(of,"wb");
+        if (g_qt_overlap_fp) {
+            /* Diagnostic runs may terminate the server immediately after the
+             * HTTP response. Line buffering keeps each resident-call row
+             * available even if process teardown is forced by the harness. */
+            setvbuf(g_qt_overlap_fp,NULL,_IOLBF,0);
+            fprintf(g_qt_overlap_fp,
+                            "row,decode_token,layer,layer_call,gpu_routes,cpu_routes,issue_start_ms,issue_end_ms,cpu_start_ms,cpu_end_ms,take_start_ms,take_end_ms,gpu_event_ms,gpu_sync_ms,cpu_window_ms,issue_to_complete_ms,gpu_end_inferred_ms,qt_take_ms,gpu_end_host_lower_ms,gpu_end_host_upper_ms,reduce_end_host_lower_ms,reduce_end_host_upper_ms,gpu_start_host_lower_ms,gpu_start_host_upper_ms,gpu_cpu_overlap_host_lower_ms,gpu_cpu_overlap_host_upper_ms\n");
+            fflush(g_qt_overlap_fp);
+        } else fprintf(stderr,"[qtier] cannot write overlap trace: %s\n",of);
+    }
+}
+
+static void qwen36_write_routing_stats(Model *m){
+    const char *path=getenv("QTIER_ROUTING_FILE");
+    if(!path || !*path || !m || !m->route_count) {
+        qwen36_island_trace_close();
+        qwen36_route_trace_close();
+        return;
+    }
+    qwen36_island_trace_close();
+    if (g_qt_overlap_fp) { fflush(g_qt_overlap_fp); fclose(g_qt_overlap_fp); g_qt_overlap_fp=NULL; }
+    FILE *f=fopen(path,"wb");
+    if(!f){ fprintf(stderr,"[qtier] cannot write routing stats: %s\n",path); return; }
+    fprintf(f,"layer,expert,invocations,gpu_hits,cpu_fallback,gpu_resident,cpu_get_ms,cpu_matmul_ms\n");
+    int E=m->c.n_experts;
+    for(int l=0;l<m->c.n_layers;l++) for(int e=0;e<E;e++){
+        int64_t i=(int64_t)l*E+e;
+        if(!m->route_count[i]) continue;
+        fprintf(f,"%d,%d,%llu,%llu,%llu,%d,%.6f,%.6f\n",l,e,
+                (unsigned long long)m->route_count[i],
+                (unsigned long long)(m->gpu_route_count?m->gpu_route_count[i]:0),
+                (unsigned long long)(m->cpu_route_count?m->cpu_route_count[i]:0),
+                qt_is_resident(l,e),
+                m->route_cpu_get_ms?m->route_cpu_get_ms[i]:0.0,
+                m->route_cpu_matmul_ms?m->route_cpu_matmul_ms[i]:0.0);
+    }
+    fclose(f);
+    char pp[4096]; snprintf(pp,sizeof pp,"%s.placement.csv",path);
+    FILE *pf=fopen(pp,"wb");
+    if(!pf){ fprintf(stderr,"[qtier] cannot write placement snapshot: %s\n",pp); return; }
+    fprintf(pf,"layer,expert,gpu_resident\n");
+    for(int l=0;l<m->c.n_layers;l++) for(int e=0;e<E;e++)
+        fprintf(pf,"%d,%d,%d\n",l,e,qt_is_resident(l,e));
+    fclose(pf);
+    char lp[4096]; snprintf(lp,sizeof lp,"%s.layers.csv",path);
+    FILE *lf=fopen(lp,"wb");
+    if(!lf){ fprintf(stderr,"[qtier] cannot write layer stats: %s\n",lp); return; }
+    double take_us[1024]={0}; uint64_t take_calls[1024]={0};
+    qt_resident_timing_take_layers(take_us,take_calls,1024);
+    fprintf(lf,"layer,calls,routes,gpu_hits,cpu_fallback,moe_ms,qt_issue_ms,cpu_fallback_ms,qt_take_ms,qt_take_calls,shared_ms,cpu_window_ms,gpu_event_ms,gpu_sync_ms,gpu_cpu_overlap_ms,issue_to_complete_ms\n");
+    for(int l=0;l<m->c.n_layers && l<1024;l++) if(g_qt_layer_calls[l]){
+        fprintf(lf,"%d,%llu,%llu,%llu,%llu,%.6f,%.6f,%.6f,%.6f,%llu,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n",l,
+                (unsigned long long)g_qt_layer_calls[l],
+                (unsigned long long)g_qt_layer_routes[l],
+                (unsigned long long)g_qt_layer_gpu[l],
+                (unsigned long long)g_qt_layer_cpu_routes[l],
+                g_qt_layer_moe_ms[l],g_qt_layer_issue_ms[l],g_qt_layer_cpu_ms[l],
+                take_us[l]/1000.0,(unsigned long long)take_calls[l],
+                g_qt_layer_shared_ms[l],g_qt_layer_cpu_window_ms[l],
+                g_qt_layer_gpu_event_ms[l],g_qt_layer_gpu_sync_ms[l],
+                g_qt_layer_gpu_cpu_overlap_ms[l],
+                g_qt_layer_issue_to_complete_ms[l]);
+    }
+    fclose(lf);
+    qwen36_route_trace_close();
+    fprintf(stderr,"[qtier] routing stats: %s (+ %s, %s)\n",path,lp,pp);
 }
 
 static void serve_one(Model *m, ServeReq *q){
@@ -2600,6 +4041,7 @@ static void serve_one(Model *m, ServeReq *q){
         fflush(stdout); free(ids); return;
     }
     printf("ACCEPT %s %d\n",q->id,np); fflush(stdout);
+    qwen36_reset_routing_stats(m);
     m->max_t = np + q->max_tok;
     reset_recurrent(m); ensure_kv(m); m->kv_len = 0;
     /* Per-REQUEST state, not per-process: without this the server keeps the
@@ -2643,6 +4085,13 @@ static void serve_one(Model *m, ServeReq *q){
     }
     if(sbn>0) serve_data(q->id,(char*)sbuf,sbn);   /* flush trailing partial UTF-8 */
     free(lo); free(ids);
+    qwen36_write_routing_stats(m);
+    /* Optional end-of-request telemetry for execution-plane experiments.
+     * This is deliberately off by default and never participates in timing
+     * runs; it lets short-lived serve benchmarks observe cache hit/upload
+     * counters before the harness tears the process down. */
+    if (getenv("COLI_QT_STATS_ON_DONE")) qt_stats();
+    if (getenv("COLI_DENSE_REPORT")) qt_dense_stats();
     double dt=now_s()-t0;
     printf("DONE %s STAT %d %.3f %.1f %.2f %d %d\n",q->id,gen,
            dt>0?gen/dt:0.0,0.0,rss_gb(),np,limited);
@@ -2796,6 +4245,16 @@ int main(int argc, char **argv) {
                 m.c.expert_gs, expert_is_int4)) {
         fprintf(stderr, "[gpu] MoE experts -> CUDA VRAM tier\n");
         atexit(qt_shutdown);
+        /* CPU fallback scratch pool (transient int8 cache, see qt_scratch_*).
+         * Sized in MB based on inter*hidden so the same qt_scratch_init
+         * call works for any qwen3.6 container. */
+        qt_scratch_init((int64_t)m.c.inter * m.c.hidden, (int64_t)m.c.hidden * m.c.inter, m.c.n_layers);
+        atexit(qt_scratch_shutdown);
+        qwen_expert_arena_init(&m);
+        /* serve mode never returns to tm_report()'s argv caller; emit
+         * the COLI_TIMERS breakdown on atexit so a CTRL_BREAK kill still
+         * surfaces the per-phase numbers. */
+        if (tm_on()) atexit(tm_report_atexit);
         /* Warmstart: fill the VRAM budget BEFORE the first token (heat order
          * when HEAT_FILE exists, natural order otherwise), loading all RAM
          * slots along the way. */
@@ -2838,8 +4297,82 @@ int main(int argc, char **argv) {
             }
             qt_fill_wait();
             free(wpl); free(wpe); free(planned);
-            fprintf(stderr, "[qtier] warmstart (parallel): all %d experts in RAM (int8 only for non-residents), %d in VRAM -- %.1f s\n",
+            /* Tier packs int4 only into the slot; planned experts get their
+             * int8 staged to VRAM (allocated+freed inside qt_note_planned),
+             * non-planned experts keep NO host int8 -- scratch pool handles
+             * rematerialisation on demand. So the message drops the
+             * "(int8 only for non-residents)" qualifier that used to
+             * describe the redundant 6,659 * 3 MB host copy. */
+            fprintf(stderr, "[qtier] warmstart (parallel): all %d experts in RAM, %d in VRAM -- %.1f s\n",
                     cap_total, wn, now_s()-t0);
+        }
+        /* Optional coarse dense-island prototype.  Registration happens after
+         * expert warmstart so the existing expert placement is unchanged; the
+         * backend uses its normal free VRAM headroom for these persistent
+         * dense-int8 copies. */
+        if (((getenv("COLI_DENSE_GPU") && atoi(getenv("COLI_DENSE_GPU"))) ||
+             (getenv("COLI_DENSE_STATE") && atoi(getenv("COLI_DENSE_STATE")))) &&
+            dense_i8_on() && qt_dense_init(m.c.n_layers)) {
+            int registered=0;
+            int dense_state_only = getenv("COLI_DENSE_STATE") && atoi(getenv("COLI_DENSE_STATE")) &&
+                                   !(getenv("COLI_DENSE_GPU") && atoi(getenv("COLI_DENSE_GPU")));
+            int dense_skip_dn = getenv("COLI_DENSE_NO_DN_PROJ") && atoi(getenv("COLI_DENSE_NO_DN_PROJ"));
+            int dense_attn_max=-1, dense_attn_seen=0;
+            int dense_attn_only=-1;
+            if(getenv("COLI_DENSE_ATTN_MAX")) dense_attn_max=atoi(getenv("COLI_DENSE_ATTN_MAX"));
+            if(getenv("COLI_DENSE_ATTN_ONLY")) dense_attn_only=atoi(getenv("COLI_DENSE_ATTN_ONLY"));
+            for (int i=0;i<m.c.n_layers;i++) {
+                Layer *l=&m.L[i]; const int8_t *q=NULL; const float *sc=NULL; int O=0;
+                if (!dense_state_only && !dense_skip_dn) {
+                    if (qdw_export(l->dn_qkv,m.c.hidden,&q,&sc,&O) &&
+                        qt_dense_register(i,QT_DENSE_DN_QKV,q,sc,m.c.hidden,O)) registered++;
+                    if (qdw_export(l->dn_z,m.c.hidden,&q,&sc,&O) &&
+                        qt_dense_register(i,QT_DENSE_DN_Z,q,sc,m.c.hidden,O)) registered++;
+                    if (qdw_export(l->dn_out,m.c.dn_vheads*m.c.dn_vdim,&q,&sc,&O) &&
+                        qt_dense_register(i,QT_DENSE_DN_OUT,q,sc,m.c.dn_vheads*m.c.dn_vdim,O)) registered++;
+                }
+                if (getenv("COLI_DENSE_ATTN") && atoi(getenv("COLI_DENSE_ATTN")) && m.c.is_attn[i] &&
+                    ((dense_attn_only>=0 && i==dense_attn_only) ||
+                     (dense_attn_only<0 && (dense_attn_max<0 || dense_attn_seen<dense_attn_max)))) {
+                    if (qdw_export(l->q,m.c.hidden,&q,&sc,&O) &&
+                        qt_dense_register(i,QT_DENSE_ATTN_Q,q,sc,m.c.hidden,O)) registered++;
+                    if (qdw_export(l->k,m.c.hidden,&q,&sc,&O) &&
+                        qt_dense_register(i,QT_DENSE_ATTN_K,q,sc,m.c.hidden,O)) registered++;
+                    if (qdw_export(l->v,m.c.hidden,&q,&sc,&O) &&
+                        qt_dense_register(i,QT_DENSE_ATTN_V,q,sc,m.c.hidden,O)) registered++;
+                    if (qdw_export(l->o,m.c.o_in,&q,&sc,&O) &&
+                        qt_dense_register(i,QT_DENSE_ATTN_O,q,sc,m.c.o_in,O)) registered++;
+                }
+                if(m.c.is_attn[i]) dense_attn_seen++;
+                if (getenv("COLI_DENSE_SHARED") && atoi(getenv("COLI_DENSE_SHARED"))) {
+                    if (qdw_export(l->sh_g,m.c.hidden,&q,&sc,&O) &&
+                        qt_dense_register(i,QT_DENSE_SHARED_G,q,sc,m.c.hidden,O)) registered++;
+                    if (qdw_export(l->sh_u,m.c.hidden,&q,&sc,&O) &&
+                        qt_dense_register(i,QT_DENSE_SHARED_U,q,sc,m.c.hidden,O)) registered++;
+                    if (qdw_export(l->sh_d,m.c.shared_inter,&q,&sc,&O) &&
+                        qt_dense_register(i,QT_DENSE_SHARED_D,q,sc,m.c.shared_inter,O)) registered++;
+                }
+                if (((getenv("COLI_DENSE_FULL") && atoi(getenv("COLI_DENSE_FULL"))) ||
+                     (getenv("COLI_DENSE_STATE") && atoi(getenv("COLI_DENSE_STATE")))) &&
+                    qt_dense_register_deltanet_full(i,l->dn_conv,l->dn_b,l->dn_a,
+                        l->dn_dtbias,l->dn_alog,l->dn_norm,m.DN_rec[i],m.DN_conv[i],
+                        m.c.dn_vheads,m.c.dn_kheads,m.c.dn_kdim,m.c.dn_vdim,
+                        m.c.dn_convk,m.c.dn_conv_dim,m.c.eps)) registered++;
+            }
+            if (getenv("COLI_DENSE_LM") && atoi(getenv("COLI_DENSE_LM"))) {
+                const int8_t *lq=NULL; const float *ls=NULL; int lO=0;
+                if (qdw_export(m.lm_head,m.c.hidden,&lq,&ls,&lO) &&
+                    qt_dense_register_lm_head(lq,ls,m.c.hidden,lO))
+                    fprintf(stderr,"[gpu] dense LM head registered: %d outputs\n",lO);
+                else fprintf(stderr,"[gpu] dense LM head registration failed; CPU fallback\n");
+            }
+            int dense_target=0;
+            for(int i=0;i<m.c.n_layers;i++) if(!m.c.is_attn[i]) dense_target += 3;
+            if (getenv("COLI_DENSE_ATTN") && atoi(getenv("COLI_DENSE_ATTN")))
+                for(int i=0;i<m.c.n_layers;i++) if(m.c.is_attn[i]) dense_target += 4;
+            fprintf(stderr,"[gpu] dense executor: %d/%d layer dense matrices registered\n",
+                    registered,dense_target);
+            qt_dense_stats();
         }
     }
 
@@ -2922,6 +4455,20 @@ int main(int argc, char **argv) {
     if (g_ttft >= 0) fprintf(stderr, "TTFT: %.2f s (time to first token)\n", g_ttft);
     tm_report();
     qt_stats();
+    if (m.S.nrep > 0) {
+        fprintf(stderr, "[storage-policy] measured replica reads (latency x queue-depth selector)\n");
+        for (int r = 0; r <= m.S.nrep; r++) {
+            uint64_t ops = __atomic_load_n(&m.S.rep_ops[r], __ATOMIC_RELAXED);
+            uint64_t bytes = __atomic_load_n(&m.S.rep_bytes[r], __ATOMIC_RELAXED);
+            uint64_t busy = __atomic_load_n(&m.S.rep_busy_ns[r], __ATOMIC_RELAXED);
+            uint64_t in = __atomic_load_n(&m.S.rep_inflight[r], __ATOMIC_RELAXED);
+            fprintf(stderr, "[storage-policy]   replica%d: ops %llu | %.3f GB | "
+                            "busy %.3f ms | avg %.3f ms | inflight %llu\n",
+                    r, (unsigned long long)ops, bytes/1073741824.0,
+                    busy/1000000.0, ops ? busy/(1000000.0*ops) : 0.0,
+                    (unsigned long long)in);
+        }
+    }
     fprintf(stderr, "\nPEAK RSS: %.2f GB\n", rss_gb());
     fprintf(stderr, "Expert cache hit rate: %.1f%% (hit=%llu miss=%llu)\n", tot?100.0*m.hits/tot:0.0,
            (unsigned long long)m.hits, (unsigned long long)m.miss);
@@ -2980,6 +4527,8 @@ static void qwen36_segment_model_destroy(Qwen36SegmentEngine *engine) {
     free(model->attn_sc);
     free(model->seen); free(model->is_queued); free(model->is_pinned);
     free(model->momentum_logits); free(model->freq);
+    free(model->route_count); free(model->gpu_route_count); free(model->cpu_route_count);
+    free(model->route_cpu_get_ms); free(model->route_cpu_matmul_ms);
     free(model->DN_conv); free(model->DN_rec);
     free(model->cache); free(model->active_of); free(model->L);
     free(model->c.is_attn);

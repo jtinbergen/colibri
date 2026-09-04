@@ -34,6 +34,14 @@
 #define DIR_E "tmp_mirror_e"   /* empty (missing file) */
 #define DIR_F "tmp_mirror_f"   /* second identical copy (multi-SSD) */
 
+static void setenv_test(const char *name, const char *value) {
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 1);
+#endif
+}
+
 /* one-tensor safetensors file; flip lets us corrupt one header byte and
  * pad lets us grow the payload, both without changing anything else */
 static int write_model(const char *dir, int flip, int pad) {
@@ -122,6 +130,24 @@ int main(void) {
     CHECK(pread(f2, c2, t->nbytes, t->off) == t->nbytes);
     CHECK(memcmp(a, c2, sizeof(a)) == 0);
     st_prefetch_rep(&S, "t0", 2);   /* smoke: WILLNEED on the second mirror */
+
+    /* The default selector uses measured latency x queue depth.  Seed a
+     * deliberately slow primary and a fast first mirror; the next generic
+     * tensor read must choose the fast mirror and update its counters. */
+    setenv_test("COLI_STORAGE_POLICY", "congestion");
+    S.rep_ops[0] = 10; S.rep_busy_ns[0] = 1000000000ULL;
+    S.rep_ops[1] = 10; S.rep_busy_ns[1] = 1000000ULL;
+    S.rep_ops[2] = 10; S.rep_busy_ns[2] = 2000000ULL;
+    float selected[8];
+    st_read_f32(&S, "t0", selected, 0);
+    CHECK(st_last_read_replica == 1);
+    CHECK(S.rep_ops[1] == 11 && S.rep_bytes[1] == (uint64_t)t->nbytes);
+
+    /* Explicit round-robin remains available for diagnosis/reproducibility. */
+    setenv_test("COLI_STORAGE_POLICY", "round_robin");
+    st_read_f32(&S, "t0", selected, 0);
+    CHECK(S.rep_ops[0] + S.rep_ops[1] + S.rep_ops[2] == 32);
+    setenv_test("COLI_STORAGE_POLICY", "congestion");
 
     /* a divergent dir claims no replica slot; existing replicas survive */
     CHECK(st_mirror_add(&S, DIR_C) == 0);
