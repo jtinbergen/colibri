@@ -1,5 +1,5 @@
 """
-Convertitore GLM-5.2-FP8 -> nostro container int4 (STADIO B).
+Convertitore GLM-5.2/MiniMax-M3 FP8 -> nostro container int4 (STADIO B).
 
 Strategia DISK-SAFE (richiesta dell'utente): scarica UNO shard (~5 GB), lo converte in
 int4, lo CANCELLA, passa al prossimo. Il disco non si riempie mai: picco = 1 shard + l'output
@@ -33,7 +33,7 @@ _positioned_write_lock = threading.Lock()
 
 
 # ---------- guardia di famiglia (#1304) ----------
-# Questo convertitore serve UNA famiglia: GLM-5.2. Ma `coli convert` accetta
+# Questo convertitore serve GLM-5.2 e MiniMax-M3. Ma `coli convert` accetta
 # qualunque --repo, e in una settimana due utenti gli hanno dato Qwen3.8:
 # i tensori BF16 che non riconosce come esperti GLM passano upcastati a f32,
 # ogni shard raddoppia, e #1304 si e' fermato a 424 GB scritti su 360 di
@@ -45,6 +45,7 @@ _positioned_write_lock = threading.Lock()
 # tests/test_convert_guard.py li confronta col registry e fallisce alla prima
 # famiglia aggiunta o rinominata.
 GLM52_MODEL_TYPES = {"glm_moe_dsa", "glm5_moe", "glm"}
+M3_MODEL_TYPES = {"minimax_m3", "minimax_m3_vl"}
 OTHER_FAMILY_PATHS = {
     "glm5_next":       "GLM-5.3-Flash: use tools/convert_glm53.py",
     "glm5_next_text":  "GLM-5.3-Flash: use tools/convert_glm53.py",
@@ -66,25 +67,25 @@ OTHER_FAMILY_PATHS = {
 
 
 def check_model_family(config, where):
-    """Ferma il convertitore su un checkpoint che non e' GLM-5.2.
+    """Ferma il convertitore su un checkpoint non supportato.
 
     `config` e' il config.json del checkpoint gia' parsato; `where` dice al
     messaggio da dove viene (un path o un repo id). Ritorna in silenzio per
-    GLM-5.2; esce con indicazione per-famiglia per tutto il resto.
+    GLM-5.2 o MiniMax-M3; esce con indicazione per-famiglia per tutto il resto.
     """
     model_type = config.get("model_type")
     if not isinstance(model_type, str) or not model_type:
         raise SystemExit(f"ERROR: {where}: config.json has no usable model_type; "
-                         "refusing to guess. This converter is for GLM-5.2 only.")
-    if model_type in GLM52_MODEL_TYPES:
+                         "refusing to guess. This converter supports GLM-5.2 and MiniMax-M3.")
+    if model_type in GLM52_MODEL_TYPES or model_type in M3_MODEL_TYPES:
         return
     hint = OTHER_FAMILY_PATHS.get(model_type)
     if hint:
-        raise SystemExit(f"ERROR: {where} is '{model_type}', not GLM-5.2.\n"
+        raise SystemExit(f"ERROR: {where} is '{model_type}', not a supported source.\n"
                          f"  This converter would silently upcast most of its "
                          f"tensors and roughly double the size (#1304).\n  {hint}")
     raise SystemExit(f"ERROR: {where} is '{model_type}', which this converter does "
-                     f"not know. It converts GLM-5.2 only; other families have "
+                     f"not know. It converts GLM-5.2 or MiniMax-M3; other families have "
                      f"their own tools under c/tools/, and Qwen3.8 needs none.")
 
 
