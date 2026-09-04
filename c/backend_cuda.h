@@ -63,6 +63,10 @@ COLI_CUDA_DLLEXPORT int coli_cuda_device_count(void);
 COLI_CUDA_DLLEXPORT int coli_cuda_device_at(int index);
 COLI_CUDA_DLLEXPORT int coli_cuda_mem_info(int device, size_t *free_bytes, size_t *total_bytes);
 COLI_CUDA_DLLEXPORT int coli_cuda_device_integrated(int device);
+COLI_CUDA_DLLEXPORT int coli_cuda_device_pci(int device, int *domain, int *bus,
+                                               int *dev, int *function);
+/* Query direct CUDA peer-copy capability without enabling peer access. */
+COLI_CUDA_DLLEXPORT int coli_cuda_peer_access(int dst_device, int src_device);
 /* device < 0 returns aggregate statistics for all configured devices. */
 COLI_CUDA_DLLEXPORT void coli_cuda_stats(int device, size_t *tensor_count, size_t *tensor_bytes);
 COLI_CUDA_DLLEXPORT void coli_cuda_group_stats(uint64_t *calls, uint64_t *experts, uint64_t *rows,
@@ -138,9 +142,17 @@ COLI_CUDA_DLLEXPORT int coli_cuda_shared_mlp_w4a16(ColiCudaTensor *gate, ColiCud
  * consecutive [D] rows in call order. */
 /* Async issue/take split of the group call below (Inc.4): issue launches on the
  * device stream and returns; take syncs and returns the pinned result rows (valid
- * until the next issue on that device). Small totals only (<=8 rows); one
- * outstanding issue per device. */
+ * until the next issue on that device). Decode uses <=8 rows; bounded prefill
+ * may use up to 64 rows. One outstanding issue per device remains the
+ * invariant. */
 COLI_CUDA_DLLEXPORT int coli_cuda_expert_group_issue(ColiCudaTensor *const *gates,
+                               ColiCudaTensor *const *ups,
+                               ColiCudaTensor *const *downs,
+                               const int *rows, int count, const float *x);
+/* Same packed-row operation for prompt prefill. This entry point deliberately
+ * selects the row-aware grouped kernels; every route entry has its own input
+ * row and activation scales. */
+COLI_CUDA_DLLEXPORT int coli_cuda_expert_group_issue_batch(ColiCudaTensor *const *gates,
                                ColiCudaTensor *const *ups,
                                ColiCudaTensor *const *downs,
                                const int *rows, int count, const float *x);
@@ -192,6 +204,22 @@ COLI_CUDA_DLLEXPORT int coli_cuda_tensor_device(const ColiCudaTensor *tensor);
 /* Replace a resident tensor's contents without reallocating its device slot. */
 COLI_CUDA_DLLEXPORT int coli_cuda_tensor_update(ColiCudaTensor *tensor,
                             const void *weights, const float *scales);
+/* Stream-ordered refresh of one complete grouped expert. `weights` contains
+ * packed gate|up|down bytes and `scales` contains grouped gate|up|down scales,
+ * in the same layout used by resident warmstart. */
+COLI_CUDA_DLLEXPORT int coli_cuda_expert_update_async(ColiCudaTensor *gate,
+                            ColiCudaTensor *up, ColiCudaTensor *down,
+                            const void *weights, const float *scales);
+/* Batch form for execution-only staged experts. Each weights[i] contains
+ * packed raw gate|up|down int4 bytes and scales[i] contains grouped
+ * gate|up|down scales. The refreshes and signed-nibble conversion are
+ * stream-ordered before the following expert group launch. */
+COLI_CUDA_DLLEXPORT int coli_cuda_expert_update_batch_async(
+                            ColiCudaTensor *const *gates,
+                            ColiCudaTensor *const *ups,
+                            ColiCudaTensor *const *downs,
+                            const void *const *weights,
+                            const float *const *scales, int count);
 
 /* ---- resident-pipeline primitives (Inc.0): device-pointer entry points ---- */
 COLI_CUDA_DLLEXPORT float *coli_cuda_pipe_scratch(int device,int slot,size_t bytes);
@@ -208,6 +236,47 @@ COLI_CUDA_DLLEXPORT int coli_cuda_pipe_add(int device,float *x_dev,const float *
 COLI_CUDA_DLLEXPORT int coli_cuda_pipe_rows_add(int device,float *x_dev,const float *partial_dev,
                             const int *rows_dev,int nrows,int D);
 COLI_CUDA_DLLEXPORT int coli_cuda_pipe_gemm(ColiCudaTensor *t,float *y_dev,const float *x_dev,int S);
+/* Submit several independent dense projections sharing one host input.  The
+ * backend performs one H2D, launches the existing validated quant_matmul
+ * kernels on its persistent stream, then performs one contiguous D2H.  The
+ * output offsets are in floats and must be non-overlapping. */
+COLI_CUDA_DLLEXPORT int coli_cuda_pipe_dense_batch(ColiCudaTensor *const *tensors,
+        const int *out_offsets,int count,int input_dim,const float *x_host,
+        float *out_host,int total_out,int device);
+/* Coarse shared-MLP island submission.  The existing projection kernels are
+ * kept as separate launches; this API owns the complete gate/up -> SiLU ->
+ * down sequence and exposes only one host-side layer boundary. */
+COLI_CUDA_DLLEXPORT int coli_cuda_pipe_dense_mlp(
+        ColiCudaTensor *gate, ColiCudaTensor *up, ColiCudaTensor *down,
+        const float *x_host, float *out_host,
+        int input_dim, int intermediate_dim, int output_dim, int device);
+/* Decode-only DeltaNet layer executor.  The quantized projections use the
+ * existing tensor kernels; recurrent state and the conv ring remain resident
+ * on the device for the lifetime of the registered layer.  The call has one
+ * host input upload and one output download, and is deliberately synchronous
+ * at the layer boundary. */
+COLI_CUDA_DLLEXPORT int coli_cuda_pipe_deltanet_layer(
+        ColiCudaTensor *qkv, ColiCudaTensor *z, ColiCudaTensor *out,
+        const float *conv_w_dev, const float *b_w_dev, const float *a_w_dev,
+        const float *dtbias_dev, const float *alog_dev, const float *norm_dev,
+        float *rec_dev, float *ring_dev,
+        const float *x_host, float *out_host,
+        int hidden, int vheads, int kheads, int kdim, int vdim,
+        int convk, int conv_dim, float eps, int device);
+/* Decode-only DeltaNet recurrent-state island.  The host supplies the already
+ * computed qkv/z/b/a projections, preserving their existing arithmetic and
+ * reduction order.  The device performs conv, recurrent state update and
+ * gated norm, then returns normalized value rows.  The caller keeps the
+ * established CPU out projection for the first correctness prototype. */
+COLI_CUDA_DLLEXPORT int coli_cuda_pipe_deltanet_state(
+        const float *qkv_host, const float *z_host,
+        const float *b_host, const float *a_host,
+        const float *conv_w_dev, const float *dtbias_dev,
+        const float *alog_dev, const float *norm_dev,
+        float *rec_dev, float *ring_dev,
+        float *norm_out_host,
+        int vheads, int kheads, int kdim, int vdim,
+        int convk, int conv_dim, float eps, int device);
 COLI_CUDA_DLLEXPORT int coli_cuda_pipe_rmsnorm_s(int device,float *y_dev,const float *x_dev,
                              const float *w_dev,int S,int D,float eps,
                              int xstride,int ystride);
@@ -219,6 +288,14 @@ COLI_CUDA_DLLEXPORT int coli_cuda_expert_group_resident_issue(ColiCudaTensor *co
         int home_device, const float *x_src_dev, float *partial_slot_dev);
 COLI_CUDA_DLLEXPORT int coli_cuda_expert_group_resident_take(int home_device,const int *devices,
         int n_issued,float *slots_dev,float *acc_dev,int D);
+COLI_CUDA_DLLEXPORT int coli_cuda_expert_group_resident_sync(int home_device);
+COLI_CUDA_DLLEXPORT int coli_cuda_expert_group_resident_timing(int home_device,
+        const int *devices,int n_issued,double *gpu_ms,double *reduce_ms);
+/* Host-clock bounds for timeline diagnostics. Values are
+ * CLOCK_MONOTONIC-compatible nanoseconds when COLI_CUDA_TIMELINE=1. */
+COLI_CUDA_DLLEXPORT int coli_cuda_expert_group_resident_host_timing(int home_device,
+        const int *devices,int n_issued,uint64_t *gpu_lower_ns,uint64_t *gpu_upper_ns,
+        uint64_t *reduce_lower_ns,uint64_t *reduce_upper_ns);
 COLI_CUDA_DLLEXPORT int coli_cuda_pipe_router(int device,const float *x_dev,
         const void *rw_dev,const void *rb_dev,int D,int E,int Ksel,
         float topp,int norm_topk,float routed_scale,

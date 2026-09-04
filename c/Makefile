@@ -758,12 +758,12 @@ backend_loader.o: backend_loader.c backend_cuda.h compat.h .build-config
 # shell that has the MSVC environment set (e.g. after vcvars64.bat, or from a
 # "x64 Native Tools Command Prompt"). COLI_CUDA_BUILDING_DLL enables
 # __declspec(dllexport) so the 15 API symbols are exported.
-cuda-dll: backend_cuda.cu backend_cuda.h
+cuda-dll: backend_cuda.cu backend_cuda.h backend_cuda_dp4a.cu backend_cuda_dp4a.h
 	@command -v "$(NVCC)" >/dev/null 2>&1 || { echo "nvcc not found: set CUDA_HOME or NVCC" >&2; exit 1; }
 	@command -v cl >/dev/null 2>&1 || { echo "cl.exe (MSVC) not in PATH — run vcvars64.bat first" >&2; exit 1; }
 	"$(NVCC)" $(NVCCFLAGS) -shared -DCOLI_CUDA_BUILDING_DLL \
 		-L"$(CUDA_HOME)/lib/x64" -lcudart \
-		backend_cuda.cu -o coli_cuda.dll
+		backend_cuda.cu backend_cuda_dp4a.cu -o coli_cuda.dll
 
 # Windows HIP DLL: the AMD sibling of cuda-dll above. hipcc compiles the SAME
 # backend_cuda.cu (through backend_gpu_compat.h) into coli_hip.dll, exporting
@@ -1031,10 +1031,12 @@ olmoe$(EXE): olmoe.c cli_args.h st.h json.h compat.h sample.h tok.h tok_unicode.
 # The flags follow the same switch. Without CUDA=1 this target keeps the
 # NOCUDA_* flags it got when the engine had no CUDA at all: compiling
 # -DCOLI_CUDA and linking -lcudart for a build that calls neither only made
-# `make qwen36` depend on a toolkit it never touches. With CUDA=1 the tier is
-# real CUDA and takes the normal flags back.
-ifeq ($(CUDA),1)
-QWEN36_TIER_SRC = qwen36_tier.c
+# `make qwen36` depend on a toolkit it never touches. With direct CUDA=1 or
+# Windows CUDA_DLL=1 the tier is real CUDA and takes the normal flags back.
+# CUDA=1 is rejected on Windows, so both forms must be covered here or the
+# host would silently build CPU-only.
+ifneq (,$(filter 1,$(CUDA) $(CUDA_DLL) $(HIP_DLL)))
+QWEN36_TIER_SRC = qwen36_tier.c qwen36_topology.c
 QWEN36_CFLAGS   = $(CFLAGS)
 QWEN36_LDFLAGS  = $(LDFLAGS)
 else
@@ -1042,7 +1044,7 @@ QWEN36_TIER_SRC =
 QWEN36_CFLAGS   = $(NOCUDA_CFLAGS)
 QWEN36_LDFLAGS  = $(NOCUDA_LDFLAGS)
 endif
-qwen36$(EXE): qwen36.c serve_poll.h cli_args.h qwen36_tier.h st.h json.h compat.h edge_adapter_internal.h edge_adapters.h edge_runtime.h segment_adapter_internal.h segment_adapters.h segment_runtime.h $(QWEN36_TIER_SRC) $(CUDA_OBJ)
+qwen36$(EXE): qwen36.c serve_poll.h cli_args.h qwen36_tier.h qwen36_topology.h st.h json.h compat.h edge_adapter_internal.h edge_adapters.h edge_runtime.h segment_adapter_internal.h segment_adapters.h segment_runtime.h $(QWEN36_TIER_SRC) $(CUDA_OBJ)
 	$(CC) $(QWEN36_CFLAGS) qwen36.c $(QWEN36_TIER_SRC) $(CUDA_OBJ) -o qwen36$(EXE) $(QWEN36_LDFLAGS)
 
 # Qwen3.8-Flash-Next text-only sibling. This target is intentionally CPU-only;
@@ -1093,6 +1095,10 @@ tests/test_qwen36_json_escape$(EXE): tests/test_qwen36_json_escape.c qwen36.c qw
 # Both tokenizer.json merge spellings ("a b" strings and ["a","b"] pairs)
 # must index the same merge table; the pair form is what Qwen3.6 ships.
 tests/test_qwen36_tok_merges$(EXE): tests/test_qwen36_tok_merges.c qwen36.c qwen36_tier.h st.h json.h compat.h $(QWEN36_TIER_SRC) $(CUDA_OBJ)
+
+# Scratch pool (transient CPU int8 cache for CUDA tier). Statically links
+# qwen36.c with main() renamed, exercises qt_scratch_init/shutdown/get.
+tests/test_qwen36_scratch$(EXE): tests/test_qwen36_scratch.c qwen36.c qwen36_tier.h st.h json.h compat.h $(QWEN36_TIER_SRC) $(CUDA_OBJ)
 	$(CC) $(QWEN36_CFLAGS) $< $(QWEN36_TIER_SRC) $(CUDA_OBJ) -o $@ $(QWEN36_LDFLAGS)
 
 # Reproducible local timing evidence; intentionally not a noisy CI perf gate.
@@ -1228,6 +1234,9 @@ tests/test_st_mirror$(EXE): tests/test_st_mirror.c st.h json.h compat.h
 
 tests/test_tier$(EXE): tests/test_tier.c tier.h
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
+
+tests/test_qwen36_topology$(EXE): tests/test_qwen36_topology.c qwen36_topology.c qwen36_topology.h
+	$(CC) $(CFLAGS) $< qwen36_topology.c -o $@ $(LDFLAGS)
 
 tests/test_grammar$(EXE): tests/test_grammar.c grammar.h
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)

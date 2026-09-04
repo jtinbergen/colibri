@@ -65,6 +65,9 @@ typedef int            (*fn_device_count)(void);
 typedef int            (*fn_device_at)(int index);
 typedef int            (*fn_mem_info)(int device, size_t *free_bytes, size_t *total_bytes);
 typedef int            (*fn_device_integrated)(int device);
+typedef int            (*fn_device_pci)(int device, int *domain, int *bus,
+                                        int *dev, int *function);
+typedef int            (*fn_peer_access)(int dst_device, int src_device);
 typedef void           (*fn_stats)(int device, size_t *tensor_count, size_t *tensor_bytes);
 typedef void           (*fn_group_stats)(uint64_t *calls, uint64_t *experts, uint64_t *rows,
                                          double *h2d_ms, double *kernel_ms, double *d2h_ms);
@@ -84,6 +87,10 @@ typedef int            (*fn_expert_group_pinned)(ColiCudaTensor *const *gates,
                                                  float *y, const float *x,
                                                  int pin_small_batch);
 typedef int            (*fn_expert_group_issue)(ColiCudaTensor *const *gates,
+                                                ColiCudaTensor *const *ups,
+                                                ColiCudaTensor *const *downs,
+                                                const int *rows, int count, const float *x);
+typedef int            (*fn_expert_group_issue_batch)(ColiCudaTensor *const *gates,
                                                 ColiCudaTensor *const *ups,
                                                 ColiCudaTensor *const *downs,
                                                 const int *rows, int count, const float *x);
@@ -123,11 +130,34 @@ typedef int (*fn_pipe_copy2d)(int device,float *dst,int dpitch,const float *src,
 typedef int (*fn_pipe_download)(int device,const void *src,void *dst,size_t bytes);
 typedef void (*fn_pipe_free)(int device,void *p);
 typedef int (*fn_pipe_gemm)(ColiCudaTensor *t,float *y_dev,const float *x_dev,int S);
+typedef int (*fn_pipe_dense_batch)(ColiCudaTensor *const *tensors,const int *out_offsets,
+                                  int count,int input_dim,const float *x_host,
+                                  float *out_host,int total_out,int device);
+typedef int (*fn_pipe_dense_mlp)(ColiCudaTensor *gate,ColiCudaTensor *up,ColiCudaTensor *down,
+                                 const float *x_host,float *out_host,
+                                 int input_dim,int intermediate_dim,int output_dim,int device);
+typedef int (*fn_pipe_deltanet_layer)(ColiCudaTensor *qkv,ColiCudaTensor *z,ColiCudaTensor *out,
+        const float *conv_w_dev,const float *b_w_dev,const float *a_w_dev,
+        const float *dtbias_dev,const float *alog_dev,const float *norm_dev,
+        float *rec_dev,float *ring_dev,const float *x_host,float *out_host,
+        int hidden,int vheads,int kheads,int kdim,int vdim,int convk,int conv_dim,
+        float eps,int device);
+typedef int (*fn_pipe_deltanet_state)(const float *qkv_host,const float *z_host,
+        const float *b_host,const float *a_host,const float *conv_w_dev,
+        const float *dtbias_dev,const float *alog_dev,const float *norm_dev,
+        float *rec_dev,float *ring_dev,float *norm_out_host,
+        int vheads,int kheads,int kdim,int vdim,int convk,int conv_dim,
+        float eps,int device);
 typedef int (*fn_pipe_peer_copy)(int dst_dev,float *dst,int src_dev, const float *src,size_t bytes);
 typedef int (*fn_pipe_rmsnorm)(int device,float *y_dev,const float *x_dev, const float *w_dev,int S,int D,float eps);
 typedef int (*fn_pipe_rmsnorm_s)(int device,float *y_dev,const float *x_dev, const float *w_dev,int S,int D,float eps, int xstride,int ystride);
 typedef int (*fn_group_resident_issue)(ColiCudaTensor *const *gates,ColiCudaTensor *const *ups,ColiCudaTensor *const *downs,const float *weights,int count,int home_device,const float *x_src_dev,float *partial_slot_dev);
 typedef int (*fn_group_resident_take)(int home_device,const int *devices,int n_issued,float *slots_dev,float *acc_dev,int D);
+typedef int (*fn_group_resident_sync)(int home_device);
+typedef int (*fn_group_resident_timing)(int home_device,const int *devices,int n_issued,double *gpu_ms,double *reduce_ms);
+typedef int (*fn_group_resident_host_timing)(int home_device,const int *devices,int n_issued,
+                                             uint64_t *gpu_lower_ns,uint64_t *gpu_upper_ns,
+                                             uint64_t *reduce_lower_ns,uint64_t *reduce_upper_ns);
 typedef int (*fn_pipe_router)(int device,const float *x_dev,const void *rw_dev,const void *rb_dev,int D,int E,int Ksel,float topp,int norm_topk,float routed_scale,int *idx_host,float *w_host,int *keff_host);
 typedef int (*fn_pipe_rope)(int device,float *v_dev,const int *pos_dev,int rows, int stride,int offset,int R,int heads,float theta);
 typedef int (*fn_pipe_rope_base)(int device,float *v_dev,int pos_base,int rows, int stride,int offset,int R,int heads,float theta);
@@ -138,6 +168,14 @@ typedef int (*fn_pipe_sync)(int device);
 typedef int (*fn_pipe_upload)(int device,void *dst,const void *src,size_t bytes);
 typedef int (*fn_shared_mlp_w4a16)(ColiCudaTensor *gate, ColiCudaTensor *up, ColiCudaTensor *down, float *y, const float *x, int S);
 typedef int (*fn_tensor_update)(ColiCudaTensor *tensor, const void *weights, const float *scales);
+typedef int (*fn_expert_update_async)(ColiCudaTensor *gate, ColiCudaTensor *up,
+                                      ColiCudaTensor *down, const void *weights,
+                                      const float *scales);
+typedef int (*fn_expert_update_batch_async)(ColiCudaTensor *const *gates,
+                                      ColiCudaTensor *const *ups,
+                                      ColiCudaTensor *const *downs,
+                                      const void *const *weights,
+                                      const float *const *scales, int count);
 
 /* Resolved pointers, plus a flag so we attempt the load at most once. */
 static struct {
@@ -154,10 +192,13 @@ static struct {
 #endif
     fn_init            init;
     fn_shutdown        shutdown;
+    fn_device_count    available_device_count;
     fn_device_count    device_count;
     fn_device_at       device_at;
     fn_mem_info        mem_info;
     fn_device_integrated device_integrated;
+    fn_device_pci     device_pci;
+    fn_peer_access     peer_access;
     fn_stats           stats;
     fn_group_stats     group_stats;
     fn_group_stats_device group_stats_device;
@@ -165,6 +206,7 @@ static struct {
     fn_expert_group    expert_group;
     fn_expert_group_pinned expert_group_pinned;
     fn_expert_group_issue expert_group_issue;
+    fn_expert_group_issue_batch expert_group_issue_batch;
     fn_expert_group_take expert_group_take;
     fn_attention_absorb attention_absorb;
     fn_tensor_upload   tensor_upload;
@@ -189,11 +231,18 @@ static struct {
     fn_pipe_download pipe_download;
     fn_pipe_free pipe_free;
     fn_pipe_gemm pipe_gemm;
+    fn_pipe_dense_batch pipe_dense_batch;
+    fn_pipe_dense_mlp pipe_dense_mlp;
+    fn_pipe_deltanet_layer pipe_deltanet_layer;
+    fn_pipe_deltanet_state pipe_deltanet_state;
     fn_pipe_peer_copy pipe_peer_copy;
     fn_pipe_rmsnorm pipe_rmsnorm;
     fn_pipe_rmsnorm_s pipe_rmsnorm_s;
     fn_group_resident_issue expert_group_resident_issue;
     fn_group_resident_take expert_group_resident_take;
+    fn_group_resident_sync expert_group_resident_sync;
+    fn_group_resident_timing expert_group_resident_timing;
+    fn_group_resident_host_timing expert_group_resident_host_timing;
     fn_pipe_router pipe_router;
     fn_pipe_rope pipe_rope;
     fn_pipe_rope_base pipe_rope_base;
@@ -204,6 +253,8 @@ static struct {
     fn_pipe_upload pipe_upload;
     fn_shared_mlp_w4a16 shared_mlp_w4a16;
     fn_tensor_update tensor_update;
+    fn_expert_update_async expert_update_async;
+    fn_expert_update_batch_async expert_update_batch_async;
 } g_cuda;
 
 #ifdef COLI_HIP_DLL
@@ -1298,6 +1349,19 @@ static int coli_cuda_load(void){
      * different reasons often enough that collapsing them loses information. */
     int   candidate_built = 0;
     DWORD primary_err = 0, fallback_err = 0;
+    const char *override_path = getenv("COLI_CUDA_DLL_PATH");
+    if(override_path && *override_path){
+        /* Explicit diagnostic path: this lets a CUPTI-enabled DLL coexist
+         * with the ordinary backend without replacing it. */
+        g_cuda.dll = LoadLibraryExA(override_path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+        if(!g_cuda.dll){
+            DWORD err = GetLastError();
+            fprintf(stderr, COLI_VENDOR_TAG " explicit backend path %s could not be loaded "
+                            "(Windows error %lu); GPU tier disabled\n",
+                    override_path, (unsigned long)err);
+            return 0;
+        }
+    } else {
     DWORD mn = GetModuleFileNameA(NULL, dllpath, (DWORD)sizeof(dllpath));
     if(mn > 0 && mn < sizeof(dllpath)){
         char *slash = strrchr(dllpath, '\\');
@@ -1357,6 +1421,7 @@ static int coli_cuda_load(void){
                 fallback_msg);
         return 0;
     }
+    }
 #endif /* COLI_HIP_DLL */
 
     /* A mandatory symbol is missing: the backend goes, and so does the runtime
@@ -1395,6 +1460,7 @@ static int coli_cuda_load(void){
 
     RESOLVE(init,           fn_init)
     RESOLVE(shutdown,       fn_shutdown)
+    RESOLVE(available_device_count, fn_device_count)
     RESOLVE(device_count,   fn_device_count)
     RESOLVE(device_at,      fn_device_at)
     RESOLVE(mem_info,       fn_mem_info)
@@ -1402,6 +1468,10 @@ static int coli_cuda_load(void){
      * "not integrated" (0), so the RAM-budget correction simply doesn't apply
      * rather than taking the whole GPU backend down over one missing symbol. */
     RESOLVE_OPT(device_integrated, fn_device_integrated)
+    RESOLVE_OPT(device_pci, fn_device_pci)
+    /* Optional for compatibility with an older CUDA DLL: absent peer metadata
+     * means the resident tier conservatively treats the pair as non-P2P. */
+    RESOLVE_OPT(peer_access, fn_peer_access)
     RESOLVE(stats,          fn_stats)
     RESOLVE(group_stats,    fn_group_stats)
     RESOLVE(group_stats_device, fn_group_stats_device)
@@ -1409,6 +1479,7 @@ static int coli_cuda_load(void){
     RESOLVE(expert_group,   fn_expert_group)
     RESOLVE_OPT(expert_group_pinned, fn_expert_group_pinned)
     RESOLVE(expert_group_issue, fn_expert_group_issue)
+    RESOLVE_OPT(expert_group_issue_batch, fn_expert_group_issue_batch)
     RESOLVE(expert_group_take, fn_expert_group_take)
     RESOLVE(attention_absorb, fn_attention_absorb)
     RESOLVE(tensor_upload,  fn_tensor_upload)
@@ -1433,11 +1504,18 @@ static int coli_cuda_load(void){
     RESOLVE(pipe_download, fn_pipe_download)
     RESOLVE(pipe_free, fn_pipe_free)
     RESOLVE(pipe_gemm, fn_pipe_gemm)
+    RESOLVE_OPT(pipe_dense_batch, fn_pipe_dense_batch)
+    RESOLVE_OPT(pipe_dense_mlp, fn_pipe_dense_mlp)
+    RESOLVE_OPT(pipe_deltanet_layer, fn_pipe_deltanet_layer)
+    RESOLVE_OPT(pipe_deltanet_state, fn_pipe_deltanet_state)
     RESOLVE(pipe_peer_copy, fn_pipe_peer_copy)
     RESOLVE(pipe_rmsnorm, fn_pipe_rmsnorm)
     RESOLVE(pipe_rmsnorm_s, fn_pipe_rmsnorm_s)
     RESOLVE(expert_group_resident_issue, fn_group_resident_issue)
     RESOLVE(expert_group_resident_take, fn_group_resident_take)
+    RESOLVE(expert_group_resident_sync, fn_group_resident_sync)
+    RESOLVE(expert_group_resident_timing, fn_group_resident_timing)
+    RESOLVE_OPT(expert_group_resident_host_timing, fn_group_resident_host_timing)
     RESOLVE(pipe_router, fn_pipe_router)
     RESOLVE(pipe_rope, fn_pipe_rope)
     RESOLVE(pipe_rope_base, fn_pipe_rope_base)
@@ -1448,6 +1526,8 @@ static int coli_cuda_load(void){
     RESOLVE(pipe_upload, fn_pipe_upload)
     RESOLVE(shared_mlp_w4a16, fn_shared_mlp_w4a16)
     RESOLVE(tensor_update, fn_tensor_update)
+    RESOLVE(expert_update_async, fn_expert_update_async)
+    RESOLVE(expert_update_batch_async, fn_expert_update_batch_async)
     #undef RESOLVE
     #undef COLI_RELEASE_RUNTIME_ON_FAIL
 
@@ -1490,6 +1570,11 @@ void coli_cuda_shutdown(void){
 #endif
 }
 
+int coli_cuda_available_device_count(void){
+    if(!coli_cuda_load() || !g_cuda.available_device_count) return 0;
+    return g_cuda.available_device_count();
+}
+
 int coli_cuda_device_count(void){
     if(!g_cuda.available) return 0;
     return g_cuda.device_count();
@@ -1508,6 +1593,16 @@ int coli_cuda_mem_info(int device, size_t *free_bytes, size_t *total_bytes){
 int coli_cuda_device_integrated(int device){
     if(!g_cuda.available || !g_cuda.device_integrated) return 0;
     return g_cuda.device_integrated(device);
+}
+
+int coli_cuda_device_pci(int device, int *domain, int *bus, int *dev, int *function){
+    if(!g_cuda.available || !g_cuda.device_pci) return 0;
+    return g_cuda.device_pci(device,domain,bus,dev,function);
+}
+
+int coli_cuda_peer_access(int dst_device,int src_device){
+    if(!g_cuda.available || !g_cuda.peer_access) return 0;
+    return g_cuda.peer_access(dst_device,src_device);
 }
 
 void coli_cuda_stats(int device, size_t *tensor_count, size_t *tensor_bytes){
@@ -1568,6 +1663,15 @@ int coli_cuda_expert_group_issue(ColiCudaTensor *const *gates,
                                  const int *rows, int count, const float *x){
     if(!g_cuda.available) return 0;
     return g_cuda.expert_group_issue(gates, ups, downs, rows, count, x);
+}
+
+int coli_cuda_expert_group_issue_batch(ColiCudaTensor *const *gates,
+                                       ColiCudaTensor *const *ups,
+                                       ColiCudaTensor *const *downs,
+                                       const int *rows, int count,
+                                       const float *x){
+    if(!g_cuda.available || !g_cuda.expert_group_issue_batch) return 0;
+    return g_cuda.expert_group_issue_batch(gates, ups, downs, rows, count, x);
 }
 
 const float *coli_cuda_expert_group_take(int device){
@@ -1698,6 +1802,46 @@ int coli_cuda_pipe_gemm(ColiCudaTensor *t,float *y_dev,const float *x_dev,int S)
     return g_cuda.pipe_gemm(t, y_dev, x_dev, S);
 }
 
+int coli_cuda_pipe_dense_batch(ColiCudaTensor *const *tensors,const int *out_offsets,
+                               int count,int input_dim,const float *x_host,
+                               float *out_host,int total_out,int device){
+    if(!g_cuda.available || !g_cuda.pipe_dense_batch){ return 0; }
+    return g_cuda.pipe_dense_batch(tensors,out_offsets,count,input_dim,x_host,
+                                   out_host,total_out,device);
+}
+
+int coli_cuda_pipe_dense_mlp(ColiCudaTensor *gate,ColiCudaTensor *up,ColiCudaTensor *down,
+                             const float *x_host,float *out_host,
+                             int input_dim,int intermediate_dim,int output_dim,int device){
+    if(!g_cuda.available || !g_cuda.pipe_dense_mlp){ return 0; }
+    return g_cuda.pipe_dense_mlp(gate,up,down,x_host,out_host,
+                                 input_dim,intermediate_dim,output_dim,device);
+}
+
+int coli_cuda_pipe_deltanet_layer(ColiCudaTensor *qkv,ColiCudaTensor *z,ColiCudaTensor *out,
+        const float *conv_w_dev,const float *b_w_dev,const float *a_w_dev,
+        const float *dtbias_dev,const float *alog_dev,const float *norm_dev,
+        float *rec_dev,float *ring_dev,const float *x_host,float *out_host,
+        int hidden,int vheads,int kheads,int kdim,int vdim,int convk,int conv_dim,
+        float eps,int device){
+    if(!g_cuda.available || !g_cuda.pipe_deltanet_layer) return 0;
+    return g_cuda.pipe_deltanet_layer(qkv,z,out,conv_w_dev,b_w_dev,a_w_dev,
+        dtbias_dev,alog_dev,norm_dev,rec_dev,ring_dev,x_host,out_host,
+        hidden,vheads,kheads,kdim,vdim,convk,conv_dim,eps,device);
+}
+
+int coli_cuda_pipe_deltanet_state(const float *qkv_host,const float *z_host,
+        const float *b_host,const float *a_host,const float *conv_w_dev,
+        const float *dtbias_dev,const float *alog_dev,const float *norm_dev,
+        float *rec_dev,float *ring_dev,float *norm_out_host,
+        int vheads,int kheads,int kdim,int vdim,int convk,int conv_dim,
+        float eps,int device){
+    if(!g_cuda.available || !g_cuda.pipe_deltanet_state) return 0;
+    return g_cuda.pipe_deltanet_state(qkv_host,z_host,b_host,a_host,conv_w_dev,
+        dtbias_dev,alog_dev,norm_dev,rec_dev,ring_dev,norm_out_host,
+        vheads,kheads,kdim,vdim,convk,conv_dim,eps,device);
+}
+
 int coli_cuda_pipe_peer_copy(int dst_dev,float *dst,int src_dev, const float *src,size_t bytes){
     if(!g_cuda.available){ return 0; }
     return g_cuda.pipe_peer_copy(dst_dev, dst, src_dev, src, bytes);
@@ -1716,6 +1860,27 @@ int coli_cuda_expert_group_resident_issue(ColiCudaTensor *const *gates,ColiCudaT
 int coli_cuda_expert_group_resident_take(int home_device,const int *devices,int n_issued,float *slots_dev,float *acc_dev,int D){
     if(!g_cuda.available || !g_cuda.expert_group_resident_take){ return 0; }
     return g_cuda.expert_group_resident_take(home_device, devices, n_issued, slots_dev, acc_dev, D);
+}
+
+int coli_cuda_expert_group_resident_sync(int home_device){
+    if(!g_cuda.available || !g_cuda.expert_group_resident_sync){ return 0; }
+    return g_cuda.expert_group_resident_sync(home_device);
+}
+
+int coli_cuda_expert_group_resident_timing(int home_device,const int *devices,int n_issued,
+                                           double *gpu_ms,double *reduce_ms){
+    if(!g_cuda.available || !g_cuda.expert_group_resident_timing){ return 0; }
+    return g_cuda.expert_group_resident_timing(home_device, devices, n_issued,
+                                               gpu_ms, reduce_ms);
+}
+
+int coli_cuda_expert_group_resident_host_timing(int home_device,const int *devices,int n_issued,
+                                                uint64_t *gpu_lower_ns,uint64_t *gpu_upper_ns,
+                                                uint64_t *reduce_lower_ns,uint64_t *reduce_upper_ns){
+    if(!g_cuda.available || !g_cuda.expert_group_resident_host_timing){ return 0; }
+    return g_cuda.expert_group_resident_host_timing(home_device, devices, n_issued,
+                                                    gpu_lower_ns, gpu_upper_ns,
+                                                    reduce_lower_ns, reduce_upper_ns);
 }
 
 int coli_cuda_pipe_router(int device,const float *x_dev,const void *rw_dev,const void *rb_dev,int D,int E,int Ksel,float topp,int norm_topk,float routed_scale,int *idx_host,float *w_host,int *keff_host){
@@ -1771,6 +1936,22 @@ int coli_cuda_shared_mlp_w4a16(ColiCudaTensor *gate, ColiCudaTensor *up, ColiCud
 int coli_cuda_tensor_update(ColiCudaTensor *tensor, const void *weights, const float *scales){
     if(!g_cuda.available){ return 0; }
     return g_cuda.tensor_update(tensor, weights, scales);
+}
+
+int coli_cuda_expert_update_async(ColiCudaTensor *gate, ColiCudaTensor *up,
+                                  ColiCudaTensor *down, const void *weights,
+                                  const float *scales){
+    if(!g_cuda.available){ return 0; }
+    return g_cuda.expert_update_async(gate, up, down, weights, scales);
+}
+
+int coli_cuda_expert_update_batch_async(ColiCudaTensor *const *gates,
+                                        ColiCudaTensor *const *ups,
+                                        ColiCudaTensor *const *downs,
+                                        const void *const *weights,
+                                        const float *const *scales, int count){
+    if(!g_cuda.available){ return 0; }
+    return g_cuda.expert_update_batch_async(gates, ups, downs, weights, scales, count);
 }
 
 #endif /* _WIN32 */

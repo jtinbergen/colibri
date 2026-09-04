@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>   /* ldexpf per ue8m0_to_f32 */
+#include <time.h>
 #include <stdint.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -52,6 +53,15 @@ typedef struct {
     int        mdfds[ST_MAX_MIR][512]; /* O_DIRECT twins of the replica copies, -1 = absent */
     int        nmirror[ST_MAX_MIR];    /* files accepted into replica r+1 */
     int        nrep;       /* registered replica copies (0 = mirror inactive) */
+    /* Measured read state for the replica selector.  Index 0 is the primary;
+     * indices 1..nrep are mirror copies.  These are deliberately kept on the
+     * index rather than in a global so separate model stores do not influence
+     * one another.  Updates use GCC/Clang atomics because reads may be issued
+     * by the loader and pilot threads concurrently. */
+    uint64_t   rep_ops[ST_MAX_MIR + 1];
+    uint64_t   rep_bytes[ST_MAX_MIR + 1];
+    uint64_t   rep_busy_ns[ST_MAX_MIR + 1];
+    uint64_t   rep_inflight[ST_MAX_MIR + 1];
     int       *hidx;      /* hash map nome->indice (open addressing): con ~120k tensori
                            * (GLM: 256 expert x 78 layer x 3 x 2) la scansione lineare
                            * costava decine di secondi/token (misurato sul primo run reale) */
@@ -257,6 +267,19 @@ static int st_direct_fd_rep(shards *S, int fd, int rep) {
     int i = st_fidx(S, fd); return i < 0 ? -1 : S->mdfds[rep-1][i];
 }
 
+/* Return the logical replica owning an already-selected fd.  Explicit range
+ * readers (used by fused tensor layouts) do not call st_pick_replica, but
+ * their actual source still belongs in the same per-replica metrics. */
+static int st_replica_of_fd(shards *S, int fd) {
+    if (!S) return 0;
+    for (int i = 0; i < S->nfd; i++) {
+        if (S->fds[i] == fd) return 0;
+        for (int r = 1; r <= S->nrep; r++)
+            if (S->mfds[r - 1][i] == fd) return r;
+    }
+    return 0;
+}
+
 /* Registers <dir>/<basename> as read replica S->nrep+1 of every already-indexed
  * shard. A file is accepted ONLY if its size and safetensors header are
  * byte-identical to the primary: the data_offsets then match by construction,
@@ -271,6 +294,10 @@ static void st_mirror_reset(shards *S) {           /* re-init: drop every replic
         if (S->mdfds[r][i] >= 0) close(S->mdfds[r][i]);
     }
     memset(S->nmirror, 0, sizeof(S->nmirror));
+    memset(S->rep_ops, 0, sizeof(S->rep_ops));
+    memset(S->rep_bytes, 0, sizeof(S->rep_bytes));
+    memset(S->rep_busy_ns, 0, sizeof(S->rep_busy_ns));
+    memset(S->rep_inflight, 0, sizeof(S->rep_inflight));
     S->nrep = 0;
 }
 static int st_mirror_add(shards *S, const char *dir) {
@@ -851,7 +878,7 @@ static void st_die_missing(shards *S, const char *name) {
  * gia' calda. No-op se il tensore non esiste (es. il primo .qs prima della lettura). */
 static void st_prefetch(shards *S, const char *name) {
     st_tensor *t = st_find(S, name);
-    if (t) posix_fadvise(t->fd, t->off, t->nbytes, POSIX_FADV_WILLNEED);
+    if (t) posix_fadvise(st_pick_replica(S, t->fd), t->off, t->nbytes, POSIX_FADV_WILLNEED);
 }
 
 /* like st_prefetch, but on replica `rep`'s drive: the WILLNEED must warm the
@@ -888,7 +915,14 @@ static int64_t st_read_f32(shards *S, const char *name, float *out, int drop) {
                 name, name, (long long)t->numel, (long long)t->nbytes, t->dtype); exit(1); }
     void *raw = malloc(t->nbytes);
     if (!raw) { fprintf(stderr, "malloc %lld bytes for tensor %s failed\n", (long long)t->nbytes, name); exit(1); }
-    st_pread_full(t->fd, raw, t->nbytes, t->off, "pread data");
+    int read_fd = st_pick_replica(S, t->fd);
+    int read_rep = st_last_read_replica;
+    uint64_t read_start = st_now_ns();
+    st_replica_begin(S, read_rep);
+    st_pread_full(read_fd, raw, t->nbytes, t->off, "pread data");
+    uint64_t read_end = st_now_ns();
+    st_replica_end(S, read_rep, (uint64_t)t->nbytes,
+                   read_end >= read_start ? read_end - read_start : 0);
     if (t->dtype == 2) {
         memcpy(out, raw, t->nbytes);
     } else if (t->dtype == 0) {
@@ -897,7 +931,7 @@ static int64_t st_read_f32(shards *S, const char *name, float *out, int drop) {
         uint16_t *p = (uint16_t *)raw; for (int64_t i = 0; i < t->numel; i++) out[i] = f16_to_f32(p[i]);
     }
     free(raw);
-    if (drop) posix_fadvise(t->fd, t->off, t->nbytes, POSIX_FADV_DONTNEED);
+    if (drop) posix_fadvise(read_fd, t->off, t->nbytes, POSIX_FADV_DONTNEED);
     return t->numel;
 }
 
@@ -973,10 +1007,17 @@ static int64_t st_read_scale_f32(shards *S, const char *name, float *out, int64_
                 name, (long long)t->numel, (long long)t->nbytes); exit(1); }
     uint8_t *raw = (uint8_t*)malloc((size_t)t->nbytes);
     if (!raw) { fprintf(stderr, "malloc %lld bytes for scale %s failed\n", (long long)t->nbytes, name); exit(1); }
-    st_pread_full(t->fd, raw, t->nbytes, t->off, "pread ue8m0 scale");
+    int read_fd = st_pick_replica(S, t->fd);
+    int read_rep = st_last_read_replica;
+    uint64_t read_start = st_now_ns();
+    st_replica_begin(S, read_rep);
+    st_pread_full(read_fd, raw, t->nbytes, t->off, "pread ue8m0 scale");
+    uint64_t read_end = st_now_ns();
+    st_replica_end(S, read_rep, (uint64_t)t->nbytes,
+                   read_end >= read_start ? read_end - read_start : 0);
     for (int64_t i = 0; i < t->numel; i++) out[i] = ue8m0_to_f32(raw[i]);
     free(raw);
-    if (drop) posix_fadvise(t->fd, t->off, t->nbytes, POSIX_FADV_DONTNEED);
+    if (drop) posix_fadvise(read_fd, t->off, t->nbytes, POSIX_FADV_DONTNEED);
     return t->numel;
 }
 
@@ -996,9 +1037,16 @@ static int64_t st_read_scale_f32(shards *S, const char *name, float *out, int64_
  * A new caller with none of those wants st_read_raw_cap below. */
 static void st_read_raw(shards *S, const char *name, void *out, int drop) {
     st_tensor *t = st_find(S, name);
-    if (!t) st_die_missing(S, name);   /* #1317: la riga nuda esisteva gia' spiegata */
-    st_pread_full(t->fd, out, t->nbytes, t->off, "pread raw");
-    if (drop) posix_fadvise(t->fd, t->off, t->nbytes, POSIX_FADV_DONTNEED);
+    if (!t) { fprintf(stderr, "missing tensor: %s\n", name); exit(1); }
+    int read_fd = st_pick_replica(S, t->fd);
+    int read_rep = st_last_read_replica;
+    uint64_t read_start = st_now_ns();
+    st_replica_begin(S, read_rep);
+    st_pread_full(read_fd, out, t->nbytes, t->off, "pread raw");
+    uint64_t read_end = st_now_ns();
+    st_replica_end(S, read_rep, (uint64_t)t->nbytes,
+                   read_end >= read_start ? read_end - read_start : 0);
+    if (drop) posix_fadvise(read_fd, t->off, t->nbytes, POSIX_FADV_DONTNEED);
 }
 
 /* st_read_raw with the bound made explicit: `cap` is the byte capacity of `out`, in the
@@ -1034,7 +1082,13 @@ static void st_read_range_raw_cap(shards *S, int fd, int64_t off,
                 (long long)cap);exit(1);
     }
     if(nbytes>0&&!out){fprintf(stderr,"physical range has a NULL destination\n");exit(1);}
-    if(nbytes>0)st_pread_full(fd,out,nbytes,off,tag&&*tag?tag:"pread physical range");
+    if(nbytes>0){
+        int rep=st_replica_of_fd(S,fd); uint64_t t0=st_now_ns();
+        st_replica_begin(S,rep);
+        st_pread_full(fd,out,nbytes,off,tag&&*tag?tag:"pread physical range");
+        uint64_t t1=st_now_ns();
+        st_replica_end(S,rep,(uint64_t)nbytes,t1>=t0?t1-t0:0);
+    }
     if(drop&&nbytes>0)posix_fadvise(fd,off,nbytes,POSIX_FADV_DONTNEED);
 }
 
@@ -1145,10 +1199,17 @@ static void st_read_slice_raw_cap(shards *S, const char *name, int64_t byte_off,
         fprintf(stderr, "slice %s file offset overflows int64\n", name); exit(1);
     }
     int64_t boff = t->off + byte_off;
-    st_pread_full(t->fd, out, nbytes, boff, "pread raw slice");
+    int read_fd = st_pick_replica(S, t->fd);
+    int read_rep = st_last_read_replica;
+    uint64_t read_start = st_now_ns();
+    st_replica_begin(S, read_rep);
+    st_pread_full(read_fd, out, nbytes, boff, "pread raw slice");
+    uint64_t read_end = st_now_ns();
+    st_replica_end(S, read_rep, (uint64_t)nbytes,
+                   read_end >= read_start ? read_end - read_start : 0);
     /* A zero length to posix_fadvise means "through EOF" on POSIX, which is
      * broader than this request.  Do not issue it for an empty slice. */
-    if (drop && nbytes > 0) posix_fadvise(t->fd, boff, nbytes, POSIX_FADV_DONTNEED);
+    if (drop && nbytes > 0) posix_fadvise(read_fd, boff, nbytes, POSIX_FADV_DONTNEED);
 }
 
 /* legge una FETTA di un tensore: n_elems a partire dall'elemento elem_off.
@@ -1171,14 +1232,21 @@ static void st_read_slice_f32(shards *S, const char *name, int64_t elem_off, int
     int64_t boff = t->off + elem_off * esz, nb = n_elems * esz;
     void *raw = nb ? malloc((size_t)nb) : NULL;
     if (nb && !raw) { fprintf(stderr, "malloc %lld bytes for slice %s failed\n", (long long)nb, name); exit(1); }
-    if (nb) st_pread_full(t->fd, raw, nb, boff, "pread slice");   /* dev #331: chunked + EINTR + honest short-read */
+    int read_fd = st_pick_replica(S, t->fd);
+    int read_rep = st_last_read_replica;
+    uint64_t read_start = st_now_ns();
+    if (nb) st_replica_begin(S, read_rep);
+    if (nb) st_pread_full(read_fd, raw, nb, boff, "pread slice");   /* dev #331: chunked + EINTR + honest short-read */
+    uint64_t read_end = st_now_ns();
+    if (nb) st_replica_end(S, read_rep, (uint64_t)nb,
+                           read_end >= read_start ? read_end - read_start : 0);
     if (nb) {
         if (t->dtype == 2) memcpy(out, raw, (size_t)nb);
         else if (t->dtype == 0) { uint16_t *p = raw; for (int64_t i = 0; i < n_elems; i++) out[i] = bf16_to_f32(p[i]); }
         else { uint16_t *p = raw; for (int64_t i = 0; i < n_elems; i++) out[i] = f16_to_f32(p[i]); }
     }
     free(raw);
-    if (drop && nb) posix_fadvise(t->fd, boff, nb, POSIX_FADV_DONTNEED);
+    if (drop && nb) posix_fadvise(read_fd, boff, nb, POSIX_FADV_DONTNEED);
 }
 
 #endif
