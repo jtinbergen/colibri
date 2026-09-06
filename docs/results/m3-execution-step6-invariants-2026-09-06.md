@@ -97,6 +97,11 @@ Verified so far:
   case reaches a post-publication failure (`submitted=1` in the isolated case,
   `submitted=2` in the full suite), joins the compute team, drains both PIPE
   slots, and only then enters the test fatal boundary.
+- After the branch split, the current Step-6 branch was rebuilt and the
+  focused `colibri.exe`, `test_m3_dag.exe`, `test_i4_grouped.exe`, and
+  `test_pipe_block.exe` suite was rerun successfully. Commit `2ec839c`
+  restores the replica-selector metric fields that were lost during conflict
+  resolution; the fix is structural and does not alter the Step-6 schedule.
 - Real MiniMax-M3 `PROMPT=hi`, `NGEN=1`, PIPE/blocking, two compute workers:
   all 57 sparse-layer FNV digests match the established baseline, including
   `0b5dca1f6fa0cd96` at layer 3 and `c7cd7ef0e12065bb` at layer 59. The same
@@ -112,6 +117,9 @@ Verified so far:
 - Worker-count A/B: `COLI_M3_DAG_WORKERS=1`, `=2`, `=4`, and `=10` each
   produce 57 digests, byte-for-byte identical across the worker counts; the
   ten-worker run uses the machine's full available compute team.
+- An independent log comparison on the current branch found 57/57 matching
+  digests for the 1-, 4-, and 10-worker logs against the 2-worker baseline;
+  first digest `0b5dca1f6fa0cd96`, final digest `c7cd7ef0e12065bb`.
 - Equal-residency old/Step-4/Step-6 matrix, with `COLI_M3_DAG_PIPE=1`
   explicitly set for Step 4, `PROMPT=hi`, `NGEN=1`, PIPE/blocking,
   `RAM_GB=18`, RSS 11.61 GB (seconds, prefill):
