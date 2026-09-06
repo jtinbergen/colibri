@@ -151,7 +151,11 @@ compiled and passed `test_m3_dag`, but stopped in the general legacy
 as a separate finding rather than attributed to the Step-6 executor. The TSan
 target now selects only the Step-6-relevant expert reentrancy, private
 scratch/output, bounded task-group, and preflight checks; it still requires a
-fresh CI run before the Gate-C claim can change.
+fresh CI run before the Gate-C claim can change. The second attempt (run
+`34033863447`) reached the bounded task group and reported a task-capture race
+at `tests/test_i4_grouped.c:325`; the executor tasks now use explicit
+`firstprivate` expert pointers and structured task blocks, with a fresh TSan
+run still required to confirm the fix.
 
 ## Current gate record
 
