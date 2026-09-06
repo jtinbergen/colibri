@@ -218,6 +218,10 @@ remains green. The following report showed that the remaining global read was
 at expert-entry itself; the parallel record now carries an immutable
 `use_fused_pair` snapshot, so parallel execution no longer reads the mutable
 global configuration. Another GCC/libgomp verification is required.
+The next report isolated the completion-status publication (`e->ok`) across
+the OpenMP region; that status is now an atomic field with explicit
+initialization. The focused Windows suite remains green and GCC/libgomp must
+be rerun once more.
 
 ## Current gate record
 

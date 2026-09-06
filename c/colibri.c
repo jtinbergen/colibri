@@ -5967,7 +5967,7 @@ typedef struct {
     size_t output_n;
     uint64_t generation;
     double elapsed;
-    int ok;
+    _Atomic int ok;
 } M3DagParallelExpert;
 
 typedef struct {
@@ -6010,6 +6010,7 @@ static M3DagParallelBlock *m3_dag_parallel_preflight(int n,int D,int I,int with_
         free(b->gate_arena); free(b->expert); free(b); return NULL;
     }
     for(int i=0;i<n;i++){
+        atomic_init(&b->expert[i].ok,0);
         b->expert[i].use_fused_pair=!g_no_fused_pair;
         b->expert[i].scratch.gate=b->gate_arena+(int64_t)i*I;
         b->expert[i].scratch.up=b->up_arena+(int64_t)i*I;
@@ -7161,6 +7162,7 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out, int 
             int tile_count=(team_workers+nb-1)/nb; if(tile_count<1) tile_count=1;
             M3DagParallelExpert shared_e; M3DagExpertTask shared_task;
             memset(&shared_e,0,sizeof(shared_e)); memset(&shared_task,0,sizeof(shared_task));
+            atomic_init(&shared_e.ok,0);
             int have_shared=base==0 && with_shared;
             if(have_shared){
                 shared_e.layer=layer; shared_e.eid=-1; shared_e.route=-1;
