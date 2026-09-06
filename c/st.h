@@ -73,6 +73,82 @@ typedef struct {
 } shards;
 #define ST_MAX_SHARDS 512
 
+/* Source selected by the most recent generic shard read in this translation
+ * unit. Readers are synchronous, so thread-local state is sufficient for the
+ * Qwen loader's attribution hook and cannot cross-contaminate another loader. */
+static _Thread_local int st_last_read_replica = 0;
+static _Atomic unsigned st_mirror_cursor = 0;
+static int st_fd_rep(shards *S, int fd, int rep);
+
+static uint64_t st_now_ns(void) {
+#ifdef _WIN32
+    /* Windows is currently the single-disk development host.  Millisecond
+     * resolution is enough for the policy there; Linux uses the monotonic
+     * nanosecond clock below for the NUMA/multi-SSD target. */
+    return (uint64_t)GetTickCount64() * 1000000ULL;
+#else
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+        return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+    return 0;
+#endif
+}
+
+static void st_replica_begin(shards *S, int rep) {
+    if (!S || rep < 0 || rep > ST_MAX_MIR) return;
+    __atomic_fetch_add(&S->rep_inflight[rep], 1ULL, __ATOMIC_RELAXED);
+}
+
+static void st_replica_end(shards *S, int rep, uint64_t bytes, uint64_t busy_ns) {
+    if (!S || rep < 0 || rep > ST_MAX_MIR) return;
+    __atomic_fetch_sub(&S->rep_inflight[rep], 1ULL, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&S->rep_ops[rep], 1ULL, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&S->rep_bytes[rep], bytes, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&S->rep_busy_ns[rep], busy_ns, __ATOMIC_RELAXED);
+}
+
+static int st_pick_replica(shards *S, int fd) {
+    st_last_read_replica = 0;
+    if (!S || S->nrep <= 0) return fd;
+    const char *off = getenv("COLI_MIRROR_READS");
+    if (off && *off && atoi(off) == 0) return fd;
+    unsigned start = atomic_fetch_add_explicit(&st_mirror_cursor, 1u, memory_order_relaxed);
+    int total = S->nrep + 1;
+    const char *policy = getenv("COLI_STORAGE_POLICY");
+    int round_robin = policy && (!strcmp(policy, "round_robin") ||
+                                 !strcmp(policy, "rr"));
+    int best_rep = -1;
+    uint64_t best_score = UINT64_MAX;
+    for (int n = 0; n < total; n++) {
+        int rep = (int)((start + (unsigned)n) % (unsigned)total);
+        int candidate = st_fd_rep(S, fd, rep);
+        if (candidate < 0) continue;
+        if (round_robin) { st_last_read_replica = rep; return candidate; }
+
+        uint64_t ops = __atomic_load_n(&S->rep_ops[rep], __ATOMIC_RELAXED);
+        uint64_t busy = __atomic_load_n(&S->rep_busy_ns[rep], __ATOMIC_RELAXED);
+        uint64_t inflight = __atomic_load_n(&S->rep_inflight[rep], __ATOMIC_RELAXED);
+        /* A cold replica has no measured latency and therefore gets score 0;
+         * the rotating scan still spreads the first reads across cold copies.
+         * Once warm, latency is multiplied by current queue depth, which is a
+         * small but useful congestion signal for independent SSD/controllers. */
+        uint64_t score = 0;
+        if (ops) {
+            uint64_t avg = busy / ops;
+            uint64_t mult = inflight == UINT64_MAX ? UINT64_MAX : inflight + 1;
+            score = avg > UINT64_MAX / mult ? UINT64_MAX : avg * mult;
+        }
+        if (best_rep < 0 || score < best_score) {
+            best_rep = rep; best_score = score;
+        }
+    }
+    if (best_rep >= 0) {
+        st_last_read_replica = best_rep;
+        return st_fd_rep(S, fd, best_rep);
+    }
+    return fd;
+}
+
 static uint64_t st_hash(const char *s){
     uint64_t h=1469598103934665603ULL;
     while(*s){ h^=(unsigned char)*s++; h*=1099511628211ULL; }

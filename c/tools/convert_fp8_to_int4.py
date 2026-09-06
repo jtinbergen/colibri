@@ -128,6 +128,30 @@ def _positioned_write(fd, data, offset):
             remaining = remaining[written:]
 
 
+def _valid_safetensors_header(path):
+    """Cheap integrity check for a downloaded shard before deserializing it.
+
+    A complete-length sparse file can still contain holes (for example after a
+    broken ranged download).  Checking the small safetensors JSON header catches
+    that case before the converter treats the shard as successfully downloaded.
+    """
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read(8)
+            if len(raw) != 8:
+                return False
+            header_len = int.from_bytes(raw, "little")
+            if header_len <= 2 or header_len > (256 << 20):
+                return False
+            header = fh.read(header_len)
+            if len(header) != header_len:
+                return False
+        obj = json.loads(header.decode("utf-8"))
+        return isinstance(obj, dict)
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        return False
+
+
 # ---------- quantizzazione: identica al C (glm.c) ----------
 def quant_int8(w, bits):                       # w: [O,I] f32 -> (qbytes U8 [O*I], scale f32 [O])
     qmax = (1 << (bits - 1)) - 1
@@ -953,7 +977,11 @@ def main():
     # EN: hf_xet hangs when the network restarts (zombie connections with no timeout):
     # EN: force the classic HTTP path, which curl proved works (measured 2026-07-02).
     os.environ.setdefault("HF_HUB_DISABLE_XET", "1")   # =0 per riabilitare xet / to re-enable xet
-    from huggingface_hub import HfApi, hf_hub_download
+    from huggingface_hub import HfApi, hf_hub_download, get_token
+    # The custom Range downloader below does not go through hf_hub_download for
+    # large shards. Reuse the normal Hub login when HF_TOKEN is not explicitly
+    # supplied, so `hf auth login` also authenticates the resumable shard path.
+    hub_token = os.environ.get("HF_TOKEN") or get_token()
 
     # La guardia va qui: config.json pesa 5 KB e decide se i prossimi 300 GB
     # hanno senso. Se il repo non ha config.json si procede con un avviso, per
@@ -1011,7 +1039,14 @@ def main():
         os.makedirs(dest, exist_ok=True)
         expected = SIZES.get(fn)
         if os.path.exists(out) and (expected is None or os.path.getsize(out) == expected):
-            return out
+            if _valid_safetensors_header(out):
+                return out
+            bad = out + ".bad"
+            try:
+                os.replace(out, bad)
+            except OSError:
+                pass
+            print(f"    [dl] invalid existing shard moved to {os.path.basename(bad)}", flush=True)
         NS = max(1, min(8, int(os.environ.get("COLI_DL_STREAMS", "2"))))
         # un .part senza sidecar l'ha scritto una versione precedente a stream singolo.
         # EN: a .part without a sidecar was written by an older single-stream version.
@@ -1038,7 +1073,7 @@ def main():
             while done[t] < s1 - s0 and not stopfail:
                 pos = s0 + done[t]
                 _hdrs = {"User-Agent": "colibri-convert", "Range": f"bytes={pos}-{s1-1}"}
-                if os.environ.get("HF_TOKEN"): _hdrs["Authorization"] = f"Bearer {os.environ['HF_TOKEN']}"
+                if hub_token: _hdrs["Authorization"] = f"Bearer {hub_token}"
                 req = urllib.request.Request(url, headers=_hdrs)
                 try:
                     with urllib.request.urlopen(req, timeout=8) as r:
@@ -1082,6 +1117,14 @@ def main():
         assert sum(done) == expected
         if os.path.exists(side): os.remove(side)
         os.replace(part, out)
+        if not _valid_safetensors_header(out):
+            bad = out + ".bad"
+            try:
+                os.replace(out, bad)
+            except OSError:
+                pass
+            print(f"    [dl] invalid ranged download moved to {os.path.basename(bad)}; retrying single-stream", flush=True)
+            return _download_single(url, fn, out, out + ".part", expected)
         dt = max(_t.time() - t0, 1e-9)
         print(f"    [dl] {fn}: {expected/1e9:.2f} GB in {dt/60:.1f} min "
               f"({expected/dt/1e6:.1f} MB/s avg, {NS} streams, {nres[0]} resumes)", flush=True)
@@ -1140,6 +1183,13 @@ def main():
                 print(f"    [dl] {type(ex).__name__} at {have/1e9:.2f} GB: resuming (#{nres})", flush=True)
                 _t.sleep(min(15, 1 + nres))
         os.replace(part, out)
+        if not _valid_safetensors_header(out):
+            bad = out + ".bad"
+            try:
+                os.replace(out, bad)
+            except OSError:
+                pass
+            raise OSError(f"downloaded shard has an invalid safetensors header: {fn}")
         dt = max(_t.time() - t0, 1e-9); sz = os.path.getsize(out)
         print(f"    [dl] {fn}: {sz/1e9:.2f} GB in {dt/60:.1f} min "
               f"({sz/dt/1e6:.1f} MB/s avg, {nres} resumes)", flush=True)
