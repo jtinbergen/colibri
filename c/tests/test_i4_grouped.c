@@ -362,10 +362,18 @@ static void warm_step6_omp_runtime(void){
 #ifdef _OPENMP
     /* TSan reports libomp's lazy worker/mutex construction when the first
      * parallel region is also the test under inspection.  Initialize that
-     * runtime state in a completed region so subsequent reports belong to the
-     * executor's taskgroups, not the OpenMP library bootstrap. */
+     * runtime state in a completed region and execute one real task so the
+     * task-runtime mutexes are initialized too.  Subsequent reports should
+     * belong to the executor's taskgroups, not the OpenMP library bootstrap. */
     #pragma omp parallel num_threads(2)
-    { }
+    {
+        #pragma omp single
+        {
+            #pragma omp task
+            { }
+            #pragma omp taskwait
+        }
+    }
 #endif
 }
 
