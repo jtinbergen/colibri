@@ -281,7 +281,11 @@ static void scheduler_fatal(int layer){ (void)layer; longjmp(g_scheduler_fatal,1
 
 static int test_scheduler_failure_drain(Model *m,int parallel){
     for(int block=0;block<2;block++){
-        Layer l={0}; float x[4]={1,2,3,4}, out[4]={0}; float dummy[4]={0};
+        Layer l={0}; float x[4]={1,2,3,4}, out[4]={0};
+        /* moe() clears the caller output at entry; after a post-publication
+         * failure it must remain exactly cleared, with no partial expert
+         * contribution reduced into it. */
+        const float untouched[4]={0}; float dummy[4]={0};
         DrainLatch dl={0}; SchedulerCtl ctl={.l=&dl}; pthread_t th;
         int pre_idx[2]={0,1}, pre_keff[1]={2}; float pre_w[2]={.5f,.5f};
         m->c=(Cfg){.arch=ARCH_M3,.hidden=4,.n_layers=1,.n_experts=2,.topk=2,
@@ -315,7 +319,8 @@ static int test_scheduler_failure_drain(Model *m,int parallel){
         if(!jumped || atomic_load_explicit(&ctl.crossed_while_held,memory_order_acquire) ||
            !atomic_load_explicit(&dl.drain_after_a,memory_order_acquire) ||
            !atomic_load_explicit(&g_pp.ready[0],memory_order_acquire) ||
-           !atomic_load_explicit(&g_pp.ready[1],memory_order_acquire))
+           !atomic_load_explicit(&g_pp.ready[1],memory_order_acquire) ||
+           memcmp(out,untouched,sizeof(out)))
             return fail(block?"scheduler failure drain (block)":"scheduler failure drain (spin)");
     }
     return 0;
