@@ -319,16 +319,14 @@ static int check_parallel_task_group(int unfused){
     atomic_init(&pa.ok,0); atomic_init(&pb.ok,0);
     pa.c=a.context; pa.scratch=a.scratch; pa.output=a.output_store+M3C_CAN; pa.output_n=M3C_D; pa.eid=11; pa.route=0; pa.tiles=2; pa.layer=1; pa.generation=1; pa.use_fused_pair=!unfused;
     pb.c=b.context; pb.scratch=b.scratch; pb.output=b.output_store+M3C_CAN; pb.output_n=M3C_D; pb.eid=12; pb.route=1; pb.tiles=2; pb.layer=1; pb.generation=1; pb.use_fused_pair=!unfused;
-    /* Use sections for this harness-level fan-out.  The executor under test
-     * still creates its real bounded taskgroups; avoiding a second test-only
-     * task-capture layer keeps TSan focused on those groups rather than on the
-     * compiler/runtime's shared-data environment for epa/epb. */
-    #pragma omp parallel sections num_threads(2)
+    /* Use a plain team with thread-id dispatch for this harness-level fan-out.
+     * The executor under test still creates its real bounded taskgroups; this
+     * avoids a second test-only sections/task-capture environment in GCC's
+     * libgomp TSan path. */
+    #pragma omp parallel num_threads(2)
     {
-        #pragma omp section
-        { pa.ok=m3_dag_parallel_expert_run(&pa); }
-        #pragma omp section
-        { pb.ok=m3_dag_parallel_expert_run(&pb); }
+        if(omp_get_thread_num()==0) pa.ok=m3_dag_parallel_expert_run(&pa);
+        else pb.ok=m3_dag_parallel_expert_run(&pb);
     }
     g_no_fused_pair=old_pair;
     if(!pa.ok||!pb.ok||memcmp(pa.output,ar,sizeof(ar))||memcmp(pb.output,br,sizeof(br))||

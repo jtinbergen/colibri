@@ -221,7 +221,10 @@ global configuration. Another GCC/libgomp verification is required.
 The next report isolated the completion-status publication (`e->ok`) across
 the OpenMP region; that status is now an atomic field with explicit
 initialization. The focused Windows suite remains green and GCC/libgomp must
-be rerun once more.
+be rerun once more. The latest report then came from the test-only OpenMP
+sections capture itself (`test_i4_grouped.c:326`), so the harness now uses
+thread-id dispatch inside a plain parallel region rather than sections. This
+preserves two-expert overlap while removing that extra libgomp task environment.
 
 ## Current gate record
 
