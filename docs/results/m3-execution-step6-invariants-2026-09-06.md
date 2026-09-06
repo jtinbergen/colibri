@@ -160,7 +160,13 @@ run still required to confirm the fix. That report is emitted from GCC's
 will rerun the same focused suite there to separate runtime instrumentation
 noise from an application race. The LLVM run (`34034659201`) instead located
 the same capture at the test-only outer task fan-out, so that harness now uses
-OpenMP sections while retaining the executor's internal taskgroups.
+OpenMP sections while retaining the executor's internal taskgroups. The next
+LLVM run (`34035631669`) reached that harness and stopped on a lazy `libomp`
+mutex initialization report, with no application frame; the TSan target now
+runs the production-style PIPE drain test before that check so its result is
+still independently observable. TSan remains **NOT_RUN for the executor
+claim** until an OpenMP-compatible race runtime produces clean application
+evidence.
 
 ## Current gate record
 
