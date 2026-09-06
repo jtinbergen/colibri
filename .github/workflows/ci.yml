@@ -155,7 +155,7 @@ jobs:
   tsan-m3-archer:
     name: MiniMax-M3 Step 6 (Archer/TSan)
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 25
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
@@ -167,18 +167,19 @@ jobs:
         run: |
           git clone --depth 1 --branch llvmorg-18.1.8 \
             https://github.com/llvm/llvm-project.git "$RUNNER_TEMP/llvm-project"
-          cmake -S "$RUNNER_TEMP/llvm-project/llvm" \
+          # Configure OpenMP as a standalone runtime. A full LLVM+Clang
+          # bootstrap is unnecessary here and can consume the whole CI timeout.
+          cmake -S "$RUNNER_TEMP/llvm-project/openmp" \
             -B "$RUNNER_TEMP/llvm-project/build" -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/llvm-archer" \
-            -DLLVM_ENABLE_PROJECTS=clang \
-            -DLLVM_ENABLE_RUNTIMES=openmp \
-            -DLLVM_TARGETS_TO_BUILD=X86 \
-            -DLLVM_ENABLE_TERMINFO=OFF \
-            -DLLVM_ENABLE_ZLIB=OFF \
-            -DLLVM_ENABLE_ZSTD=OFF \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DOPENMP_STANDALONE_BUILD=TRUE \
+            -DOPENMP_ENABLE_LIBOMPTARGET=OFF \
             -DOPENMP_ENABLE_OMPT_TOOLS=ON \
-            -DLIBOMP_ARCHER_SUPPORT=ON
+            -DLIBOMP_ARCHER_SUPPORT=ON \
+            -DLIBOMP_OMPT_SUPPORT=ON
           cmake --build "$RUNNER_TEMP/llvm-project/build" \
             --target install --parallel 2
       - name: Step 6 focused suite under Archer/ThreadSanitizer
