@@ -1844,6 +1844,30 @@ test-asan:
 	@$(ASAN_ENV) $(MAKE) test-c EXTRA_CFLAGS="$(ASAN_CFLAGS)" EXTRA_LDFLAGS="$(ASAN_LDFLAGS)"
 	@echo "test-asan: suite clean under ASan + UBSan"
 
+# Step 6's focused race gate. Keep this separate from test-asan: TSan and
+# ASan cannot be combined, and the full C suite contains unrelated long-lived
+# worker paths whose race reports would obscure the bounded M3 executor. The
+# three binaries cover the DAG state machine, private grouped-int4
+# scratch/output, and the production PIPE failure/drain boundary.
+TSAN_CFLAGS  = -O1 -g -fno-omit-frame-pointer -fsanitize=thread
+TSAN_LDFLAGS = -fsanitize=thread
+TSAN_ENV     = TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1
+
+ifeq (,$(LINUX))
+test-tsan-m3:
+	@echo "test-tsan-m3 requires a Linux ThreadSanitizer runtime" >&2
+	@exit 2
+else
+test-tsan-m3:
+	@$(MAKE) clean
+	@$(TSAN_ENV) $(MAKE) tests/test_m3_dag tests/test_i4_grouped tests/test_pipe_block \
+		EXTRA_CFLAGS="$(TSAN_CFLAGS)" EXTRA_LDFLAGS="$(TSAN_LDFLAGS)"
+	@$(TSAN_ENV) OMP_NUM_THREADS=2 ./tests/test_m3_dag
+	@$(TSAN_ENV) OMP_NUM_THREADS=2 ./tests/test_i4_grouped
+	@$(TSAN_ENV) OMP_NUM_THREADS=2 ./tests/test_pipe_block
+	@echo "test-tsan-m3: Step 6 focused suite clean under TSan"
+endif
+
 # Local validation: one portable CPU build and dependency-free tests.
 check:
 	$(MAKE) clean
@@ -1896,7 +1920,7 @@ bench: iobench$(EXE)
 
 # Own line: see the TEST_RULES note above on shared .PHONY lines.
 .PHONY: bench-omp-grain
-.PHONY: test-asan
+.PHONY: test-asan test-tsan-m3
 .PHONY: dsv4-cuda-test cuda-dsv4-dll cuda-dsv4-dg-dll dsv4-cuda-loader-test
 
 tests/test_kv_prefix$(EXE): tests/test_kv_prefix.c kv_prefix.h
