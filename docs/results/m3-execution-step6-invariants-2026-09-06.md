@@ -175,7 +175,13 @@ Windows focused suite remains green. In the seventh run (`34037245091`),
 first OpenMP bootstrap in the grouped-int4 harness reported a `libomp` mutex
 race. The harness now performs a completed two-thread warm-up before the
 Step-6 checks, so the next run can distinguish that bootstrap artifact from
-executor activity.
+executor activity. The eighth run (`34037690780`) confirms the split:
+Clang/TSan passes `test_m3_dag` and the production-style `test_pipe_block`
+after the atomic fix, then reports the same `libomp` mutex-initialization race
+in the grouped-int4 harness, with no application frame, even after the
+explicit warm-up. This is not counted as a Step-6 race pass or failure; a race
+checker/runtime that can instrument OpenMP taskgroups without reporting its own
+bootstrap is still required for Gate-C.
 
 ## Current gate record
 
