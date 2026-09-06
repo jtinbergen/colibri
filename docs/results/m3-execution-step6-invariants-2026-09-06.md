@@ -283,12 +283,34 @@ for Gate C; the distro libomp/libgomp TSan jobs and grouped Helgrind probe
 remain informational diagnostics because they instrument their own runtime
 storage.
 
+## Astra review follow-up
+
+The compact independent review found a real mixed-access hazard in the
+failure path: `m3_dag_task_ready()` read `M3DagExecutionContext.failed` as an
+ordinary `int` while a worker published it atomically. Commit `04c01fa` makes
+both context flags `_Atomic int`, routes every read through acquire loads, and
+routes serial and parallel failure publication through the release helper.
+Commit `fa28eaa` adds a controlled producer/worker publication interleaving;
+the post-publication readiness assertion is synchronized with the worker's
+release marker so a legal load-before-store overlap is not misclassified.
+The same change adds deterministic failure injection at every bounded
+preflight allocation and asserts that the failure/drain integration leaves no
+partial expert contribution in the caller output.
+
+The corrected CI run (`34049878592`, head `fa28eaa`) passes the blocking
+Archer/TSan suite, Linux engine/C suite, and ASan/UBSan. The plain Helgrind
+job reports conflicts in the synthetic C11-atomic interleaving harness and is
+now explicitly supplemental; it does not override the OpenMP-aware Archer
+classification.
+
 ## Current gate record
 
 - **C: PASS within the supported opt-in scope.** Focused fused/unfused task graphs, lifecycle transitions,
   worker counts 1/2/4/10, both real grouped-int4 configurations, and the real
   post-publication failure/drain path preserve the established outputs and
-  release ownership safely under the normal build and ASan+UBSan. The required
+  release ownership safely under the normal build and ASan+UBSan. The
+  failure-publication interleaving and every bounded preflight allocation
+  failure are covered. The required
   OpenMP-aware Archer/TSan race checker passes the bounded DAG, PIPE, and
   grouped-int4 paths. The distro Clang/libomp, GCC/libgomp, and Helgrind jobs
   remain visible as supplemental diagnostics, but their runtime-storage

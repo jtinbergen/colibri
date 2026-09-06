@@ -195,11 +195,14 @@ jobs:
   # Independent race evidence for the same Step-6 scope. Helgrind is slower and
   # less precise than TSan, but it observes the pthread-backed worker protocol
   # without relying on the libomp TSan interaction that is noisy on the hosted
-  # Ubuntu runtime.
+  # Ubuntu runtime. It does not model the C11 atomic publication used by the
+  # failure-interleaving regression reliably, so this remains supplemental;
+  # Archer/TSan is the blocking Gate-C authority.
   helgrind-m3:
     name: MiniMax-M3 Step 6 (Helgrind)
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Install Valgrind
