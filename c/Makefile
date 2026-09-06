@@ -1948,6 +1948,13 @@ test-helgrind-m3:
 		EXTRA_CFLAGS="$(HELGRIND_CFLAGS)"
 	@OMP_NUM_THREADS=2 $(HELGRIND) ./tests/test_m3_dag
 	@echo "test-helgrind-m3: bounded DAG executor clean under Helgrind"
+
+test-helgrind-m3-grouped:
+	@$(MAKE) clean
+	@$(MAKE) tests/test_i4_grouped \
+		EXTRA_CFLAGS="$(HELGRIND_CFLAGS)"
+	@OMP_NUM_THREADS=2 COLI_STEP6_TSAN_ONLY=1 $(HELGRIND) ./tests/test_i4_grouped
+	@echo "test-helgrind-m3-grouped: grouped-int4 executor clean under Helgrind"
 endif
 
 # Local validation: one portable CPU build and dependency-free tests.
