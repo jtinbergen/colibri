@@ -183,7 +183,11 @@ explicit warm-up. This is not counted as a Step-6 race pass or failure; a race
 checker/runtime that can instrument OpenMP taskgroups without reporting its own
 bootstrap is still required for Gate-C. The branch now also contains a Linux
 `test-helgrind-m3` fallback and CI job; it is not counted until that independent
-race run has completed and its reports have been classified.
+race run has completed and its reports have been classified. Its first CI
+attempt stopped before executing the tests because the normal `-march=native`
+build emitted an AVX-512 instruction that Valgrind 3.22 did not decode. The
+Helgrind-only build now appends portable `-march=x86-64` to avoid that checker
+toolchain mismatch.
 
 ## Current gate record
 

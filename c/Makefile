@@ -1934,6 +1934,7 @@ endif
 # three focused binaries and the same Step-6 subset as test-tsan-m3.
 HELGRIND = valgrind --tool=helgrind --fair-sched=yes --history-level=full \
 	--error-exitcode=99 --num-callers=30
+HELGRIND_CFLAGS = -march=x86-64 -O1 -g -fno-omit-frame-pointer
 
 ifeq (,$(LINUX))
 test-helgrind-m3:
@@ -1943,7 +1944,7 @@ else
 test-helgrind-m3:
 	@$(MAKE) clean
 	@$(MAKE) tests/test_m3_dag tests/test_i4_grouped tests/test_pipe_block \
-		EXTRA_CFLAGS="-O1 -g -fno-omit-frame-pointer"
+		EXTRA_CFLAGS="$(HELGRIND_CFLAGS)"
 	@$(HELGRIND) ./tests/test_m3_dag
 	@$(HELGRIND) ./tests/test_pipe_block
 	@COLI_STEP6_TSAN_ONLY=1 $(HELGRIND) ./tests/test_i4_grouped
