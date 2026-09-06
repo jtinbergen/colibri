@@ -315,24 +315,32 @@ static int check_parallel_task_group(int unfused){
     if(!m3_concurrent_case_init(&a,301.f)||!m3_concurrent_case_init(&b,401.f)) return 1;
     int old_pair=g_no_fused_pair; g_no_fused_pair=unfused;
     if(!m3_i4_expert_run(&a.context,&asr,ar)||!m3_i4_expert_run(&b.context,&bsr,br)){ g_no_fused_pair=old_pair; return 1; }
-    M3DagParallelExpert pa={0},pb={0};
-    atomic_init(&pa.ok,0); atomic_init(&pb.ok,0);
-    pa.c=a.context; pa.scratch=a.scratch; pa.output=a.output_store+M3C_CAN; pa.output_n=M3C_D; pa.eid=11; pa.route=0; pa.tiles=2; pa.layer=1; pa.generation=1; pa.use_fused_pair=!unfused;
-    pb.c=b.context; pb.scratch=b.scratch; pb.output=b.output_store+M3C_CAN; pb.output_n=M3C_D; pb.eid=12; pb.route=1; pb.tiles=2; pb.layer=1; pb.generation=1; pb.use_fused_pair=!unfused;
+    /* Keep the records in heap storage.  They are shared by the OpenMP team;
+     * stack-backed records make GCC/Clang TSan attribute the team startup
+     * environment itself to the test function before the executor runs. */
+    M3DagParallelExpert *jobs=calloc(2,sizeof(*jobs));
+    if(!jobs){ g_no_fused_pair=old_pair; return 1; }
+    M3DagParallelExpert *pa=&jobs[0], *pb=&jobs[1];
+    atomic_init(&pa->ok,0); atomic_init(&pb->ok,0);
+    pa->c=a.context; pa->scratch=a.scratch; pa->output=a.output_store+M3C_CAN; pa->output_n=M3C_D; pa->eid=11; pa->route=0; pa->tiles=2; pa->layer=1; pa->generation=1; pa->use_fused_pair=!unfused;
+    pb->c=b.context; pb->scratch=b.scratch; pb->output=b.output_store+M3C_CAN; pb->output_n=M3C_D; pb->eid=12; pb->route=1; pb->tiles=2; pb->layer=1; pb->generation=1; pb->use_fused_pair=!unfused;
     /* Use a plain team with thread-id dispatch for this harness-level fan-out.
      * The executor under test still creates its real bounded taskgroups; this
      * avoids a second test-only sections/task-capture environment in GCC's
      * libgomp TSan path. */
-    #pragma omp parallel num_threads(2)
+    #pragma omp parallel num_threads(2) default(none) shared(jobs)
     {
-        if(omp_get_thread_num()==0) pa.ok=m3_dag_parallel_expert_run(&pa);
-        else pb.ok=m3_dag_parallel_expert_run(&pb);
+        int worker=omp_get_thread_num();
+        jobs[worker].ok=m3_dag_parallel_expert_run(&jobs[worker]);
     }
     g_no_fused_pair=old_pair;
-    if(!pa.ok||!pb.ok||memcmp(pa.output,ar,sizeof(ar))||memcmp(pb.output,br,sizeof(br))||
+    int ok=atomic_load(&pa->ok)&&atomic_load(&pb->ok);
+    int mismatch=!ok||memcmp(pa->output,ar,sizeof(ar))||memcmp(pb->output,br,sizeof(br))||
        !m3_canary_ok(a.gate_store,M3C_H,301.f)||!m3_canary_ok(a.up_store,M3C_H,302.f)||
        !m3_canary_ok(b.gate_store,M3C_H,401.f)||!m3_canary_ok(b.up_store,M3C_H,402.f)||
-       !m3_canary_ok(a.output_store,M3C_D,303.f)||!m3_canary_ok(b.output_store,M3C_D,403.f)){
+       !m3_canary_ok(a.output_store,M3C_D,303.f)||!m3_canary_ok(b.output_store,M3C_D,403.f);
+    free(jobs);
+    if(mismatch){
         fprintf(stderr,"parallel task-group mismatch or canary corruption (unfused=%d)\n",unfused); return 1;
     }
     printf("  parallel expert task graph ok (%s gate/up, private scratch/output, two workers)\n",
