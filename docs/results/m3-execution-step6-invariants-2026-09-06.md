@@ -250,7 +250,11 @@ the test-only parallel dispatch (`test_i4_grouped.c:334`) and GCC reported the
 parallel directive itself (`test_i4_grouped.c:331`). Both reports are stack
 environment accesses with no application payload address. The bounded DAG
 Helgrind job remains clean, and no additional engine synchronization is
-warranted from these runtime reports.
+warranted from these runtime reports. The focused grouped-int4 Helgrind probe
+(`34042065860`) likewise exercised the complete Step-6 subset, but emitted
+6,629 conflicts from `libgomp` task/team allocations and runtime frames; its
+application-level records and numerical checks completed. It is therefore
+retained as capability evidence, not counted as a grouped-int4 race pass.
 
 ## Current gate record
 
@@ -260,9 +264,8 @@ warranted from these runtime reports.
   release ownership safely under the normal build and ASan+UBSan. The required
   TSan race checker passes the bounded DAG and PIPE paths in both the Clang/
   libomp and GCC/libgomp routes. Grouped-int4 remains unclassified because
-  Clang/libomp races during runtime mutex initialization and GCC/libgomp races
-  in the test-only OpenMP stack environment before it can provide a trustworthy
-  grouped-int4 result.
+  Clang/libomp, GCC/libgomp, and Helgrind all report their own OpenMP task/team
+  runtime storage before producing a trustworthy grouped-int4 race result.
 - **M: PASS within the supported opt-in scope.** The final trace proves
   overlap, phase ordering, private-task ownership, zero drops, and OpenMP
   level 1; focused tests cover failure-state transitions, shape/bounds
