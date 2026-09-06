@@ -1,0 +1,13 @@
+{
+  "description": "Independent grouped-int4 reference fixture for the M3 execution-DAG baseline. Packed weights use conventional low-nibble-first signed int4 values stored as value + 8. The unused high nibble of the final byte in each row is deliberately non-zero so consumers must respect I=5.",
+  "input_size": 5,
+  "output_size": 2,
+  "group_size": 2,
+  "input": [2.0, -1.0, 0.5, 3.0, -2.0],
+  "packed_weights_hex": ["698bf7", "a459fc"],
+  "scales": [
+    [0.5, 1.25, -2.0],
+    [2.0, -0.5, 0.25]
+  ],
+  "expected_output": [-0.125, -17.75]
+}
