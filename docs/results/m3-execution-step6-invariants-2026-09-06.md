@@ -202,7 +202,12 @@ The next validation attempt adds a second Linux TSan job using GCC/libgomp.
 This is intentionally an evidence-gathering route, not a suppression: if
 GCC/libgomp reaches grouped-int4 cleanly, it can separate the current Clang/
 libomp bootstrap report from executor behavior; if it reports an application
-frame, that finding becomes the next code-level fix.
+frame, that finding becomes the next code-level fix. Its first run did report
+an application-visible task-capture conflict at `m3_dag_parallel_expert_run`
+(`colibri.c:6076`) while the two expert sections entered concurrently. The
+executor now snapshots all task inputs before task creation and captures only
+those private pointers/scalars; the Windows focused suite is green and a fresh
+GCC/libgomp run is required to verify the repair.
 
 ## Current gate record
 
