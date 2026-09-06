@@ -198,6 +198,12 @@ for PIPE and grouped-int4. A follow-up audit also removed an unnecessary
 non-atomic `g_pp.m` rewrite from every PIPE dispatch; the focused Windows suite
 remains green after that change.
 
+The next validation attempt adds a second Linux TSan job using GCC/libgomp.
+This is intentionally an evidence-gathering route, not a suppression: if
+GCC/libgomp reaches grouped-int4 cleanly, it can separate the current Clang/
+libomp bootstrap report from executor behavior; if it reports an application
+frame, that finding becomes the next code-level fix.
+
 ## Current gate record
 
 - **C: PARTIAL.** Focused fused/unfused task graphs, lifecycle transitions,

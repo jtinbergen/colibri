@@ -127,6 +127,19 @@ jobs:
       - name: Step 6 focused suite under ThreadSanitizer
         run: make -C c test-tsan-m3 CC=clang
 
+  # GCC/libgomp is an independent OpenMP runtime check. The Clang/libomp job
+  # currently reports a runtime mutex-initialisation race before grouped-int4
+  # reaches the executor; keep this route visible rather than attributing that
+  # report to the engine without a second runtime's evidence.
+  tsan-m3-gcc:
+    name: MiniMax-M3 Step 6 (TSan, GCC/libgomp)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Step 6 focused suite under GCC ThreadSanitizer
+        run: make -C c test-tsan-m3 CC=gcc
+
   # Independent race evidence for the same Step-6 scope. Helgrind is slower and
   # less precise than TSan, but it observes the pthread-backed worker protocol
   # without relying on the libomp TSan interaction that is noisy on the hosted
