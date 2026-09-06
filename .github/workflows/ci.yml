@@ -153,6 +153,22 @@ jobs:
       - name: Step 6 bounded DAG check under Helgrind
         run: make -C c test-helgrind-m3
 
+  # Grouped-int4 has no usable hosted OpenMP/TSan combination: both libomp and
+  # libgomp report their own team/task environment. Run the focused executor
+  # under Helgrind as an independent diagnostic; it deliberately excludes the
+  # older PIPE fixture whose C11-atomic hooks Helgrind cannot model reliably.
+  helgrind-m3-grouped:
+    name: MiniMax-M3 Step 6 (Helgrind, grouped-int4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Valgrind
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends valgrind
+      - name: Grouped-int4 executor under Helgrind
+        run: make -C c test-helgrind-m3-grouped
+
   # The Vulkan backend, COMPILED AND RUN. Before this job, `grep -rn "VK=1\|glslc\|vulkan"
   # .github/workflows/` returned nothing: backend_vulkan.c and the four GLSL shaders were
   # never built by any job, so they could be broken on dev and every check would stay green.
