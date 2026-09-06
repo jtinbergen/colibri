@@ -351,6 +351,17 @@ static int check_parallel_resource_guard(void){
     return 0;
 }
 
+static void warm_step6_omp_runtime(void){
+#ifdef _OPENMP
+    /* TSan reports libomp's lazy worker/mutex construction when the first
+     * parallel region is also the test under inspection.  Initialize that
+     * runtime state in a completed region so subsequent reports belong to the
+     * executor's taskgroups, not the OpenMP library bootstrap. */
+    #pragma omp parallel num_threads(2)
+    { }
+#endif
+}
+
 int main(void){
     int fail=0;
     fail|=check_activation_limits();
@@ -362,6 +373,7 @@ int main(void){
      * and the actual bounded task groups so a legacy-wrapper report cannot
      * obscure the executor race signal. */
     if(getenv("COLI_STEP6_TSAN_ONLY")){
+        warm_step6_omp_runtime();
         fail|=check_concurrent_full_experts();
         fail|=check_parallel_task_group(0);
         fail|=check_parallel_task_group(1);
