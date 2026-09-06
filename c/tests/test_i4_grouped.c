@@ -318,13 +318,14 @@ static int check_parallel_task_group(int unfused){
     M3DagParallelExpert pa={0},pb={0};
     pa.c=a.context; pa.scratch=a.scratch; pa.output=a.output_store+M3C_CAN; pa.output_n=M3C_D; pa.eid=11; pa.route=0; pa.tiles=2; pa.layer=1; pa.generation=1;
     pb.c=b.context; pb.scratch=b.scratch; pb.output=b.output_store+M3C_CAN; pb.output_n=M3C_D; pb.eid=12; pb.route=1; pb.tiles=2; pb.layer=1; pb.generation=1;
+    M3DagParallelExpert *epa=&pa, *epb=&pb;
     #pragma omp parallel num_threads(2)
     #pragma omp single
     {
-        #pragma omp task shared(pa)
-        pa.ok=m3_dag_parallel_expert_run(&pa);
-        #pragma omp task shared(pb)
-        pb.ok=m3_dag_parallel_expert_run(&pb);
+        #pragma omp task firstprivate(epa)
+        { epa->ok=m3_dag_parallel_expert_run(epa); }
+        #pragma omp task firstprivate(epb)
+        { epb->ok=m3_dag_parallel_expert_run(epb); }
         #pragma omp taskwait
     }
     g_no_fused_pair=old_pair;

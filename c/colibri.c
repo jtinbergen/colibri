@@ -6035,7 +6035,7 @@ static int m3_dag_parallel_expert_run(M3DagParallelExpert *e){
         #pragma omp taskgroup
         for(int lo=0;lo<go;lo+=gt){
             int hi=lo+gt; if(hi>go) hi=go;
-            #pragma omp task firstprivate(lo,hi) shared(e)
+            #pragma omp task firstprivate(lo,hi,e)
             matmul_i4_grouped_pair_rows(e->scratch.gate,e->scratch.up,e->c.input,
                 e->c.gate.q4,e->c.gate.s,e->c.up.q4,e->c.up.s,
                 1,e->c.gate.I,e->c.gate.O,64,lo,hi);
@@ -6044,7 +6044,7 @@ static int m3_dag_parallel_expert_run(M3DagParallelExpert *e){
         #pragma omp taskgroup
         for(int lo=0;lo<go;lo+=gt){
             int hi=lo+gt; if(hi>go) hi=go;
-            #pragma omp task firstprivate(lo,hi) shared(e)
+            #pragma omp task firstprivate(lo,hi,e)
             {
                 matmul_i4_grouped_rows(e->scratch.gate,e->c.input,e->c.gate.q4,
                     e->c.gate.s,1,e->c.gate.I,e->c.gate.O,64,lo,hi);
@@ -6057,7 +6057,7 @@ static int m3_dag_parallel_expert_run(M3DagParallelExpert *e){
     #pragma omp taskgroup
     for(int lo=0;lo<go;lo+=gt){
         int hi=lo+gt; if(hi>go) hi=go;
-        #pragma omp task firstprivate(lo,hi) shared(e)
+        #pragma omp task firstprivate(lo,hi,e)
         act_glu_range(e->scratch.gate,e->scratch.up,lo,hi,
                       e->c.swigluoai,e->c.alpha,e->c.limit);
     }
@@ -6066,7 +6066,7 @@ static int m3_dag_parallel_expert_run(M3DagParallelExpert *e){
     #pragma omp taskgroup
     for(int lo=0;lo<no;lo+=dt){
         int hi=lo+dt; if(hi>no) hi=no;
-        #pragma omp task firstprivate(lo,hi) shared(e)
+        #pragma omp task firstprivate(lo,hi,e)
         matmul_i4_grouped_rows(e->output,e->scratch.gate,e->c.down.q4,
             e->c.down.s,1,e->c.down.I,e->c.down.O,64,lo,hi);
     }
