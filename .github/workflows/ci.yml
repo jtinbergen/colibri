@@ -122,8 +122,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - name: Install the LLVM OpenMP runtime
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libomp-dev
       - name: Step 6 focused suite under ThreadSanitizer
-        run: make -C c test-tsan-m3
+        run: make -C c test-tsan-m3 CC=clang
 
   # The Vulkan backend, COMPILED AND RUN. Before this job, `grep -rn "VK=1\|glslc\|vulkan"
   # .github/workflows/` returned nothing: backend_vulkan.c and the four GLSL shaders were

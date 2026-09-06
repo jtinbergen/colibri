@@ -155,7 +155,10 @@ fresh CI run before the Gate-C claim can change. The second attempt (run
 `34033863447`) reached the bounded task group and reported a task-capture race
 at `tests/test_i4_grouped.c:325`; the executor tasks now use explicit
 `firstprivate` expert pointers and structured task blocks, with a fresh TSan
-run still required to confirm the fix.
+run still required to confirm the fix. That report is emitted from GCC's
+`libgomp` task runtime; the CI gate now installs Clang plus LLVM `libomp` and
+will rerun the same focused suite there to separate runtime instrumentation
+noise from an application race.
 
 ## Current gate record
 

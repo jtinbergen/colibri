@@ -18,5 +18,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - name: Install the LLVM OpenMP runtime
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libomp-dev
       - name: Run the focused Step-6 suite under ThreadSanitizer
-        run: make -C c test-tsan-m3
+        run: make -C c test-tsan-m3 CC=clang
