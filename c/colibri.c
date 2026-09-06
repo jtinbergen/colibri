@@ -3938,6 +3938,11 @@ static _Atomic int *g_pipe_test_wait_slot_enter;
 static _Atomic int *g_pipe_test_drain_after_slot;
 static void (*g_pipe_test_after_load)(int q);
 static int g_pipe_test_m3_run;
+static _Atomic int *g_pipe_test_m3_started;
+static _Atomic int *g_pipe_test_m3_release;
+static void (*g_pipe_test_before_m3_ready)(M3DagExecutionContext *ctx, int q);
+static void (*g_pipe_test_after_m3_ready)(M3DagExecutionContext *ctx, int q, int ready);
+static int g_pipe_test_abort;
 static void (*g_pipe_test_fatal)(int layer);
 #endif
 
@@ -5977,6 +5982,13 @@ typedef struct {
     float *shared_gate,*shared_up;
     int shared_submitted;
 } M3DagParallelBlock;
+#ifdef COLI_M3_DAG_TEST_HOOKS
+/* Test-only scheduling seam: the production executor still owns the task
+ * stages and waits; the harness may only gate entry and observe completion to
+ * reproduce controlled completion orders. */
+static void (*g_m3_dag_test_before_expert)(M3DagParallelExpert *e);
+static void (*g_m3_dag_test_after_expert)(M3DagParallelExpert *e,int ok);
+#endif
 
 static int m3_parallel_size_ok(size_t n,size_t elem){ return elem && n<=SIZE_MAX/elem; }
 #if defined(COLI_PIPE_TEST) || defined(COLI_M3_DAG_TEST_HOOKS)
@@ -6055,10 +6067,17 @@ static int m3_dag_parallel_expert_run(M3DagParallelExpert *e){
        e->output_n<(size_t)e->c.down.O) return 0;
 #ifdef COLI_PIPE_TEST
     if(g_pipe_test_m3_run){
+        if(g_pipe_test_m3_started && !e->shared)
+            atomic_store_explicit(g_pipe_test_m3_started,1,memory_order_release);
+        if(g_pipe_test_m3_release && !e->shared)
+            while(!atomic_load_explicit(g_pipe_test_m3_release,memory_order_acquire)) sched_yield();
         if(!e->shared) return 0;
         memset(e->output,0,e->output_n*sizeof(*e->output));
         return 1;
     }
+#endif
+#ifdef COLI_M3_DAG_TEST_HOOKS
+    if(g_m3_dag_test_before_expert) g_m3_dag_test_before_expert(e);
 #endif
     /* Snapshot all immutable task inputs before creating any OpenMP task.
      * Capturing the coordinator record pointer itself made GCC/libgomp's TSan
@@ -6126,6 +6145,9 @@ static int m3_dag_parallel_expert_run(M3DagParallelExpert *e){
     }
     trace_emit(TR_DOWN_DONE,e->layer,e->eid,(int)e->generation,e->route);
     e->elapsed=now_s()-t0; e->ok=1;
+#ifdef COLI_M3_DAG_TEST_HOOKS
+    if(g_m3_dag_test_after_expert) g_m3_dag_test_after_expert(e,1);
+#endif
     trace_emit(TR_EXPERT_DONE,e->layer,e->eid,(int)e->generation,e->route);
     trace_emit(TR_COMPUTE_END,e->layer,e->eid,(int)e->generation,e->route);
     return 1;
@@ -7238,9 +7260,17 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out, int 
                            !m3_i4_context(&m3p->expert[q].c,&e->g,&e->u,&e->d,x) ||
                            m3p->expert[q].c.gate.I!=D || m3p->expert[q].c.gate.O!=I ||
                            m3p->expert[q].c.down.I!=I || m3p->expert[q].c.down.O!=D ||
-                           !m3_dag_weights_resident(&tasks[q],e) || !m3_dag_task_ready(&dctx,&tasks[q])){
+                           !m3_dag_weights_resident(&tasks[q],e)){
                             fallback=1; break;
                         }
+                        #ifdef COLI_PIPE_TEST
+                        if(g_pipe_test_before_m3_ready) g_pipe_test_before_m3_ready(&dctx,q);
+                        #endif
+                        int dag_ready=m3_dag_task_ready(&dctx,&tasks[q]);
+                        #ifdef COLI_PIPE_TEST
+                        if(g_pipe_test_after_m3_ready) g_pipe_test_after_m3_ready(&dctx,q,dag_ready);
+                        #endif
+                        if(!dag_ready){ fallback=1; break; }
                         pick=q; break;
                     }
                     if(fallback) break;
@@ -7291,6 +7321,7 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out, int 
                 m3_dag_parallel_free(m3p); m3p=NULL; m3_dag_parallel_all=0;
 #ifdef COLI_PIPE_TEST
                 if(g_pipe_test_fatal) g_pipe_test_fatal(layer);
+                if(g_pipe_test_abort) return;
 #endif
             } else {
                 for(int q=0;q<nb;q++){
@@ -7406,6 +7437,7 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out, int 
                 free(private_out);
 #ifdef COLI_PIPE_TEST
                 if(g_pipe_test_fatal) g_pipe_test_fatal(layer);
+                if(g_pipe_test_abort) return;
 #endif
                 fprintf(stderr,"[M3_DAG] PIPE task failure at layer %d; refusing partial fallback\n",layer); exit(1);
             }

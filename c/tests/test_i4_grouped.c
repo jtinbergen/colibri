@@ -76,6 +76,24 @@ typedef struct { const M3I4ExpertContext *context; M3I4ExpertScratch *scratch;
  * atomic publication gives the harness an explicit lifetime edge and leaves
  * no test-local shared pointer for the compiler-generated team environment. */
 static _Atomic(M3DagParallelExpert *) g_test_step6_jobs;
+typedef struct {
+    _Atomic int allow[2], entered[2], order[2], sequence;
+    int first;
+} CompletionOrderGate;
+static CompletionOrderGate *g_completion_order_gate;
+static void gate_expert_start(M3DagParallelExpert *e){
+    CompletionOrderGate *g=g_completion_order_gate; int r=e->route;
+    if(!g || r<0 || r>1) return;
+    atomic_store_explicit(&g->entered[r],1,memory_order_release);
+    while(!atomic_load_explicit(&g->allow[r],memory_order_acquire)) sched_yield();
+}
+static void gate_expert_done(M3DagParallelExpert *e,int ok){
+    CompletionOrderGate *g=g_completion_order_gate; int r=e->route;
+    if(!g || !ok || r<0 || r>1) return;
+    int n=atomic_fetch_add_explicit(&g->sequence,1,memory_order_acq_rel)+1;
+    atomic_store_explicit(&g->order[r],n,memory_order_release);
+    if(r==g->first) atomic_store_explicit(&g->allow[1-r],1,memory_order_release);
+}
 
 static void m3_fill_canary(float *p,int n,float value){
     for(int i=0;i<M3C_CAN;i++){ p[i]=value; p[M3C_CAN+n+i]=value; }
@@ -313,9 +331,9 @@ static int check_pair(const char *name, int S, int I, int O, int gs){
     return 0;
 }
 
-static int check_parallel_task_group(int unfused){
+static int check_parallel_task_group(int unfused,int workers){
 #ifndef _OPENMP
-    (void)unfused; return 77;
+    (void)unfused; (void)workers; return 77;
 #else
     M3ConcurrentCase a,b;
     float ar_gate[M3C_H],ar_up[M3C_H],br_gate[M3C_H],br_up[M3C_H],ar[M3C_D],br[M3C_D];
@@ -332,16 +350,18 @@ static int check_parallel_task_group(int unfused){
     atomic_init(&pa->ok,0); atomic_init(&pb->ok,0);
     pa->c=a.context; pa->scratch=a.scratch; pa->output=a.output_store+M3C_CAN; pa->output_n=M3C_D; pa->eid=11; pa->route=0; pa->tiles=2; pa->layer=1; pa->generation=1; pa->use_fused_pair=!unfused;
     pb->c=b.context; pb->scratch=b.scratch; pb->output=b.output_store+M3C_CAN; pb->output_n=M3C_D; pb->eid=12; pb->route=1; pb->tiles=2; pb->layer=1; pb->generation=1; pb->use_fused_pair=!unfused;
-    /* Use a plain team with thread-id dispatch for this harness-level fan-out.
+    /* Use a plain team with a static workshare for this harness-level fan-out.
      * The executor under test still creates its real bounded taskgroups; this
      * avoids a second test-only sections/task-capture environment in GCC's
-     * libgomp TSan path. */
+     * libgomp TSan path while exercising the executor at the requested team
+     * sizes, including the serial one-worker boundary. */
     atomic_store_explicit(&g_test_step6_jobs,jobs,memory_order_release);
-    #pragma omp parallel num_threads(2) default(none) shared(g_test_step6_jobs)
+    #pragma omp parallel num_threads(workers) default(none) shared(g_test_step6_jobs)
     {
-        int worker=omp_get_thread_num();
         M3DagParallelExpert *local_jobs=atomic_load_explicit(&g_test_step6_jobs,memory_order_acquire);
-        if(local_jobs) local_jobs[worker].ok=m3_dag_parallel_expert_run(&local_jobs[worker]);
+        #pragma omp for schedule(static,1)
+        for(int job=0;job<2;job++) if(local_jobs)
+            local_jobs[job].ok=m3_dag_parallel_expert_run(&local_jobs[job]);
     }
     atomic_store_explicit(&g_test_step6_jobs,NULL,memory_order_release);
     g_no_fused_pair=old_pair;
@@ -352,10 +372,85 @@ static int check_parallel_task_group(int unfused){
        !m3_canary_ok(a.output_store,M3C_D,303.f)||!m3_canary_ok(b.output_store,M3C_D,403.f);
     free(jobs);
     if(mismatch){
-        fprintf(stderr,"parallel task-group mismatch or canary corruption (unfused=%d)\n",unfused); return 1;
+        fprintf(stderr,"parallel task-group mismatch or canary corruption (unfused=%d workers=%d)\n",
+                unfused,workers); return 1;
     }
-    printf("  parallel expert task graph ok (%s gate/up, private scratch/output, two workers)\n",
-           unfused?"separate":"fused");
+    printf("  parallel expert task graph ok (%s gate/up, private scratch/output, workers=%d)\n",
+           unfused?"separate":"fused",workers);
+    return 0;
+#endif
+}
+static int check_parallel_worker_counts(int unfused){
+#ifdef _OPENMP
+    int max=omp_get_max_threads(); if(max<1) max=1;
+    int bad=0, last=0;
+    const int counts[]={1,2,4};
+    for(size_t i=0;i<sizeof(counts)/sizeof(counts[0]);i++) if(counts[i]<=max){
+        bad|=check_parallel_task_group(unfused,counts[i]); last=counts[i];
+    }
+    if(last<4) printf("  worker-count evidence scoped to available OpenMP max=%d\n",max);
+    return bad;
+#else
+    (void)unfused; return 77;
+#endif
+}
+static int check_completion_permutations(int unfused,int workers){
+#ifndef _OPENMP
+    (void)unfused; (void)workers; return 77;
+#else
+    if(workers<2) return 0;
+    for(int first=0;first<2;first++){
+        M3ConcurrentCase a,b;
+        float ar_gate[M3C_H],ar_up[M3C_H],br_gate[M3C_H],br_up[M3C_H],ar[M3C_D],br[M3C_D];
+        M3I4ExpertScratch asr={ar_gate,ar_up,M3C_H,M3C_H}, bsr={br_gate,br_up,M3C_H,M3C_H};
+        if(!m3_concurrent_case_init(&a,501.f+first*20.f)||!m3_concurrent_case_init(&b,601.f+first*20.f)) return 1;
+        int old_pair=g_no_fused_pair; g_no_fused_pair=unfused;
+        if(!m3_i4_expert_run(&a.context,&asr,ar)||!m3_i4_expert_run(&b.context,&bsr,br)){
+            g_no_fused_pair=old_pair; return 1;
+        }
+        M3DagParallelExpert *jobs=calloc(2,sizeof(*jobs));
+        if(!jobs){ g_no_fused_pair=old_pair; return 1; }
+        M3DagParallelExpert *pa=&jobs[0], *pb=&jobs[1];
+        atomic_init(&pa->ok,0); atomic_init(&pb->ok,0);
+        pa->c=a.context; pa->scratch=a.scratch; pa->output=a.output_store+M3C_CAN; pa->output_n=M3C_D;
+        pa->eid=21; pa->route=0; pa->tiles=2; pa->layer=1; pa->generation=1; pa->use_fused_pair=!unfused;
+        pb->c=b.context; pb->scratch=b.scratch; pb->output=b.output_store+M3C_CAN; pb->output_n=M3C_D;
+        pb->eid=22; pb->route=1; pb->tiles=2; pb->layer=1; pb->generation=1; pb->use_fused_pair=!unfused;
+        CompletionOrderGate gate={0}; gate.first=first;
+        atomic_store_explicit(&gate.allow[first],1,memory_order_release);
+        g_completion_order_gate=&gate;
+        g_m3_dag_test_before_expert=gate_expert_start;
+        g_m3_dag_test_after_expert=gate_expert_done;
+        atomic_store_explicit(&g_test_step6_jobs,jobs,memory_order_release);
+        #pragma omp parallel num_threads(workers) default(none) shared(g_test_step6_jobs)
+        {
+            M3DagParallelExpert *local_jobs=atomic_load_explicit(&g_test_step6_jobs,memory_order_acquire);
+            #pragma omp for schedule(static,1)
+            for(int job=0;job<2;job++) if(local_jobs)
+                local_jobs[job].ok=m3_dag_parallel_expert_run(&local_jobs[job]);
+        }
+        atomic_store_explicit(&g_test_step6_jobs,NULL,memory_order_release);
+        g_m3_dag_test_before_expert=NULL; g_m3_dag_test_after_expert=NULL;
+        g_completion_order_gate=NULL; g_no_fused_pair=old_pair;
+        int order0=atomic_load_explicit(&gate.order[0],memory_order_acquire);
+        int order1=atomic_load_explicit(&gate.order[1],memory_order_acquire);
+        int mismatch=!atomic_load(&pa->ok)||!atomic_load(&pb->ok)||order0<1||order1<1||
+            (first==0 ? !(order0<order1) : !(order1<order0)) ||
+            memcmp(pa->output,ar,sizeof(ar))||memcmp(pb->output,br,sizeof(br))||
+            !m3_canary_ok(a.gate_store,M3C_H,501.f+first*20.f)||
+            !m3_canary_ok(a.up_store,M3C_H,502.f+first*20.f)||
+            !m3_canary_ok(a.output_store,M3C_D,503.f+first*20.f)||
+            !m3_canary_ok(b.gate_store,M3C_H,601.f+first*20.f)||
+            !m3_canary_ok(b.up_store,M3C_H,602.f+first*20.f)||
+            !m3_canary_ok(b.output_store,M3C_D,603.f+first*20.f);
+        free(jobs);
+        if(mismatch){
+            fprintf(stderr,"completion-order permutation mismatch (unfused=%d workers=%d first=%d order=%d/%d)\n",
+                    unfused,workers,first,order0,order1); return 1;
+        }
+    }
+    printf("  repeated numerical completion permutations ok (%s, workers=%d)\n",
+           unfused?"separate":"fused",workers);
     return 0;
 #endif
 }
@@ -368,7 +463,10 @@ static int check_parallel_resource_guard(void){
 #ifdef COLI_M3_DAG_TEST_HOOKS
     /* Exercise every owned calloc failure point, including partial cleanup.
      * This is deterministic and does not depend on exhausting the host. */
-    for(int fail_after=0;fail_after<7;fail_after++){
+    /* There are eight owned allocations when the shared expert is enabled:
+     * block, expert records, three routed arenas, shared output, shared gate,
+     * and shared up.  Include the final shared-up allocation explicitly. */
+    for(int fail_after=0;fail_after<8;fail_after++){
         atomic_store_explicit(&g_m3_dag_test_alloc_fail_after,fail_after,memory_order_relaxed);
         M3DagParallelBlock *b=m3_dag_parallel_preflight(2,5,7,1,3);
         if(b){
@@ -420,16 +518,24 @@ int main(void){
     if(getenv("COLI_STEP6_TSAN_ONLY")){
         warm_step6_omp_runtime();
         fail|=check_concurrent_full_experts();
-        fail|=check_parallel_task_group(0);
-        fail|=check_parallel_task_group(1);
+        fail|=check_parallel_worker_counts(0);
+        fail|=check_parallel_worker_counts(1);
+        if(omp_get_max_threads()>=2){
+            fail|=check_completion_permutations(0,2);
+            fail|=check_completion_permutations(1,2);
+        }
         fail|=check_parallel_resource_guard();
         printf("test_i4_grouped: Step 6 TSan subset %s\n",fail?"FAILED":"ok");
         return fail?1:0;
     }
     fail|=check_concurrent_rows();
     fail|=check_concurrent_full_experts();
-    fail|=check_parallel_task_group(0);
-    fail|=check_parallel_task_group(1);
+    fail|=check_parallel_worker_counts(0);
+    fail|=check_parallel_worker_counts(1);
+    if(omp_get_max_threads()>=2){
+        fail|=check_completion_permutations(0,2);
+        fail|=check_completion_permutations(1,2);
+    }
     fail|=check_parallel_resource_guard();
     printf("test_i4_grouped: matmul_i4_grouped vs plain-C dequant reference\n");
 

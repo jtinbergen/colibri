@@ -140,14 +140,21 @@ Besluit: volgende toegestane stap, of concrete herstelopdracht
 | 4 | Gereedstaande experts uitvoeren tijdens PIPE-loads | 3 C/M |
 | 5 | Reentrante grouped-int4-rowkernels | 4 C/M |
 | 6 | Parallelle expert-tasks, inclusief shared expert | 5 C/M |
-| 7 | I/O- en residentieplanner in shadow mode | 1 en 3 C/M; echte integratietrace uit 6 vóór promotie |
-| 8 | Begrensde planner actief maken | 6 en 7 C/M |
-| 9 | NUMA-eigenaarschap en lokale teams | 6 C/M; aparte A/B met 8 indien actief |
-| 10 | Combinatie-, regressie- en promotiegate | 2, 6, 8, 9 voor de ondersteunde scope |
+| 6a | Correctheidsherstel en reconciliatie van Gate 6 | Implementatie en reviewbevindingen uit 6; geen eerdere 6 C-PASS vereist |
+| 7 | I/O- en residentieplanner in shadow mode | 1, 3 en 6a C/M; echte integratietrace uit 6/6a vóór promotie |
+| 8 | Begrensde planner actief maken | 6a en 7 C/M |
+| 9 | NUMA-eigenaarschap en lokale teams | 6a C/M; aparte A/B met 8 indien actief |
+| 10 | Combinatie-, regressie- en promotiegate | 2, 6a, 8, 9 voor de ondersteunde scope |
 
 Werk standaard in deze volgorde. Stap 2 en de DAG-route hebben verschillende
 inhoudelijke dependencies; test hun individuele flags en hun combinatie.
 Een gemiste MSA-performancegate blokkeert niet automatisch de expertanalyse.
+Aanvulling 6 september: stap 6a is een verplichte herstelgate vóór uitvoering
+van stap 7, ook in shadow mode. Dit vervangt bewust de eerdere toestemming
+om shadow vanuit alleen 1/3 C/M te starten. Stappen 0–5 worden hierdoor niet
+heropend; stappen 7–10 behouden hun nummer. Historische Gate-6-PASS-tekst is
+geen toestemming om 6a over te slaan. Het uitschrijven van de plannerbriefing
+is geen uitvoering van stap 7.
 
 ## Stap 0 — baseline, fixtures en uitvoerbaar benchmarkrecept
 
@@ -387,6 +394,17 @@ beschikbaar voor de fallbackroute.
 
 ## Stap 6 — parallelle expert-tasks
 
+**Status gecontroleerd op `b06130b`: failure-publicatierace hersteld;
+afsluiting van 6a nog gedeeltelijk open wegens evidencegaten.**
+De bevinding op `b9bf5de` is gerepareerd in `04c01fa`; `fa28eaa` corrigeert
+de interleavingtest. De blocking Archer/TSan-, ASan/UBSan- en Linux-enginejobs
+slagen op `b06130b` in CI-run `34050827680`. Het parallelle mechanisme blijft
+onderbouwd; P blijft `NOT_PROMOTED`, met all-resident `NOT_RUN`.
+Het actuele C-PASS-record in `results/m3-execution-step6-invariants-2026-09-06.md`
+erkent deze reparatie, maar sluit de expliciet uitgebreidere 6a-eisen hieronder
+nog niet volledig. Geen nieuwe enginerace vastgesteld; de resterende punten
+betreffen testdekking en gate-reconciliatie.
+
 **Briefing**
 
 > Voer gereedstaande (expert, output-row tile)-taken uit met een begrensd
@@ -417,7 +435,108 @@ een meetbaar beleid; geen onbeperkte busy loop bij disk-wacht of prompt-idle.
   afzonderlijke all-resident test is nodig om I/O-maskering uit te sluiten.
   Zonder voldoende RAM blijft dat geval `NOT_RUN`.
 
+## Stap 6a — correctheidsherstel en gate-reconciliatie
+
+**Status: GEDEELTELIJK AFGEROND op `b06130b`; resterende 6a-gate OPEN vóór stap 7.**
+
+Statusreconciliatie van 6 september, na inspectie van de reparatiediff en
+[CI-run 34050827680](https://github.com/jtinbergen/colibri/actions/runs/34050827680)
+op `b06130b9c408304a3b698f011301636079b67795`:
+
+- Afgerond: atomische contextflags en consistente accesses; concurrente
+  helper-level readiness/failure-regression; injectie van preflightallocatie-
+  fouten; assert op geen gedeeltelijke calleroutput bij failure/drain;
+  blocking Archer-job. De genoemde CI-run is overall succesvol en Archer,
+  ASan/UBSan en Linux-engine zijn afzonderlijk succesvol. `b06130b` bevat de
+  eerdere codefixes via zijn ouders; zelf wijzigt het CI-classificatie en docs.
+- Nog te sluiten: de sweep `fail_after<7` in `test_i4_grouped.c` dekt zeven
+  failureposities, maar preflight heeft acht allocaties. Failure van de laatste
+  `shared_up`-allocatie na zeven succesvolle allocaties ontbreekt. De claim
+  “every bounded preflight allocation” in het evidenceverslag is te breed.
+- Nog te sluiten: de interleavingtest gebruikt de echte contexthelper in een
+  synthetische producer/worker-loop; hij forceert nog niet het hieronder
+  vereiste interleavingpad in de productie-`moe()`-dispatcher.
+- Nog te documenteren/verifiëren: de lifecycle-inventaris en expliciete
+  runtimebeperkingen uit werkpakket 3, plus worker-countnumeriek op de
+  herstelde versie uit werkpakket 5. Historische numerieke runs worden niet
+  automatisch nieuwe runs door een succesvolle CI-build.
+- Finale 6a-review: nog geen C/M-afsluiting tegen alle onderstaande eisen.
+  Reconcileer daarna het Step-6-verslag en het 6a-gaterecord. Herhaal geen
+  reeds gerepareerde codewijziging alleen omdat de oorspronkelijke briefing
+  hieronder als herstelrecept behouden blijft.
+
+**Briefing**
+
+> Sluit de concrete Step-6-reviewbevindingen bij `b9bf5de`. Herstel de
+> failure-publicatie, bewijs de ontbrekende relevante lifecyclepaden en maak
+> de gezaghebbende racecheck afdwingbaar. Behoud de ondersteunde CPU/S=1/
+> grouped-int4-scope, numerieke volgorde en begrensde executor. Bouw geen
+> nieuwe scheduler en voeg in dit herstel geen opslagplanner toe.
+
+Werkpakketten, in deze volgorde:
+
+1. **Failure-publicatie:** audit de contextflag-accesses die de parallelle
+   executor werkelijk deelt. Bij de reviewversie roept de producer in
+   `c/colibri.c:7224` `m3_dag_task_ready()` aan, dat in `c/m3_dag.h:116`
+   `ctx->failed` gewoon leest, terwijl een worker via `colibri.c:7253` en
+   `m3_dag.h:174` atomisch schrijft. Maak alle mogelijk concurrente accesses
+   consistent gesynchroniseerd. Een eerdere acquire-check of latere taskwait
+   beschermt die tussenliggende gewone read niet. Zoek functies opnieuw als
+   regels verschoven zijn; wijzig geen uitsluitend seriële semantiek zonder
+   noodzaak. Niet-aangeroepen cancellationhelpers bewijzen geen productiepad.
+2. **Gerichte regression:** forceer via testhooks/latches dat een eerdere
+   expert faalt terwijl de dispatcher nog andere experts op readiness kan
+   beoordelen. Test de echte producer/context, niet alleen losse rowkernels
+   of opeenvolgende lifecyclehelpers. Gebruik geen sleeps als bewijs en voeg
+   geen testsynchronisatie toe die de onderzochte concurrente toegang zelf
+   wegordent. Laat Archer het pad classificeren. Assert dat geen gedeeltelijke
+   bijdrage vóór succesvolle retirement wordt gereduceerd en dat de gekozen
+   fout/fallbackroute geen dubbele bijdrage of vroeg bufferhergebruik geeft.
+3. **Lifecycle- en resourcebewijs:** inventariseer de bestaande tests en vul
+   aantoonbare gaten aan: werkelijke allocatiefouten tijdens preflight met
+   cleanup vóór publicatie; failure/drain met nog actieve numerieke taken;
+   herhaalde completionvolgordes; ondersteunde annulering; worker-/team-einde
+   vóór scratchvrijgave. Een overflowguard is geen allocatiefouttest en een
+   OpenMP-region-einde is geen bewijs van expliciete PIPE-worker-shutdown.
+   Leg per claim vast welk productiepad de test raakt. Voor thread-create-
+   fouten of cancellation/shutdown die de runtime niet injecteerbaar of niet
+   ondersteund maakt: rapporteer de concrete beperking en het foutcontract;
+   claim geen pass. Een noodzakelijke ondersteunde veiligheidsgarantie mag
+   niet stilzwijgend worden geschrapt: ontbrekend bewijs blijft blokkerend
+   tenzij de sterkere reviewer een expliciete scopebeperking accepteert.
+4. **CI:** maak de Archer/TSan-job gezaghebbend én blocking; verwijder zijn
+   `continue-on-error: true`. Houd oude distro-TSan/Helgrind-runtimeconflicten
+   afzonderlijk als informatieve diagnostics. Verifieer de job zelf en zijn
+   uitgevoerde testsubset; alleen een groene workflowbadge volstaat niet.
+5. **Verificatie en verslag:** voer de gerichte DAG-, PIPE- en grouped-int4-
+   fused/unfused-tests uit, plus ASan/UBSan en Archer waar ondersteund. Herhaal
+   de numerieke worker-countvergelijking 1/2/4 en de beschikbare grotere team-
+   omvang op de herstelde versie; ontbrekende hardware is geen pass. Bewaar
+   commit, buildflags, commando's, uitkomsten en artefacten in een nieuw
+   6a-resultatenverslag. Werk daarna het actuele gateblok van het Step-6-
+   invariantenverslag bij; behoud de historische runs als historische evidence.
+
+**Gate 6a**
+
+- C: geen mixed atomic/non-atomic contextaccess op het parallelle pad;
+  gerichte regression, numerieke controles en vereiste lifecyclecases groen;
+  schone gezaghebbende Archer-run op de herstelde code. Geen onopgeloste
+  correctnessblocker verborgen achter een scopewijziging of capabilitylabel.
+- M: tests tonen de bedoelde failure/readiness-interleaving, drain vóór reuse
+  en exact-once release/reduction. Herbevestig begrensd expertparallelisme en
+  vaste reductievolgorde; behoud alleen traceclaims die nog op de code passen.
+- P: geen nieuwe winstclaim vereist. `NOT_PROMOTED` en all-resident `NOT_RUN`
+  mogen blijven; rapporteer relevante regressies zonder ze als C/M te maskeren.
+- Afsluiting: sterkere review van de finale diff en evidence volgens
+  `AGENTS.md`; actuele 6/6a-gaterecords spreken elkaar niet tegen. Pas na
+  6a C/M-PASS mag stap 7 beginnen. Luna mag testuitvoering en logextractie
+  doen, maar niet deze concurrencycorrectie of de finale gate goedkeuren.
+
 ## Stap 7 — planner in shadow mode
+
+**Status: NIET GEÏMPLEMENTEERD / NIET GEGATED in deze checkout.**
+De onderstaande opslagtopologie- en contentiontekst is een uitvoeringscontract,
+geen implementatie-evidence. Begin uitvoering pas na afsluiting van 6a C/M.
 
 **Briefing**
 
@@ -431,28 +550,256 @@ requestgrootte, bron, queuedepth en compute-resource. Gebruik getrainde
 prompts voor kalibratie en aparte prompts voor evaluatie; geen toekomstige
 routerkeuze uit de replay gebruiken als online voorkennis.
 
-Voorgesteld besliscontract:
+### Aanvulling 6 september: drives, controllers en toelating
+
+Dit is een verplicht implementatiecontract, nog geen geïmplementeerde functie.
+De eerste meetmachine heeft twee NVMe-drives met mogelijk verschillende
+bruikbare concurrency (bijvoorbeeld vier versus één read). De doelopstelling
+heeft ongeveer zes à zeven drives verdeeld over drie controllers; aantallen
+en indeling mogen veranderen. Hardcode geen aantallen, uniforme queuedepth
+of gelijke verdeling over replicas. De genoemde hardwarecapaciteiten zijn
+te meten invoer, geen bewezen eigenschappen of standaardinstellingen.
+
+**7a — Expliciete topologie en bounded datamodel**
+
+Lever eerst een gevalideerde configuratie en parser met deze logische velden;
+de concrete bestandsindeling mag eenvoudig blijven:
+
+- `resource_id`, `kind` (drive/controller/upstream), `max_inflight`,
+  `max_inflight_bytes` en een verwijzing naar het kalibratieprofiel.
+- Per drive een lijst unieke `resource_id`s op het gedeelde I/O-pad, inclusief
+  de drive zelf. Een upstream-link kan meerdere controllers omvatten. Een
+  gedeelde resource staat maar één keer in de configuratie en wordt per read
+  maar één keer belast; geen vier kopieën van één controllerbudget.
+- Per beschikbare weightkopie: model-/tensoridentiteit, bestand/range,
+  byteaantal en fysieke drive. Alleen inhoudelijk equivalente, beschikbare
+  kopieën zijn kandidaten. Twee paden naar dezelfde drive zijn geen twee
+  onafhankelijke resources. Controllerlidmaatschap betekent niet automatisch
+  dat alle reads geserialiseerd moeten worden.
+- Per request: unieke request- en forward/generatie-identiteit, consumer-node,
+  demand/prefetch, enqueue-tijd, consumer-need, state, gekozen kopie en de
+  gereserveerde resources. Definieer configuratiegrenzen voor het aantal
+  resources, wachtende requests en bytes; overflow wordt vóór publicatie
+  afgewezen. Geen onbegrensde queue of stil afgekapt resourcepad.
+
+Gebruik configureerbare topologie; OS-discovery mag helpen maar is geen
+voorwaarde. Ontbrekende of tegenstrijdige mappings maken actieve planning
+voor die configuratie ineligible. Shadow rapporteert `UNKNOWN`; het neemt
+geen onafhankelijke controllers of oneindige capaciteit aan. Een ongeldige
+configuratie laat het bestaande pad vóór plannerpublicatie intact.
+
+**7b — Kalibratie van capaciteit én contention**
+
+Meet per drive de completion-latencyverdeling en throughput voor relevante
+requestgroottes en in-flight aantallen, minstens 1/2/4 en verdere waarden
+binnen een vooraf begrensd meetbudget. Gebruik echte expert-readpatronen;
+noteer cacheconditie, buffered/direct I/O, readbytes, gelijktijdige loads,
+CPU-verwerking en sampleaantallen. Scheid I/O-completion van weight-ready
+na conversie/verwerking. Kies een bruikbare concurrencygrens uit de gemeten
+latencycurve, niet uit een fabrikantmaximum of alleen piekbandbreedte.
+Leg vóór de meting vast welke latencytoename en onzekerheid acceptabel zijn.
+
+Meet daarna drives binnen iedere controllergroep tegelijk en vervolgens
+groepen over controllers heen. Begin met gestructureerde paren en volledige
+groepen; eis geen exponentiële test van alle subsets. Verfijn waar de
+voorspelling onvoldoende klopt. Topologie alleen bewijst geen contention;
+een gemeten gedeeld knelpunt kan ook boven de controllers liggen.
+
+Bewaar per profiel: topologie/configuratiehash, meetcondities, ondersteunde
+grootte-/loadklassen, latency en spreiding, aggregate bandwidth in bytes/s,
+afgeleide admissiongrenzen en versie. Een bytebudget is geen bandwidthbudget.
+Noem expliciet de tijdseenheid; een capaciteit zoals “500 gigabytes” zonder
+`/s` mag niet als bandbreedte worden ingevoerd. Ontbrekende meetklassen blijven
+`UNKNOWN`; geen optimistische extrapolatie. Wijzig topologie of I/O-modus
+alleen tussen gedrainde generaties en herkalibreer de getroffen profielen.
+
+**7c — Pure voorspeller en deterministische beslissing**
+
+Implementeer eerst een pure functie van een immutable snapshot, request en
+kandidaatkopie. Zij doet geen I/O, verandert geen counters en leest geen
+toekomstige replay-events. Gebruik één monotone tijdas:
 
 ```text
-consumer_need = voorspeld tijdstip waarop weights nodig zijn
-arrival[source] = nu + geschatte queuewait + read/transfer + benodigde verwerking
-slack[source] = consumer_need - arrival[source] - onzekerheidsmarge
+consumer_need = voorspelde vroegste gebruikstijd uit de nu bekende DAG
+               (andere dependencies + beschikbaarheid compute-resource)
+prediction = predict(snapshot, request, candidate, proposed_dispatch_time)
+arrival = prediction.weight_ready_time
+slack = consumer_need - arrival - prediction.uncertainty_margin
+predicted_wait = max(0, -slack)
 ```
 
-Voorkom dubbeltelling: een gemeten queued read-latency bevat al queueing;
-tel daar niet opnieuw dezelfde queuewait bij op. Kies een bron op verwachte
-completion, betrouwbaarheid en budget. Modelleren van prefetch omvat ook
-verkeerde predictions, extra bytes, CPU-kosten en verdringing. Een capaciteit
-van K expert-slots is geen uniform bytebudget bij verschillende formats.
+`consumer_need` wordt niet afgeleid van de eigen voorspelde I/O-completion:
+dat zou de te meten stall verbergen. Het is een herberekenbare soft deadline,
+geen garantie. Niet-gecommitteerde toekomstige routerkeuzes blijven onbekend.
+De voorspeller retourneert ook de gewijzigde completiontijden van al actieve
+en gereserveerde requests op gedeelde resources, plus reden/`UNKNOWN`.
+
+Gebruik gemeten load-afhankelijke servicecurves. Tel een expliciete queuewait
+alleen op bij een serviceprofiel dat die wachttijd uitsluit; een end-to-end
+profiel bevat haar al. Sommeer niet voor ieder resourcepad-element opnieuw
+de volledige transfertijd. De drive en zijn controller begrenzen dezelfde
+byteflow. De voorspelde totale transfer over een gedeelde resource mag haar
+gekalibreerde aggregate capaciteit niet overschrijden. Een enkel gemiddeld
+latencygetal maal `(inflight+1)` is geen voldoende completionmodel.
+
+Vaste eerste voorspeller: een conservatieve, event-driven fluid-simulatie.
+Dit is een toetsbaar startmodel; slechte held-out nauwkeurigheid blokkeert
+activering en vraagt modelreview, geen verborgen heuristiek van de uitvoerder.
+
+- Een serviceprofiel levert vaste startupduur per grootteklasse en per
+  resource een aggregate transferrate `C_r(loadklasse, grootteklasse)`.
+  Startup is exclusief byte-transfer, queuewait en conversie. Fit deze
+  componenten op de meetreeksen van 7b; sla fitresiduen op. Een end-to-end
+  latencytabel mag niet rechtstreeks als extra startup worden opgeteld.
+- Gebruik voor tussenliggende groottes/load de kleinste gemeten klasse die
+  beide naar boven afdekt; geen interpolatie. Bij gemengde groottes geldt per
+  resource de laagste toepasselijke aggregate rate. Geen dekkende klasse
+  betekent `UNKNOWN`. Valideer deze conservatieve keuze op mixed-size reads.
+- Een gestart request reserveert alle resources ook tijdens startup. Na
+  startup is het een actieve byteflow. Met `n_r` actieve byteflows door
+  resource r krijgt request i rate `min_r(C_r / n_r)` over zijn gehele pad.
+  De loadklasse voor `C_r` telt alle issued requests op r, inclusief startup;
+  `n_r` telt alleen flows die werkelijk aan de transferfase toe zijn.
+  Herverdeel ongebruikte shares niet in deze eerste versie. Zo begrenst ieder
+  knelpunt dezelfde flow zonder transfertijd op te tellen of capaciteit te
+  vermenigvuldigen. Herbereken rates bij elke dispatch/startup-end/completion.
+- Houd voorspelde resterende bytes bij in een apart ledger: trek per verstreken
+  eventinterval `rate * dt` af, begrensd op nul; dispatch begint met alle bytes.
+  Kopieer dit ledger voor iedere kandidaat. Integreer vooruit tot de volgende
+  startup-end of kleinste `remaining_bytes/rate`; handel gelijktijdige events
+  in request-ID-volgorde af vóór herberekening. Gebruik dezelfde numerieke
+  precisie en tijdafronding in alle fixtures; vergelijk tijden met 1 ns tolerantie.
+- Echte completion verwijdert de echte request uit het ledger. Voorspelde nul
+  bytes terwijl de echte completion ontbreekt geeft `OVERDUE/UNKNOWN` voor
+  betrokken kandidaten; verzin geen vrij resource. Andere onafhankelijke
+  groepen blijven planbaar. Gebruik geen latere werkelijke completion uit de
+  replay om deze voorspelling achteraf te verbeteren. Deze overdue-regel geldt
+  op het werkelijke snapshotmoment. Binnen de gekopieerde toekomstsimulatie
+  mogen voorspelde completions uiteraard hypothetische capaciteit vrijgeven;
+  zij veranderen nooit de echte counters.
+- Weight-ready omvat verwerking: gebruik in de eerste voorspeller één virtuele
+  seriële conversieresource, met gekalibreerde duur per formaat/grootte en de
+  nu bekende bezetting. Enqueue op voorspelde I/O-completion, ties op request-ID.
+  Nul conversieduur mag alleen voor een profiel zonder benodigde verwerking.
+  Dit model plant geen echte CPU-taken; ook deze aanname moet held-out kloppen.
+- Begrens kandidaten en simulatie-events met de configuratiegrenzen van 7a.
+  Budgetuitputting of een niet-positieve rate geeft `UNKNOWN`, geen busy loop.
+  Onzekerheidsmarges komen uit vastgelegde kalibratieresiduen en worden niet
+  tijdens een kandidaatvergelijking aangepast.
+
+Eerste begrensde policy (geen globale optimizer nodig):
+
+1. Plan alleen bekende demandrequests; prefetch volgt pas in 8b. Sorteer
+   wachtende demand op `consumer_need`, daarna enqueue-tijd en request-ID.
+   Requests ouder dan een vooraf ingestelde `max_queue_age` gaan eerst in
+   enqueue-volgorde. Dit voorkomt policy-starvation bij eindigende reads;
+   het is geen garantie bij een defecte of permanent overbelaste bron.
+2. Evalueer voor het eerste request alle equivalente bronnen met complete
+   profielen. Houd drive én alle gedeelde resources bij. Bereken ook een
+   uitstelkandidaat op de eerstvolgende voorspelde resourcecompletion; deze
+   reserveert nog niets en wordt bij een echte completion opnieuw beoordeeld.
+3. Sluit kandidaten zonder compleet profiel of haalbare harde budgetten op
+   hun voorgestelde dispatchmoment uit vóór ranking. Gebruik voor iedere
+   overblijvende kandidaat dezelfde scoreverzameling: het nieuwe request plus
+   de unie van reeds toegelaten requests die door minstens één kandidaat kunnen
+   worden beïnvloed, inclusief conversiequeue-afhankelijkheden. Bepaal die unie
+   eenmaal vóór simulatie; verwijder geen requests per kandidaat. Onafhankelijke
+   requests buiten die unie hebben geen invloed op de vergelijking. Rangschik op hun som van
+   voorspelde consumer-wacht (inclusief dezelfde onzekerheidsmarges).
+   Dit is een expliciete lokale proxy, geen bewijs van minimale totale
+   DAG-latency. Breek gelijke scores met vroegste weight-ready voor het nieuwe
+   request, daarna stabiele drive-ID. Binnen hetzelfde gedeelde knelpunt wint
+   daarmee de laagste voorspelde completiontijd als de overige impact gelijk
+   is; laagste onbelaste drivelatency is niet het selectiecriterium.
+4. Laat alleen nu toe als alle harde resource-/buffergrenzen passen. Past het
+   eerste request nergens of wint uitstel, bekijk volgende wachtende requests
+   op resources die onafhankelijk zijn van alle kandidaatpaden van dat eerste
+   request. Werk nooit buiten de begrensde queue. Na iedere echte toelating
+   begint de beoordeling met een nieuw snapshot. Registreer gemiste deadlines
+   en plan de beste haalbare kandidaat ook wanneer geen enkele op tijd komt.
+5. Herbereken bij enqueue, completion, failure en relevante DAG-readiness.
+   Wacht event-driven; geen pollinglus op voorspelde tijdstippen. Uitstel wordt
+   niet eindeloos herhaald: voor een age-priority request met nu beschikbare
+   capaciteit vervalt de uitstelkandidaat en wint vroegste weight-ready boven
+   de somscore. Bij volledig bezette resources wacht het op echte completion.
+   Een voorspelde completion is nooit een
+   bewijs dat een echte read klaar is of zijn budget vrijgegeven mag worden.
+
+Log per beslissing de snapshot-/profielversie, request/consumer-ID, kandidaten,
+resourcepaden, bezetting vóór/na hypothetische toelating, voorspelde ready en
+need, onzekerheid, impact op bestaande reads, keuze en afwijs-/uitstelreden.
+Koppel later echte dispatch, I/O-completion en weight-ready aan dezelfde ID.
+Shadow mag uitsluitend eigen hypothetische counters aanpassen; bestaande
+readvolgorde, plaatsing, router en compute blijven gelijk. Houd voorspellingen
+naast de werkelijke baseline-observaties, zonder hypothetische completions als
+gemeten data te presenteren. Counterfactual winst blijft een voorspelling.
+
+**7d — Verplichte deterministische fixtures vóór echte integratie**
+
+Gebruik een fake monotone clock, vaste servicecurves en een vaste eventqueue;
+geen sleeps of timingasserties op een echte drive. Bewaar verwachte keuzes,
+completiontijden, counters en besluitredenen als handmatig narekenbare fixtures:
+
+- Twee drives op onafhankelijke resources: A houdt zijn latency bij vier
+  reads, B heeft na één een steile toename. A kan vier toelaten; B wordt niet
+  gelijkmatig volgepland. Met een bezette A kan B toch de beste kandidaat zijn.
+- Vier drives op één controller met een **synthetische** limiet van
+  `500 MiB/s`; iedere drive kan die limiet alleen al verzadigen. Vier gelijktijdige
+  reads leveren samen geen `2000 MiB/s`. Voor gelijke 100 MiB-reads zonder vaste
+  overhead is totale transfertijd voor 400 MiB minstens 0,8 s. Onder gelijke
+  overige impact kiest een nieuwe replicated read de laagste voorspelde
+  weight-ready tijd die de DAG-deadline haalt; extra spreiding creëert geen
+  controllercapaciteit. Voeg een geval toe waarin toelating een kritieke
+  bestaande read vertraagt en uitstel daarom wint.
+- Zes én zeven drives verdeeld over drie controllers, ongelijke groepsgroottes:
+  saturatie van controller 0 beperkt onafhankelijke controllers 1/2 niet.
+  Voeg vervolgens een gedeelde upstream-resource toe die groepen wél koppelt.
+- Lage onbelaste latency maar hoge actuele contention versus een tragere vrije
+  bron; niet-beschikbare replica; geen kandidaat haalt de deadline; stabiele
+  tie-break; age-priority onder aanhoudende nieuwe demand; onbekend profiel.
+- Admission op een vrij drivebudget maar vol controllerbudget wordt geweigerd.
+  Meerdere resourcepaden tellen één gedeelde resource precies één keer.
+  Replay met dezelfde snapshots geeft identieke besluiten. Een completion in
+  de voorspeller verandert nooit echte readiness of echte occupancy.
+
+**Werkpakketten en stopvoorwaarden voor uitvoerders**
+
+Minimale exacte rekenfixtures voor 7c/7d (alle marges, startup en conversie
+zijn nul tenzij vermeld; rates zijn constant; admissionlimieten laten de
+genoemde concurrency toe; `t=0` is het snapshot):
+
+| Fixture | Invoer | Verplichte verwachting |
+|---|---|---|
+| Gedeelde bandwidth | Vier onafhankelijke drives, ieder 500 MiB/s, één controller 500 MiB/s; vier reads van 100 MiB starten tegelijk | Iedere flow krijgt 125 MiB/s; alle vier completen op 0,8 s |
+| Kritieke bestaande read | A heeft nog 100 MiB op controller 500 MiB/s, need=0,2 s; nieuwe B heeft 100 MiB op een andere drive van dezelfde controller, need=1 s | B nu: A/B ready=0,4 s, score=0,2 s. B uitstellen tot A: A ready=0,2 s, B=0,4 s, score=0; kies uitstel |
+| Onafhankelijke replica | Vorige fixture plus B-replica op vrije tweede controller/drive van 500 MiB/s | A en B ready=0,2 s, score=0; kies tweede controller boven uitstel wegens vroegere B-ready |
+| Latency binnen groep | Lege controller 500 MiB/s; één 100 MiB-request, replica X startup=0, Y startup=0,05 s; drives elk 500 MiB/s; need=0,3 s | X ready=0,2 s, Y=0,25 s, beide score=0; kies X |
+
+Leg voor de overige 7d-cases op dezelfde manier concrete curves, need-tijden,
+IDs en exacte verwachtingen vast vóór implementatie van de beslisfunctie.
+
+Voer 7a, 7b, 7c en 7d afzonderlijk uit; per pakket bestanden, commando's,
+fixtures/resultaten en beperkingen opleveren. 7a/7c/7d mogen eerst met
+synthetische profielen worden gebouwd; echte M/P-conclusies vereisen 7b.
+Inventarisatie, parserboilerplate, fixture-uitvoering en rapportextractie zijn
+geschikt voor Luna. Terra mag bounded implementatie doen volgens dit contract.
+Laat de completion-/contentionsemantiek en de uiteindelijke admission/lifetime-
+diff door Sol/high of Astra beoordelen volgens `AGENTS.md`. Een zwakker model
+mag geen ontbrekende concurrencyregel, hardwarecapaciteit of gate-PASS invullen.
+Bij ambiguïteit: lever het concrete falende fixture of ontbrekende contractveld
+aan voor review; implementeer geen eigen vervangende schedulerpolicy.
 
 **Gate 7**
 
 - C: shadow aan/uit geeft dezelfde route, reads, plaatsing en output.
-- M: beslissingen zijn reproduceerbaar en bevatten uitsluitend informatie
-  die op dat moment beschikbaar was. Synthetische tests omvatten een snelle
-  drukke drive, een langzame lege drive en veranderende queuedepth.
-- P: voorspellingsfouten en baselinevergelijking op held-out traces; uitsluitend
-  als voorspelling rapporteren. Zonder zinvolle kalibratie geen actieve planner.
+- M: alle fixtures van 7d slagen; besluiten gebruiken uitsluitend toen bekende
+  informatie. Echte integratietraces tonen drive- én gedeelde-resourcebelasting,
+  downstream consumer-need en voorspelde versus echte weight-ready tijden.
+- P: rapporteer ready-time-fout, deadline-misses en baselinevergelijking op
+  held-out prompts/loadklassen, uitgesplitst naar drive en controllergroep.
+  Leg acceptabele voorspellingsfout en onzekerheidsdekking vóór evaluatie vast.
+  Niet aanwezige zes-/zevendrivehardware blijft `NOT_RUN`; fixtures bewijzen
+  mechanisme, geen hardwarewinst. Zonder zinvolle kalibratie geen actieve planner.
 
 ## Stap 8 — begrensde actieve I/O- en residentieplanning
 
@@ -466,8 +813,15 @@ Splits deze stap in drie afzonderlijke gateverslagen:
 
 - **8a bronkeuze:** vaste residentie, geen nieuwe prefetch; vergelijk
   voorspelde completions van equivalente kopieën, niet vaste bytepercentages.
+  Gebruik het topologie-/contentioncontract van 7a–7d. Bronkeuze omvat nu
+  expliciet toelating en eventueel uitstel op drive én gedeelde resources.
 - **8b prefetch:** begrens bytes en in-flight requests; reserveer ruimte voor
   demand. Promoveer bestaande prefetch naar demand zonder dubbele load.
+  Prefetch gebruikt dezelfde controller-/upstreambudgetten als demand; een
+  apart prefetchbudget creëert geen extra bandwidth. Configureer demandreserve
+  per gedeelde resource en laat prefetch alleen toe als voorspelde demand-wacht
+  niet stijgt. Annuleer eerst nog niet gestarte prefetch; een al lopende read
+  houdt zijn echte capaciteit bezet tot completion, ook na demandpromotie.
 - **8c residentie:** optimaliseer verwachte kritieke-padwinst per byte, inclusief
   verplaatsingskosten. Begin binnen bestaande slot-/laaggrenzen. Een globaal
   variabel cachebudget vereist een afzonderlijke audit van alle ecap/ecache-
@@ -479,11 +833,54 @@ generaties. Integreer met bestaande pilot/cache-indexering of verklaar die
 combinatie expliciet unsupported. Annuleren van een al gestarte read geeft
 zijn buffer niet vrij voordat completion vaststaat.
 
+**Admission- en lifetimecontract voor 8a/8b**
+
+- Eén dispatcher bezit de echte resourcecounters en voert alle beslissingen
+  uit. Workers melden completion via de bestaande gesynchroniseerde route;
+  zij wijzigen geen plannerbudgetten. Geen extra lock-free scheduler bouwen.
+- Toelating reserveert drive, alle gedeelde resources en destinationbuffer
+  als één dispatchertransactie: alles of niets, vóór publicatie aan I/O.
+  Houd in-flight requests én bytes bij; bandwidthcontrole komt daarnaast uit
+  het gekalibreerde service-/contentionmodel, niet uit alleen een bytelimiet.
+- Statepad: `QUEUED -> RESERVED -> ISSUED -> COMPLETED/FAILED -> RETIRED`.
+  Een submitfout mag alleen terugrollen als vaststaat dat niets is uitgegeven;
+  bij gedeeltelijke uitgifte eerst alle uitgegeven delen draineren. Het hele
+  request blijft daarvoor `ISSUED` met een teller van uitgegeven delen en houdt
+  conservatief zijn volledige reservering tot alle delen terminal zijn.
+  `QUEUED -> CANCELLED -> RETIRED` heeft geen I/O-reservering vrij te geven.
+  `RESERVED -> CANCELLED/FAILED -> RETIRED` geeft de ongebruikte reservering
+  precies eenmaal vrij in de dispatcher, zonder op een I/O-event te wachten.
+  Na issue is annulering alleen een cancel-pending mark; release gebeurt dan
+  precies eenmaal bij de laatste echte terminale I/O-completion. Een per-request
+  release-marker voorkomt dubbele cleanup, ook bij submitfout plus reset.
+- I/O-resourcebudget en weightbufferlease hebben verschillende eindpunten:
+  na I/O-completion kan transfercapaciteit vrij zijn, maar conversie/compute
+  mag zijn buffer nog bezitten. Publiceer weight-ready pas na verwerking;
+  hergebruik de buffer pas nadat alle consumers zijn geretireerd. Bij failure
+  of cancel zonder consumers: geef de buffer vrij zodra geen I/O-deel of
+  conversietaak hem nog bezit; publiceer nooit een gedeeltelijk weight-resultaat.
+- Duplicate/stale completion wijzigt geen counters of readiness. Bind release
+  aan request-ID én generatie, nooit alleen drive, expert-ID of slotpointer.
+  Reset/shutdown stopt nieuwe toelating, annuleert queued requests, rolt alle
+  unissued reserved requests terug en draint issued reads plus verwerking en
+  consumers vóór topologywissel of bufferhergebruik.
+- De eerste actieve integratie blijft binnen de bestaande ondersteunde PIPE-
+  generatie. Als een bron geen bekende mapping/profiel heeft, kies fallback
+  vóór publicatie; draai nooit tegelijk twee onafhankelijke admissionplanners
+  voor dezelfde reads. Iedere andere producer op een gedeelde resource moet
+  worden meegerekend of expliciet buiten de geteste scope blijven.
+
 **Gate 8a/b/c, telkens opnieuw**
 
 - C: gelijke numerieke output, correct eigenaarschap, budgetgrenzen en
   deduplicatie. Test volle queue, volle cache, foutieve voorspelling, stale
   completion en uitgevallen bron; demand mag niet verhongeren.
+- C/M: herhaal 7d tegen de echte admissionadapter met fake I/O-completions.
+  Forceer gedeelde-resource-uitputting, submitfout/partiële uitgifte, cancel
+  vóór/na issue, dubbele completion, demandpromotie en reset tijdens reads.
+  Assert geen overboeking, negatieve counters, dubbele release of vroegtijdig
+  bufferhergebruik; na drain zijn alle reserveringen nul. Controleer dat een
+  verzadigde groep onafhankelijke groepen niet onbedoeld blokkeert.
 - M: heldere beslistraces en geobserveerde completions. Geen evictie van
   in-use weights; geen onzichtbare backlog na reset of prompt-einde.
 - P: held-out echte runs tonen lagere tokenlatency of felt wait zonder
