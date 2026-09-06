@@ -244,7 +244,13 @@ itself (`test_i4_grouped.c:331`), while Clang again reported only libomp's
 internal mutex initialization. This confirms that the remaining grouped-int4
 reports are OpenMP/TSan runtime instrumentation boundaries rather than new
 engine data races; they remain unclassified rather than suppressed or counted
-as a pass.
+as a pass. A final warm-up attempt (`34041822276`) also initialized one real
+task/taskwait before the check; Clang then reported the shared-pointer read at
+the test-only parallel dispatch (`test_i4_grouped.c:334`) and GCC reported the
+parallel directive itself (`test_i4_grouped.c:331`). Both reports are stack
+environment accesses with no application payload address. The bounded DAG
+Helgrind job remains clean, and no additional engine synchronization is
+warranted from these runtime reports.
 
 ## Current gate record
 
