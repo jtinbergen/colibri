@@ -198,7 +198,7 @@ for PIPE and grouped-int4. A follow-up audit also removed an unnecessary
 non-atomic `g_pp.m` rewrite from every PIPE dispatch; the focused Windows suite
 remains green after that change.
 
-The next validation attempt adds a second Linux TSan job using GCC/libgomp.
+The next validation attempt added a second Linux TSan job using GCC/libgomp.
 This is intentionally an evidence-gathering route, not a suppression: if
 GCC/libgomp reaches grouped-int4 cleanly, it can separate the current Clang/
 libomp bootstrap report from executor behavior; if it reports an application
@@ -225,6 +225,13 @@ be rerun once more. The latest report then came from the test-only OpenMP
 sections capture itself (`test_i4_grouped.c:326`), so the harness now uses
 thread-id dispatch inside a plain parallel region rather than sections. This
 preserves two-expert overlap while removing that extra libgomp task environment.
+On the resulting run (`34041156386`), GCC/libgomp passed `test_m3_dag` and
+`test_pipe_block`, then reported the same stack-backed OpenMP-region race at
+`tests/test_i4_grouped.c:326/329`. The report has no engine data address or
+engine stack frame; it is treated as a GCC/libgomp+TSan instrumentation
+boundary, not as evidence for another engine fix. The GCC job remains visible
+but is informational (`continue-on-error`) until a compatible OpenMP/TSan
+combination can classify grouped-int4.
 
 ## Current gate record
 
@@ -232,8 +239,11 @@ preserves two-expert overlap while removing that extra libgomp task environment.
   worker counts 1/2/4/10, both real grouped-int4 configurations, and the real
   post-publication failure/drain path preserve the established outputs and
   release ownership safely under the normal build and ASan+UBSan. The required
-  TSan race checker passes the bounded DAG and PIPE paths; grouped-int4 remains
-  unclassified because the hosted libomp runtime races during initialization.
+  TSan race checker passes the bounded DAG and PIPE paths in both the Clang/
+  libomp and GCC/libgomp routes. Grouped-int4 remains unclassified because
+  Clang/libomp races during runtime mutex initialization and GCC/libgomp races
+  in the test-only OpenMP stack environment before it can provide a trustworthy
+  grouped-int4 result.
 - **M: PASS within the supported opt-in scope.** The final trace proves
   overlap, phase ordering, private-task ownership, zero drops, and OpenMP
   level 1; focused tests cover failure-state transitions, shape/bounds
