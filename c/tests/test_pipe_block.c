@@ -299,13 +299,13 @@ static void hold_dispatcher_readiness_for_failure(M3DagExecutionContext *ctx,int
     if(!l || q!=1) return;
     atomic_store_explicit(&l->dispatcher_entered,1,memory_order_release);
     int saw_start=0, saw_failure=0;
-    for(int i=0;i<2000000;i++){
+    for(int i=0;i<200000;i++){
         if(atomic_load_explicit(&l->failing_worker_started,memory_order_acquire)) saw_start=1;
         if(m3_dag_context_failed(ctx)){ saw_failure=1; break; }
         sched_yield();
     }
     atomic_store_explicit(&l->release_failure,1,memory_order_release);
-    for(int i=0;i<2000000 && !saw_failure;i++){
+    for(int i=0;i<200000 && !saw_failure;i++){
         if(m3_dag_context_failed(ctx)){ saw_failure=1; break; }
         sched_yield();
     }
@@ -368,6 +368,12 @@ static int test_scheduler_failure_drain(Model *m,int parallel){
 }
 
 static int test_production_dispatcher_failure_readiness(Model *m){
+#ifdef _OPENMP
+    if(omp_get_max_threads()<2){
+        puts("  production dispatcher interleave skipped (OpenMP team < 2)");
+        return 0;
+    }
+#endif
     Layer l={0}; float x[4]={1,2,3,4}, out[4]={0};
     const float untouched[4]={0}; float dummy[4]={0};
     int pre_idx[2]={0,1}, pre_keff[1]={2}; float pre_w[2]={.5f,.5f};
@@ -383,7 +389,9 @@ static int test_production_dispatcher_failure_readiness(Model *m){
         if(!m->eheat||!m->elast||!m->eroute||!m->enr) return fail("dispatcher fixture bookkeeping");
         for(int i=0;i<2;i++){ m->eheat[i]=calloc(2,sizeof(**m->eheat)); m->elast[i]=calloc(2,sizeof(**m->elast)); m->eroute[i]=calloc(2,sizeof(**m->eroute)); }
     }
-    g_pipe=1; g_pipe_nw=4; g_m3_dag_serial=1; g_m3_dag_parallel=1; g_m3_dag_pipe_ready=1;
+    int old_dag_workers=g_m3_dag_workers;
+    g_pipe=1; g_pipe_nw=4; g_m3_dag_workers=2;
+    g_m3_dag_serial=1; g_m3_dag_parallel=1; g_m3_dag_pipe_ready=1;
     g_pre_idx=pre_idx; g_pre_w=pre_w; g_pre_keff=pre_keff;
     g_dispatcher_failure_latch=&dl;
     g_pipe_test_after_load=force_grouped_slot;
@@ -401,7 +409,7 @@ static int test_production_dispatcher_failure_readiness(Model *m){
     g_pipe_test_m3_started=NULL; g_pipe_test_m3_release=NULL;
     g_pipe_test_before_m3_ready=NULL; g_pipe_test_after_m3_ready=NULL;
     g_pipe_test_after_load=NULL; g_pipe_test_abort=0;
-    g_m3_dag_serial=0; g_m3_dag_parallel=0; g_m3_dag_pipe_ready=0;
+    g_m3_dag_serial=0; g_m3_dag_parallel=0; g_m3_dag_pipe_ready=0; g_m3_dag_workers=old_dag_workers;
     if(!atomic_load_explicit(&dl.dispatcher_entered,memory_order_acquire) ||
        !atomic_load_explicit(&dl.failing_worker_started,memory_order_acquire) ||
        !atomic_load_explicit(&dl.failure_published,memory_order_acquire) ||
