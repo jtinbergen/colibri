@@ -166,7 +166,11 @@ mutex initialization report, with no application frame; the TSan target now
 runs the production-style PIPE drain test before that check so its result is
 still independently observable. TSan remains **NOT_RUN for the executor
 claim** until an OpenMP-compatible race runtime produces clean application
-evidence.
+evidence. The sixth run (`34036507641`) then identified a real shared lazy-init
+race in `g_planar` (`planar_on`, `colibri.c:1234/1238`) between PIPE workers.
+The current branch fixes that publication with atomic compare-exchange
+initialization and applies the same protection to `g_idot_gs`; the normal
+Windows focused suite remains green.
 
 ## Current gate record
 
