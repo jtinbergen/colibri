@@ -12,6 +12,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdatomic.h>
 
 typedef enum {
     M3_DAG_WEIGHT_ABSENT = 0,
@@ -47,8 +48,12 @@ typedef struct {
 typedef struct {
     M3DagIdentity id;
     size_t resident_budget;
-    int cancelled;
-    int failed;
+    /* These flags are published by compute tasks and read by the producer.
+     * Keep every access atomic: an acquire check before a later readiness
+     * predicate does not protect that later read from a concurrent failure
+     * publication. */
+    _Atomic int cancelled;
+    _Atomic int failed;
 } M3DagExecutionContext;
 
 typedef struct {
@@ -112,8 +117,13 @@ static inline int m3_dag_weights_fail(M3DagExpertTask *task){
     if(task->weight_state!=M3_DAG_WEIGHT_LOADING && task->weight_state!=M3_DAG_WEIGHT_QUEUED) return 0;
     task->weight_state=M3_DAG_WEIGHT_FAILED; task->compute_state=M3_DAG_COMPUTE_FAILED; return 1;
 }
+static inline int m3_dag_context_failed(const M3DagExecutionContext *ctx);
+static inline int m3_dag_context_cancelled(const M3DagExecutionContext *ctx);
+static inline void m3_dag_context_fail(M3DagExecutionContext *ctx);
+static inline void m3_dag_context_cancel(M3DagExecutionContext *ctx);
 static inline int m3_dag_task_ready(M3DagExecutionContext *ctx, M3DagExpertTask *task){
-    if(!ctx || !task || ctx->cancelled || ctx->failed || !m3_dag_identity_equal(ctx->id,task->id) ||
+    if(!ctx || !task || m3_dag_context_cancelled(ctx) || m3_dag_context_failed(ctx) ||
+       !m3_dag_identity_equal(ctx->id,task->id) ||
        !task->input_ready || !task->input || task->weight_state!=M3_DAG_WEIGHT_RESIDENT ||
        !task->weight_handle || task->compute_state!=M3_DAG_COMPUTE_WAITING) return 0;
     if(task->kind==M3_DAG_ROUTED && (!task->route_committed || task->route_index<0)) return 0;
@@ -128,25 +138,25 @@ static inline int m3_dag_serial_execute(M3DagExecutionContext *ctx, M3DagExpertT
                                         const M3DagSerialOps *ops){
     if(!ctx || !task || !ops || !ops->run || !ops->commit ||
        !m3_dag_identity_equal(ctx->id,task->id)) return 0;
-    if(ctx->failed || task->compute_state==M3_DAG_COMPUTE_COMPLETE ||
+    if(m3_dag_context_failed(ctx) || task->compute_state==M3_DAG_COMPUTE_COMPLETE ||
        task->compute_state==M3_DAG_COMPUTE_FAILED || task->compute_state==M3_DAG_COMPUTE_CANCELLED) return 0;
-    if(ctx->cancelled){
+    if(m3_dag_context_cancelled(ctx)){
         if(task->compute_state==M3_DAG_COMPUTE_WAITING || task->compute_state==M3_DAG_COMPUTE_READY)
             task->compute_state=M3_DAG_COMPUTE_CANCELLED;
         return 0;
     }
     if(task->compute_state!=M3_DAG_COMPUTE_READY || task->weight_lease || task->output_committed) return 0;
-    if(ops->acquire && !ops->acquire(ops->opaque,task)){ ctx->failed=1; task->compute_state=M3_DAG_COMPUTE_FAILED; return 0; }
+    if(ops->acquire && !ops->acquire(ops->opaque,task)){ m3_dag_context_fail(ctx); task->compute_state=M3_DAG_COMPUTE_FAILED; return 0; }
     task->weight_lease=1;
     task->compute_state=M3_DAG_COMPUTE_RUNNING;
     if(!ops->run(ops->opaque,task)){
-        ctx->failed=1; task->compute_state=M3_DAG_COMPUTE_FAILED;
+        m3_dag_context_fail(ctx); task->compute_state=M3_DAG_COMPUTE_FAILED;
         task->weight_lease=0; if(ops->release) ops->release(ops->opaque,task); return 0;
     }
     task->compute_state=M3_DAG_COMPUTE_COMPLETE;
-    if(ctx->cancelled || !ops->commit(ops->opaque,task)){
-        if(!ctx->cancelled) ctx->failed=1;
-        task->compute_state=ctx->cancelled?M3_DAG_COMPUTE_CANCELLED:M3_DAG_COMPUTE_FAILED;
+    if(m3_dag_context_cancelled(ctx) || !ops->commit(ops->opaque,task)){
+        if(!m3_dag_context_cancelled(ctx)) m3_dag_context_fail(ctx);
+        task->compute_state=m3_dag_context_cancelled(ctx)?M3_DAG_COMPUTE_CANCELLED:M3_DAG_COMPUTE_FAILED;
         task->weight_lease=0; if(ops->release) ops->release(ops->opaque,task); return 0;
     }
     task->output_committed=1;
@@ -165,16 +175,16 @@ static inline int m3_dag_parallel_submit(M3DagExpertTask *task){
     task->compute_state=M3_DAG_COMPUTE_SUBMITTED; return 1;
 }
 static inline int m3_dag_context_failed(const M3DagExecutionContext *ctx){
-    return ctx && __atomic_load_n(&ctx->failed,__ATOMIC_ACQUIRE);
+    return ctx && atomic_load_explicit(&ctx->failed,memory_order_acquire);
 }
 static inline int m3_dag_context_cancelled(const M3DagExecutionContext *ctx){
-    return ctx && __atomic_load_n(&ctx->cancelled,__ATOMIC_ACQUIRE);
+    return ctx && atomic_load_explicit(&ctx->cancelled,memory_order_acquire);
 }
 static inline void m3_dag_context_fail(M3DagExecutionContext *ctx){
-    if(ctx) __atomic_store_n(&ctx->failed,1,__ATOMIC_RELEASE);
+    if(ctx) atomic_store_explicit(&ctx->failed,1,memory_order_release);
 }
 static inline void m3_dag_context_cancel(M3DagExecutionContext *ctx){
-    if(ctx) __atomic_store_n(&ctx->cancelled,1,__ATOMIC_RELEASE);
+    if(ctx) atomic_store_explicit(&ctx->cancelled,1,memory_order_release);
 }
 static inline int m3_dag_parallel_start(M3DagExpertTask *task){
     if(!task || task->compute_state!=M3_DAG_COMPUTE_SUBMITTED) return 0;

@@ -5979,6 +5979,23 @@ typedef struct {
 } M3DagParallelBlock;
 
 static int m3_parallel_size_ok(size_t n,size_t elem){ return elem && n<=SIZE_MAX/elem; }
+#if defined(COLI_PIPE_TEST) || defined(COLI_M3_DAG_TEST_HOOKS)
+/* Deterministic allocation-failure seam for the lifecycle harness.  Production
+ * uses plain calloc; the seam lets the test fail each owned allocation in
+ * turn and verify the partial-cleanup path without relying on machine memory
+ * pressure. */
+static _Atomic int g_m3_dag_test_alloc_fail_after=-1;
+static void *m3_dag_test_calloc(size_t n,size_t size){
+    int left=atomic_load_explicit(&g_m3_dag_test_alloc_fail_after,memory_order_relaxed);
+    if(left>=0){
+        if(left==0) return NULL;
+        atomic_fetch_sub_explicit(&g_m3_dag_test_alloc_fail_after,1,memory_order_relaxed);
+    }
+    return calloc(n,size);
+}
+#else
+static void *m3_dag_test_calloc(size_t n,size_t size){ return calloc(n,size); }
+#endif
 static M3DagParallelBlock *m3_dag_parallel_preflight(int n,int D,int I,int with_shared,int sharedI){
 #ifndef _OPENMP
     (void)n;(void)D;(void)I;(void)with_shared;(void)sharedI; return NULL;
@@ -5988,21 +6005,21 @@ static M3DagParallelBlock *m3_dag_parallel_preflight(int n,int D,int I,int with_
     size_t ni=(size_t)n*(size_t)I, nd=(size_t)n*(size_t)D;
     if(!m3_parallel_size_ok(ni,sizeof(float)) || !m3_parallel_size_ok(nd,sizeof(float)) ||
        ni>PTRDIFF_MAX/sizeof(float) || nd>PTRDIFF_MAX/sizeof(float)) return NULL;
-    M3DagParallelBlock *b=calloc(1,sizeof(*b));
+    M3DagParallelBlock *b=m3_dag_test_calloc(1,sizeof(*b));
     if(!b) return NULL;
     b->n=n; b->D=D; b->I=I; b->sharedI=sharedI;
-    b->expert=calloc((size_t)n,sizeof(*b->expert));
-    b->gate_arena=calloc((size_t)n*(size_t)I,sizeof(float));
-    b->up_arena=calloc((size_t)n*(size_t)I,sizeof(float));
-    b->output_arena=calloc((size_t)n*(size_t)D,sizeof(float));
+    b->expert=m3_dag_test_calloc((size_t)n,sizeof(*b->expert));
+    b->gate_arena=m3_dag_test_calloc((size_t)n*(size_t)I,sizeof(float));
+    b->up_arena=m3_dag_test_calloc((size_t)n*(size_t)I,sizeof(float));
+    b->output_arena=m3_dag_test_calloc((size_t)n*(size_t)D,sizeof(float));
     if(with_shared){
-        b->shared_output=calloc((size_t)D,sizeof(float));
+        b->shared_output=m3_dag_test_calloc((size_t)D,sizeof(float));
         if(sharedI<=0 || !m3_parallel_size_ok((size_t)sharedI,sizeof(float)) ||
            (size_t)sharedI>PTRDIFF_MAX/sizeof(float)){
             free(b->shared_output); free(b->output_arena); free(b->up_arena); free(b->gate_arena); free(b->expert); free(b); return NULL;
         }
-        b->shared_gate=calloc((size_t)sharedI,sizeof(float));
-        b->shared_up=calloc((size_t)sharedI,sizeof(float));
+        b->shared_gate=m3_dag_test_calloc((size_t)sharedI,sizeof(float));
+        b->shared_up=m3_dag_test_calloc((size_t)sharedI,sizeof(float));
     }
     if(!b->expert||!b->gate_arena||!b->up_arena||!b->output_arena||
        (with_shared&&(!b->shared_output||!b->shared_gate||!b->shared_up))){

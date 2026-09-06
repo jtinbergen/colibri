@@ -17,6 +17,7 @@
  * rather than bit-exactly. The tolerance is tight enough that a wrong scale
  * index, a wrong group boundary or a swapped nibble cannot hide under it —
  * those are O(1) relative errors, not O(1e-6). */
+#define COLI_M3_DAG_TEST_HOOKS
 #define main coli_glm_main_unused
 #include "../colibri.c"
 #undef main
@@ -364,6 +365,25 @@ static int check_parallel_resource_guard(void){
         fprintf(stderr,"parallel preflight accepted an overflowing resource request\n"); return 1;
     }
     puts("  parallel preflight rejects overflowing resource request");
+#ifdef COLI_M3_DAG_TEST_HOOKS
+    /* Exercise every owned calloc failure point, including partial cleanup.
+     * This is deterministic and does not depend on exhausting the host. */
+    for(int fail_after=0;fail_after<7;fail_after++){
+        atomic_store_explicit(&g_m3_dag_test_alloc_fail_after,fail_after,memory_order_relaxed);
+        M3DagParallelBlock *b=m3_dag_parallel_preflight(2,5,7,1,3);
+        if(b){
+            m3_dag_parallel_free(b);
+            atomic_store_explicit(&g_m3_dag_test_alloc_fail_after,-1,memory_order_relaxed);
+            fprintf(stderr,"parallel preflight ignored injected allocation failure %d\n",fail_after);
+            return 1;
+        }
+    }
+    atomic_store_explicit(&g_m3_dag_test_alloc_fail_after,-1,memory_order_relaxed);
+    M3DagParallelBlock *ok=m3_dag_parallel_preflight(2,5,7,1,3);
+    if(!ok){ fprintf(stderr,"parallel preflight rejected valid allocation after failure sweep\n"); return 1; }
+    m3_dag_parallel_free(ok);
+    puts("  parallel preflight cleans up every injected allocation failure");
+#endif
 #endif
     return 0;
 }
