@@ -69,6 +69,13 @@ typedef struct { pthread_mutex_t lock; pthread_cond_t cv; int ready,go; } M3RunS
 typedef struct { const M3I4ExpertContext *context; M3I4ExpertScratch *scratch;
                  float *output; M3RunStart *start; int ok; } M3RunJob;
 
+/* Keep the OpenMP harness fan-out pointer out of the caller's stack frame.
+ * The hosted TSan/libomp combination has repeatedly attributed its team
+ * bootstrap copy of a shared local pointer to the test region itself.  An
+ * atomic publication gives the harness an explicit lifetime edge and leaves
+ * no test-local shared pointer for the compiler-generated team environment. */
+static _Atomic(M3DagParallelExpert *) g_test_step6_jobs;
+
 static void m3_fill_canary(float *p,int n,float value){
     for(int i=0;i<M3C_CAN;i++){ p[i]=value; p[M3C_CAN+n+i]=value; }
 }
@@ -328,11 +335,14 @@ static int check_parallel_task_group(int unfused){
      * The executor under test still creates its real bounded taskgroups; this
      * avoids a second test-only sections/task-capture environment in GCC's
      * libgomp TSan path. */
-    #pragma omp parallel num_threads(2) default(none) shared(jobs)
+    atomic_store_explicit(&g_test_step6_jobs,jobs,memory_order_release);
+    #pragma omp parallel num_threads(2) default(none) shared(g_test_step6_jobs)
     {
         int worker=omp_get_thread_num();
-        jobs[worker].ok=m3_dag_parallel_expert_run(&jobs[worker]);
+        M3DagParallelExpert *local_jobs=atomic_load_explicit(&g_test_step6_jobs,memory_order_acquire);
+        if(local_jobs) local_jobs[worker].ok=m3_dag_parallel_expert_run(&local_jobs[worker]);
     }
+    atomic_store_explicit(&g_test_step6_jobs,NULL,memory_order_release);
     g_no_fused_pair=old_pair;
     int ok=atomic_load(&pa->ok)&&atomic_load(&pb->ok);
     int mismatch=!ok||memcmp(pa->output,ar,sizeof(ar))||memcmp(pb->output,br,sizeof(br))||
