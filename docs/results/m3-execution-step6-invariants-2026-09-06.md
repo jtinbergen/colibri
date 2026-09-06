@@ -210,7 +210,11 @@ those private pointers/scalars; the Windows focused suite is green and a fresh
 GCC/libgomp run is required to verify the repair. That run then exposed a
 second application race on the mutable `g_no_fused_pair` global; the executor
 now snapshots that mode before task creation as well, with the focused Windows
-suite still green.
+suite still green. The next GCC/libgomp report moved again to the taskgroup
+boundary (`act_glu_range`, `colibri.c:6089`) and its libgomp-created task
+environment, so the taskgroup loops now use explicit compound blocks to make
+their synchronization/lifetime boundary unambiguous. The focused Windows suite
+remains green; this needs one final GCC/libgomp verification.
 
 ## Current gate record
 
