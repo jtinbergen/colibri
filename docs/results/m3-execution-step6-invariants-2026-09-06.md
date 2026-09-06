@@ -170,7 +170,12 @@ evidence. The sixth run (`34036507641`) then identified a real shared lazy-init
 race in `g_planar` (`planar_on`, `colibri.c:1234/1238`) between PIPE workers.
 The current branch fixes that publication with atomic compare-exchange
 initialization and applies the same protection to `g_idot_gs`; the normal
-Windows focused suite remains green.
+Windows focused suite remains green. In the seventh run (`34037245091`),
+`test_m3_dag` and `test_pipe_block` both passed under Clang/TSan; only the
+first OpenMP bootstrap in the grouped-int4 harness reported a `libomp` mutex
+race. The harness now performs a completed two-thread warm-up before the
+Step-6 checks, so the next run can distinguish that bootstrap artifact from
+executor activity.
 
 ## Current gate record
 
