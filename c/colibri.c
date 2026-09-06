@@ -5963,7 +5963,7 @@ typedef struct {
     M3I4ExpertScratch scratch;
     float *output;
     ESlot *slot;
-    int eid,route,layer,tiles,shared;
+    int eid,route,layer,tiles,shared,use_fused_pair;
     size_t output_n;
     uint64_t generation;
     double elapsed;
@@ -6010,6 +6010,7 @@ static M3DagParallelBlock *m3_dag_parallel_preflight(int n,int D,int I,int with_
         free(b->gate_arena); free(b->expert); free(b); return NULL;
     }
     for(int i=0;i<n;i++){
+        b->expert[i].use_fused_pair=!g_no_fused_pair;
         b->expert[i].scratch.gate=b->gate_arena+(int64_t)i*I;
         b->expert[i].scratch.up=b->up_arena+(int64_t)i*I;
         b->expert[i].scratch.gate_n=b->expert[i].scratch.up_n=(size_t)I;
@@ -6054,7 +6055,7 @@ static int m3_dag_parallel_expert_run(M3DagParallelExpert *e){
     const float *input=c.input, *gate_s=c.gate.s, *up_s=c.up.s, *down_s=c.down.s;
     const uint8_t *gate_q4=c.gate.q4, *up_q4=c.up.q4, *down_q4=c.down.q4;
     int gate_I=c.gate.I, gate_O=c.gate.O, down_I=c.down.I, down_O=c.down.O;
-    int use_fused_pair=!g_no_fused_pair;
+    int use_fused_pair=e->use_fused_pair;
     int swigluoai=c.swigluoai;
     float alpha=c.alpha, limit=c.limit;
     int go=gate_O, no=down_O;
@@ -7164,6 +7165,7 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out, int 
             if(have_shared){
                 shared_e.layer=layer; shared_e.eid=-1; shared_e.route=-1;
                 shared_e.generation=dctx.id.generation; shared_e.shared=1; shared_e.tiles=tile_count;
+                shared_e.use_fused_pair=!g_no_fused_pair;
                 shared_e.output=m3p->shared_output;
                 shared_e.scratch.gate=m3p->shared_gate; shared_e.scratch.up=m3p->shared_up;
                 shared_e.scratch.gate_n=shared_e.scratch.up_n=(size_t)c->shared_inter;

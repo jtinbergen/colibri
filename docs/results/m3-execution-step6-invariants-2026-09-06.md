@@ -214,7 +214,10 @@ suite still green. The next GCC/libgomp report moved again to the taskgroup
 boundary (`act_glu_range`, `colibri.c:6089`) and its libgomp-created task
 environment, so the taskgroup loops now use explicit compound blocks to make
 their synchronization/lifetime boundary unambiguous. The focused Windows suite
-remains green; this needs one final GCC/libgomp verification.
+remains green. The following report showed that the remaining global read was
+at expert-entry itself; the parallel record now carries an immutable
+`use_fused_pair` snapshot, so parallel execution no longer reads the mutable
+global configuration. Another GCC/libgomp verification is required.
 
 ## Current gate record
 

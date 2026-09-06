@@ -316,8 +316,8 @@ static int check_parallel_task_group(int unfused){
     int old_pair=g_no_fused_pair; g_no_fused_pair=unfused;
     if(!m3_i4_expert_run(&a.context,&asr,ar)||!m3_i4_expert_run(&b.context,&bsr,br)){ g_no_fused_pair=old_pair; return 1; }
     M3DagParallelExpert pa={0},pb={0};
-    pa.c=a.context; pa.scratch=a.scratch; pa.output=a.output_store+M3C_CAN; pa.output_n=M3C_D; pa.eid=11; pa.route=0; pa.tiles=2; pa.layer=1; pa.generation=1;
-    pb.c=b.context; pb.scratch=b.scratch; pb.output=b.output_store+M3C_CAN; pb.output_n=M3C_D; pb.eid=12; pb.route=1; pb.tiles=2; pb.layer=1; pb.generation=1;
+    pa.c=a.context; pa.scratch=a.scratch; pa.output=a.output_store+M3C_CAN; pa.output_n=M3C_D; pa.eid=11; pa.route=0; pa.tiles=2; pa.layer=1; pa.generation=1; pa.use_fused_pair=!unfused;
+    pb.c=b.context; pb.scratch=b.scratch; pb.output=b.output_store+M3C_CAN; pb.output_n=M3C_D; pb.eid=12; pb.route=1; pb.tiles=2; pb.layer=1; pb.generation=1; pb.use_fused_pair=!unfused;
     /* Use sections for this harness-level fan-out.  The executor under test
      * still creates its real bounded taskgroups; avoiding a second test-only
      * task-capture layer keeps TSan focused on those groups rather than on the
