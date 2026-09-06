@@ -6054,6 +6054,7 @@ static int m3_dag_parallel_expert_run(M3DagParallelExpert *e){
     const float *input=c.input, *gate_s=c.gate.s, *up_s=c.up.s, *down_s=c.down.s;
     const uint8_t *gate_q4=c.gate.q4, *up_q4=c.up.q4, *down_q4=c.down.q4;
     int gate_I=c.gate.I, gate_O=c.gate.O, down_I=c.down.I, down_O=c.down.O;
+    int use_fused_pair=!g_no_fused_pair;
     int swigluoai=c.swigluoai;
     float alpha=c.alpha, limit=c.limit;
     int go=gate_O, no=down_O;
@@ -6062,7 +6063,7 @@ static int m3_dag_parallel_expert_run(M3DagParallelExpert *e){
     trace_emit(TR_TEAM_LEVEL,e->layer,e->eid,(int)e->generation,omp_get_level());
     trace_emit(TR_EXPERT_START,e->layer,e->eid,(int)e->generation,e->route);
     trace_emit(TR_COMPUTE_START,e->layer,e->eid,(int)e->generation,e->route);
-    if(!g_no_fused_pair){
+    if(use_fused_pair){
         #pragma omp taskgroup
         for(int lo=0;lo<go;lo+=gt){
             int hi=lo+gt; if(hi>go) hi=go;

@@ -207,7 +207,10 @@ an application-visible task-capture conflict at `m3_dag_parallel_expert_run`
 (`colibri.c:6076`) while the two expert sections entered concurrently. The
 executor now snapshots all task inputs before task creation and captures only
 those private pointers/scalars; the Windows focused suite is green and a fresh
-GCC/libgomp run is required to verify the repair.
+GCC/libgomp run is required to verify the repair. That run then exposed a
+second application race on the mutable `g_no_fused_pair` global; the executor
+now snapshots that mode before task creation as well, with the focused Windows
+suite still green.
 
 ## Current gate record
 
