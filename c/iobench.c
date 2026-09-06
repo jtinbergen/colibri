@@ -19,6 +19,9 @@
 #include <omp.h>
 #endif
 static double now(){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return t.tv_sec+t.tv_nsec*1e-9; }
+static int cmp_double(const void *a,const void *b){
+    double x=*(const double*)a,y=*(const double*)b; return (x>y)-(x<y);
+}
 /* Un fd PER THREAD, non uno condiviso. Su Windows compat_open_direct() apre un
  * handle SINCRONO (FILE_FLAG_NO_BUFFERING senza FILE_FLAG_OVERLAPPED), e ReadFile
  * su un handle sincrono viene serializzato dal lock dell'oggetto file: con un fd
@@ -68,6 +71,8 @@ int main(int argc,char**argv){
     off_t *offs=malloc(n*sizeof(off_t)); srand(1234);
     for(int i=0;i<n;i++){ off_t r30=((off_t)rand()<<15)|rand(); off_t o=(r30*4096)%(sz-blk); offs[i]=o&~4095L; }
     double t0=now(); int64_t tot=0;   /* long e' 32-bit su Windows (LLP64): >2GB andava in overflow */
+    double *lat=malloc((size_t)n*sizeof(*lat));
+    if(!lat){perror("latency alloc");return 1;}
     #pragma omp parallel num_threads(nth) reduction(+:tot)
     {
         void *buf; if(posix_memalign(&buf,4096,blk)){perror("memalign");exit(1);}
@@ -75,14 +80,21 @@ int main(int argc,char**argv){
         if(tfd<0){perror("open");exit(1);}
         #pragma omp for schedule(dynamic,1)
         for(int i=0;i<n;i++){
+            double r0=now();
             ssize_t r=pread(tfd,buf,blk,offs[i]);
+            lat[i]=(now()-r0)*1000.0;
             if(r<0) perror("pread"); else tot+=r;
         }
         close(tfd);
         compat_aligned_free(buf);   /* su Windows posix_memalign=_aligned_malloc: free() corrompe l'heap */
     }
     double dt=now()-t0;
+    qsort(lat,(size_t)n,sizeof(*lat),cmp_double);
+    double avg=0; for(int i=0;i<n;i++) avg+=lat[i]; avg/=n;
+    int i50=(n-1)*50/100, i95=(n-1)*95/100, i99=(n-1)*99/100;
     printf("%s x%d threads: %d reads x %.4g MB = %.1f GB in %.2fs -> %.2f GB/s (%.1f effective ms/block)\n",
         direct?"O_DIRECT":"buffered", nth, n, blk/1048576.0, tot/1e9, dt, tot/1e9/dt, dt/n*1000);
-    close(fd); free(offs); return 0;
+    printf("latency ms/read: min %.3f | avg %.3f | p50 %.3f | p95 %.3f | p99 %.3f | max %.3f\n",
+        lat[0],avg,lat[i50],lat[i95],lat[i99],lat[n-1]);
+    close(fd); free(lat); free(offs); return 0;
 }

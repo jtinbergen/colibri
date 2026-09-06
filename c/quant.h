@@ -164,12 +164,15 @@ static void matmul_i4(float *y, const float *x, const uint8_t *q4, const float *
             y[(int64_t)s*O+o]=a*sc; } }
 }
 
-/* ---- y[S,O] = x[S,I] @ W^T, W int4 packed + per-GROUP scales (fmt=4) ----- */
-static void matmul_i4_grouped(float *y, const float *x, const uint8_t *q4, const float *scale,
-                              int S, int I, int O, int gs){
+/* One caller-owned output-row range of grouped int4.  This intentionally has
+ * no OpenMP region and no implicit scratch: it is the Step-5 primitive used by
+ * serial tasks now and by bounded row tasks later.  Keep the arithmetic body
+ * shared with the legacy wrapper so tile boundaries cannot change a row. */
+static void matmul_i4_grouped_rows(float *y, const float *x, const uint8_t *q4, const float *scale,
+                                   int S, int I, int O, int gs, int row_begin, int row_end){
+    if(row_begin<0) row_begin=0; if(row_end>O) row_end=O; if(row_end<=row_begin) return;
     int rb=(I+1)/2; int ng=(I+gs-1)/gs;
-    #pragma omp parallel for schedule(static)
-    for(int o=0;o<O;o++){
+    for(int o=row_begin;o<row_end;o++){
         const uint8_t *w=q4+(int64_t)o*rb;
         const float *scl=scale+(int64_t)o*ng;
         for(int s=0;s<S;s++){
@@ -206,6 +209,12 @@ static void matmul_i4_grouped(float *y, const float *x, const uint8_t *q4, const
             y[(int64_t)s*O+o]=a;
         }
     }
+}
+/* ---- y[S,O] = x[S,I] @ W^T, W int4 packed + per-GROUP scales (fmt=4) ----- */
+static void matmul_i4_grouped(float *y, const float *x, const uint8_t *q4, const float *scale,
+                              int S, int I, int O, int gs){
+    #pragma omp parallel for schedule(static)
+    for(int o=0;o<O;o++) matmul_i4_grouped_rows(y,x,q4,scale,S,I,O,gs,o,o+1);
 }
 
 /* ---- fused gate+up: one OMP dispatch for both matrices -------------------- */

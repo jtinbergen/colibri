@@ -69,6 +69,7 @@
 #include "schema_gbnf.h"                          /* SCHEMA=: JSON-Schema -> GBNF for method F */
 #include "decode_batch.h"
 #include "route_trace.h"                           /* ROUTE_TRACE + .coli_usage, engine-agnostic (#700) */
+#include "m3_dag.h"                                /* Step 3 serial M3 task contract */
 #include "kv_fp8.h"                               /* KV8=1: cache latente in fp8 e4m3 + scala per-riga */
 #include "kv_tq.h"                                /* KV_TQ=3|4: cache latente PolarQuant (rot+polare) */
 #ifdef _OPENMP
@@ -535,7 +536,8 @@ typedef struct {
                                                  /* profiling: dove va il tempo (wall del
                                                   * thread di compute; il servizio disco
                                                   * overlappato vive in g_edisk_ns) */
-    double t_aproj,t_acore,t_aout;                     /* attention breakdown */
+    double t_aproj,t_anormrope,t_msa_scan,t_msa_select,t_acore,t_aout; /* attention breakdown */
+    uint64_t msa_scan_calls,msa_scan_parallel_calls,msa_scan_parallel_blocks,msa_scan_parallel_workers;
     int64_t resident_bytes;
     /* DISK_SPLIT=1: split dei DISK LOAD (miss LRU -> expert_load) per contesto e per tipo
      * di layer. ld_ctx: 0=main/verify/prefill, 1=dentro mtp_draft, 2=dentro mtp_absorb. */
@@ -888,7 +890,140 @@ static double current_rss_gb(void) {
  * the existing PROFILE line. Additive only: with PROF unset the output of
  * every mode stays byte-identical. */
 static int g_prof=0;
+/* S=1 MSA index scan: below this many blocks the OpenMP fork/join costs more
+ * than the independent block work on the measured desktop baseline.  Tests
+ * may set COLI_MSA_SCAN_MIN_BLOCKS=1 to force the parallel route. */
+static int g_msa_scan_min_blocks=32;
+/* Step 3 is opt-in while only the CPU S=1 grouped-int4/g64 reference path is
+ * covered.  It changes orchestration, never routing, kernel choice, or the
+ * routed/shared reduction order. */
+static int g_m3_dag_serial=0;
+static int g_m3_dag_pipe_ready=0; /* Step 4: pthread-PIPE ready-first serial compute */
+static int g_m3_dag_parallel=0;   /* Step 6: bounded OpenMP task team */
+static int g_m3_dag_workers=0;    /* 0 = OpenMP team less reserved PIPE workers */
+static int g_m3_dag_digest=0;  /* test-only: exact sparse-layer output witness */
+static _Atomic uint64_t g_m3_dag_forward_seq;
+static _Atomic uint64_t g_m3_dag_serial_routed_tasks,g_m3_dag_serial_shared_tasks;
+static uint64_t m3_dag_output_hash(const float *v,int n){
+    const unsigned char *p=(const unsigned char*)v; uint64_t h=1469598103934665603ULL;
+    for(size_t i=0;i<(size_t)n*sizeof(*v);i++){ h^=p[i]; h*=1099511628211ULL; }
+    return h;
+}
 static _Atomic int64_t g_prof_io;                /* bytes pread()/faulted from expert files */
+/* COLI_TRACE=<csv>: bounded dependency/lifecycle trace for M3 execution work.
+ * It is deliberately separate from PROF: no event is emitted unless the user
+ * requests a trace. Every thread owns one fixed buffer, so the hot event path
+ * takes no mutex, allocates no memory, and never prints. A release-published
+ * record count makes an exit-time snapshot safe even while PIPE workers exist.
+ * The trace is a diagnostic snapshot, not a total order: consumers merge rows
+ * by monotonic timestamp and must report dropped records before claiming a
+ * complete dependency proof. Scope v1 is one active model forward per process. */
+#define COLI_TRACE_VERSION 2
+#define COLI_TRACE_THREADS 64
+#define COLI_TRACE_EVENTS  8192
+enum { TR_FORWARD_BEGIN=1, TR_FORWARD_END, TR_MSA_SCAN_BEGIN, TR_MSA_SCAN_END,
+       TR_MSA_SELECT_BEGIN, TR_MSA_SELECT_END, TR_ROUTE_READY, TR_WEIGHT_PIN,
+       TR_WEIGHT_LRU, TR_LOAD_QUEUED, TR_LOAD_START, TR_LOAD_COMPLETE,
+       TR_WAIT_BEGIN, TR_WAIT_END, TR_COMPUTE_START, TR_COMPUTE_END,
+       TR_COMPUTE_READY, TR_EXPERT_START, TR_GATE_UP_DONE, TR_ACTIVATION_DONE,
+       TR_DOWN_START, TR_DOWN_DONE, TR_EXPERT_DONE, TR_REDUCTION_DONE,
+       TR_WEIGHTS_ACQUIRED, TR_WEIGHTS_RELEASED, TR_EXECUTOR_DRAINED, TR_TEAM_LEVEL };
+typedef struct { uint64_t ns,forward; int layer,eid,generation,resource; unsigned short kind; } ColiTraceEvent;
+typedef struct { _Atomic uint32_t n; _Atomic uint64_t dropped; ColiTraceEvent ev[COLI_TRACE_EVENTS]; } ColiTraceBuf;
+static ColiTraceBuf g_trace_buf[COLI_TRACE_THREADS];
+static _Atomic int g_trace_next_slot;
+static _Atomic uint64_t g_trace_unassigned;
+static _Atomic uint64_t g_trace_forward_seq,g_trace_forward_active;
+static _Thread_local int g_trace_slot=-1;
+static int g_trace_on,g_trace_dump_registered;
+static char g_trace_path[1024];
+static const char *trace_kind_name(unsigned short kind){
+    static const char *const names[]={"invalid","forward_begin","forward_end","msa_scan_begin","msa_scan_end",
+        "msa_select_begin","msa_select_end","route_ready","weight_pin","weight_lru","load_queued",
+        "load_start","load_complete","consumer_wait_begin","consumer_wait_end","compute_start","compute_end",
+        "compute_ready","expert_start","gate_up_done","activation_done","down_start","down_done",
+        "expert_done","reduction_done","weights_acquired","weights_released","executor_drained","team_level"};
+    return kind<sizeof(names)/sizeof(names[0])?names[kind]:"unknown";
+}
+static uint64_t trace_now_ns(void){ double s=now_s(); return s>0?(uint64_t)(s*1e9):0; }
+static void trace_emit(unsigned short kind,int layer,int eid,int generation,int resource){
+    if(!g_trace_on) return;
+    int slot=g_trace_slot;
+    if(slot<0){ slot=atomic_fetch_add_explicit(&g_trace_next_slot,1,memory_order_relaxed);
+        g_trace_slot=slot; }
+    if(slot<0||slot>=COLI_TRACE_THREADS){
+        atomic_fetch_add_explicit(&g_trace_unassigned,1,memory_order_relaxed);
+        return;
+    }
+    ColiTraceBuf *b=&g_trace_buf[slot];
+    uint32_t n=atomic_load_explicit(&b->n,memory_order_relaxed);
+    if(n>=COLI_TRACE_EVENTS){ atomic_fetch_add_explicit(&b->dropped,1,memory_order_relaxed); return; }
+    b->ev[n]=(ColiTraceEvent){trace_now_ns(),atomic_load_explicit(&g_trace_forward_active,memory_order_relaxed),
+                              layer,eid,generation,resource,kind};
+    atomic_store_explicit(&b->n,n+1,memory_order_release);
+}
+static void trace_dump(void){
+    if(!g_trace_on||!g_trace_path[0]) return;
+    FILE *f=fopen(g_trace_path,"wb");
+    if(!f){ fprintf(stderr,"[TRACE] cannot write %s: %s\n",g_trace_path,strerror(errno)); return; }
+    fprintf(f,"# colibri-trace,v%d\nns,forward,thread,kind,layer,eid,generation,resource\n",COLI_TRACE_VERSION);
+    uint64_t total=0,dropped=atomic_load_explicit(&g_trace_unassigned,memory_order_relaxed);
+    for(int t=0;t<COLI_TRACE_THREADS;t++){
+        ColiTraceBuf *b=&g_trace_buf[t]; uint32_t n=atomic_load_explicit(&b->n,memory_order_acquire);
+        if(n>COLI_TRACE_EVENTS) n=COLI_TRACE_EVENTS;
+        for(uint32_t i=0;i<n;i++){ ColiTraceEvent *e=&b->ev[i];
+            fprintf(f,"%llu,%llu,%d,%s,%d,%d,%d,%d\n",(unsigned long long)e->ns,
+                (unsigned long long)e->forward,t,trace_kind_name(e->kind),e->layer,e->eid,e->generation,e->resource); }
+        total+=n; dropped+=atomic_load_explicit(&b->dropped,memory_order_relaxed);
+    }
+    fclose(f);
+    fprintf(stderr,"[TRACE] wrote %llu events (%llu dropped) to %s\n",
+        (unsigned long long)total,(unsigned long long)dropped,g_trace_path);
+}
+static void trace_init(const char *path){
+    if(!path||!*path) return;
+    if(snprintf(g_trace_path,sizeof(g_trace_path),"%s",path)>=(int)sizeof(g_trace_path)){
+        fprintf(stderr,"[TRACE] COLI_TRACE path is too long; tracing disabled\n"); return; }
+    g_trace_on=1;
+    if(!g_trace_dump_registered){ atexit(trace_dump); g_trace_dump_registered=1; }
+    fprintf(stderr,"[TRACE] enabled: bounded v%d trace, %d threads x %d events -> %s\n",
+        COLI_TRACE_VERSION,COLI_TRACE_THREADS,COLI_TRACE_EVENTS,g_trace_path);
+}
+/* PIPE overlap instrumentation (PROF=1): account the wall-clock intersection
+ * between at least one PIPE worker doing expert I/O and at least one compute
+ * thread executing an expert MLP. Thread-seconds alone cannot prove that the
+ * two activities were concurrent, so these transitions maintain the actual
+ * intersection interval. The mutex is only held for the tiny state update,
+ * never across I/O or compute. */
+static pthread_mutex_t g_pipe_prof_mx=PTHREAD_MUTEX_INITIALIZER;
+static int g_pipe_prof_io_inflight, g_pipe_prof_compute_inflight;
+static double g_pipe_prof_last;
+static int64_t g_pipe_prof_io_ns, g_pipe_prof_compute_ns, g_pipe_prof_overlap_ns;
+static int pipe_prof_enabled(void);
+static void pipe_prof_accum_locked(double now){
+    if(g_pipe_prof_last>0){
+        int64_t dt=(int64_t)((now-g_pipe_prof_last)*1e9);
+        if(dt>0){
+            if(g_pipe_prof_io_inflight>0) g_pipe_prof_io_ns+=dt;
+            if(g_pipe_prof_compute_inflight>0) g_pipe_prof_compute_ns+=dt;
+            if(g_pipe_prof_io_inflight>0 && g_pipe_prof_compute_inflight>0) g_pipe_prof_overlap_ns+=dt;
+        }
+    }
+    g_pipe_prof_last=now;
+}
+static void pipe_prof_transition(int io_delta, int compute_delta){
+    pthread_mutex_lock(&g_pipe_prof_mx);
+    pipe_prof_accum_locked(now_s());
+    g_pipe_prof_io_inflight+=io_delta;
+    g_pipe_prof_compute_inflight+=compute_delta;
+    pthread_mutex_unlock(&g_pipe_prof_mx);
+}
+static void pipe_prof_snapshot(int64_t *io_ns, int64_t *compute_ns, int64_t *overlap_ns){
+    pthread_mutex_lock(&g_pipe_prof_mx);
+    pipe_prof_accum_locked(now_s());
+    *io_ns=g_pipe_prof_io_ns; *compute_ns=g_pipe_prof_compute_ns; *overlap_ns=g_pipe_prof_overlap_ns;
+    pthread_mutex_unlock(&g_pipe_prof_mx);
+}
 /* Disk service: wall time inside expert_load on whichever thread runs the read
  * (PIPE I/O workers, OMP loaders, the speculative pilot). It overlaps compute,
  * so it is NOT a wall-time phase — the stall the compute thread actually felt
@@ -962,21 +1097,28 @@ static uint64_t g_prof_nlat;                     /* forwards recorded (monotonic
 static void prof_lat(double s){ g_prof_lat[g_prof_nlat++ % PROF_LAT_CAP]=s; }
 /* snapshot for windowed reports (serve mode: one report per turn) */
 typedef struct {
-    double edisk,ewait,emm,ecpu,egpu,route,p2p,attn,head;
+    double edisk,ewait,emm,ecpu,egpu,route,p2p,attn,head,aproj,anormrope,msa_scan,msa_select,acore,aout;
+    uint64_t msa_scan_calls,msa_scan_parallel_calls,msa_scan_parallel_blocks,msa_scan_parallel_workers;
     int64_t io,cpu_bytes; uint64_t hits,miss,ereq,n_fw,n_emit,nlat,n_p2p,cpu_rows;
     uint64_t hit_pin,hit_ecache;
     uint64_t dc_n[2], dc_direct_n[2]; int64_t dc_bytes[2], dc_ns[2]; /* DISK-CLASS */
     int64_t dc_wall_ns[2], dc_wall_all_ns;       /* busy-wall (per class + combined) */
+    int64_t pipe_io_ns, pipe_compute_ns, pipe_overlap_ns; /* PROF PIPE wall intersections */
 } ProfBase;
 static void prof_base(Model *m, ProfBase *b){
     b->edisk=edisk_s(); b->ewait=m->t_ewait; b->emm=m->t_emm;
     b->ecpu=m->t_ecpu; b->egpu=m->t_egpu; b->route=m->t_route; b->p2p=m->t_p2p;
     b->attn=m->t_attn; b->head=m->t_head;
+    b->aproj=m->t_aproj; b->anormrope=m->t_anormrope; b->msa_scan=m->t_msa_scan;
+    b->msa_select=m->t_msa_select; b->acore=m->t_acore; b->aout=m->t_aout;
+    b->msa_scan_calls=m->msa_scan_calls; b->msa_scan_parallel_calls=m->msa_scan_parallel_calls;
+    b->msa_scan_parallel_blocks=m->msa_scan_parallel_blocks; b->msa_scan_parallel_workers=m->msa_scan_parallel_workers;
     b->io=atomic_load_explicit(&g_prof_io,memory_order_relaxed);
     b->hits=m->hits; b->miss=m->miss; b->ereq=m->ereq;
     b->hit_pin=m->hit_pin; b->hit_ecache=m->hit_ecache;
     b->n_fw=m->n_fw; b->n_emit=m->n_emit; b->nlat=g_prof_nlat; b->n_p2p=m->n_p2p;
     b->cpu_bytes=m->cpu_expert_bytes;b->cpu_rows=m->cpu_expert_rows;
+    pipe_prof_snapshot(&b->pipe_io_ns,&b->pipe_compute_ns,&b->pipe_overlap_ns);
     for(int i=0;i<2;i++){
         b->dc_n[i]=atomic_load_explicit(&g_dc_n[i],memory_order_relaxed);
         b->dc_bytes[i]=atomic_load_explicit(&g_dc_bytes[i],memory_order_relaxed);
@@ -1016,13 +1158,13 @@ static void *xzalloc(size_t n, const char *what){
 /* Fused gate+up for grouped int4 (fmt=4): computes both yg[S,O] and yu[S,O] from
  * the same x[S,I], reading x once instead of twice — saves ~33% of expert-matmul time at decode.
  * The per-group scale logic matches matmul_i4_grouped exactly. */
-static void matmul_i4_grouped_pair(float *yg, float *yu, const float *x,
-                                    const uint8_t *qg, const float *sg,
-                                    const uint8_t *qu, const float *su,
-                                    int S, int I, int O, int gs){
+static void matmul_i4_grouped_pair_rows(float *yg, float *yu, const float *x,
+                                         const uint8_t *qg, const float *sg,
+                                         const uint8_t *qu, const float *su,
+                                         int S, int I, int O, int gs, int row_begin, int row_end){
+    if(row_begin<0) row_begin=0; if(row_end>O) row_end=O; if(row_end<=row_begin) return;
     int rb=(I+1)/2; int ng=(I+gs-1)/gs;
-    #pragma omp parallel for schedule(static)
-    for(int o=0;o<O;o++){
+    for(int o=row_begin;o<row_end;o++){
         const uint8_t *wg=qg+(int64_t)o*rb; const uint8_t *wu2=qu+(int64_t)o*rb;
         const float *sgl=sg+(int64_t)o*ng;   const float *sul=su+(int64_t)o*ng;
         for(int s=0;s<S;s++){
@@ -1069,6 +1211,13 @@ static void matmul_i4_grouped_pair(float *yg, float *yu, const float *x,
             yg[(int64_t)s*O+o]=ag; yu[(int64_t)s*O+o]=au;
         }
     }
+}
+static void matmul_i4_grouped_pair(float *yg, float *yu, const float *x,
+                                    const uint8_t *qg, const float *sg,
+                                    const uint8_t *qu, const float *su,
+                                    int S, int I, int O, int gs){
+    #pragma omp parallel for schedule(static)
+    for(int o=0;o<O;o++) matmul_i4_grouped_pair_rows(yg,yu,x,qg,sg,qu,su,S,I,O,gs,o,o+1);
 }
 
 /* ---- K1: layout int4 a piani, gate e repack (vedi quant.h) -----------------
@@ -1567,6 +1716,19 @@ static inline float siluf(float x){ return x/(1.f+expf(-x)); }
  * or swigluoai (MiniMax-M3 / GPT-OSS style) when g_act_swigluoai is set:
  *   gate = min(g, limit); up = clamp(u, -limit, limit);
  *   glu = gate * sigmoid(alpha*gate); out = (up + 1) * glu     (note the +1) */
+/* Step 5 range primitive: explicit activation configuration, no allocation or
+ * OpenMP.  Callers must complete every gate/up range before any down range. */
+static void act_glu_range(float *g, const float *u, int64_t begin, int64_t end,
+                          int swigluoai, float alpha, float limit){
+    if(begin<0) begin=0;
+    if(end<=begin) return;
+    if(!swigluoai){ for(int64_t i=begin;i<end;i++) g[i]=siluf(g[i])*u[i]; return; }
+    for(int64_t i=begin;i<end;i++){
+        float gv=g[i]<limit?g[i]:limit;
+        float uv=u[i]<-limit?-limit:(u[i]>limit?limit:u[i]);
+        g[i]=(uv+1.f)*(gv/(1.f+expf(-alpha*gv)));
+    }
+}
 /* K3's parallel combine, lifted out of expert_ffn's body so it covers BOTH
  * activations and every caller. Elementwise: no shared accumulation order, so
  * the bits are identical under any schedule. Serial below the threshold (the
@@ -1605,6 +1767,8 @@ static inline void act_glu(float *g, const float *u, int64_t n){
  * container mixed-format (fmt per-tensor da qt_resolve_fmt, nessuna uniformita' tra
  * expert, vedi il commento MB_BUILD) e' la correzione di un bug latente, NON un no-op. */
 static void expert_ffn(float *hh, float *gg, float *uu, const float *xg, QT *g, QT *u, QT *d, int nr, int I){
+    int pipe_prof_compute = g_prof && pipe_prof_enabled();
+    if(pipe_prof_compute) pipe_prof_transition(0,1);
     expert_gate_up(gg,uu,xg,g,u,nr);
     act_glu(gg, uu, (int64_t)nr*I);       /* silu(g)*u, or swigluoai when the arch sets it */
     if(d->fmt==6) e8_rot_rows(gg,nr,I);   /* down input is per-expert — rotate here */
@@ -1645,11 +1809,13 @@ static void expert_ffn(float *hh, float *gg, float *uu, const float *xg, QT *g, 
             g_pq.x=gg; g_pq.S=nr; g_pq.I=I; g_pq.xq=hq; g_pq.sx=hsx; g_pq.xsum=hxs;
             matmul_qt(hh, gg, d, nr);
             g_pq.x=NULL;
+            if(pipe_prof_compute) pipe_prof_transition(0,-1);
             return;
         }
     }
 #endif
     matmul_qt(hh, gg, d, nr);
+    if(pipe_prof_compute) pipe_prof_transition(0,-1);
 }
 
 /* RoPE interleaved su un vettore di dimensione qk_rope a posizione pos */
@@ -3716,9 +3882,10 @@ static int g_pipe=0;      /* PIPE=1: async expert-load pipeline. Default ON for 
                            * (parsed in main: getenv("PIPE")?:1 on _WIN32, :0 elsewhere).
                            * Keeps expert pread off the forward-pass thread so loads overlap
                            * the matmul. PIPE=0 opts back into the blocking serial path. */
+static int pipe_prof_enabled(void){ return g_pipe; }
 static int g_pipe_nw=8;   /* PIPE_WORKERS=n: I/O worker threads (disk-parallel reads) */
 static int g_uring=0;     /* URING=1: Linux io_uring load/completion backend; implies PIPE */
-static int g_pipe_block=0;/* COLI_PIPE_BLOCK=1: pipe_wait blocca su una condvar invece dello
+static _Atomic int g_pipe_block=0;/* COLI_PIPE_BLOCK=1: pipe_wait blocca su una condvar invece dello
                            * spin sched_yield (default OFF = spin byte-identico). EN: a yield
                            * storm on the main thread fights the OpenMP team for cycles during
                            * multi-ms loads; the condvar wake costs ~5us against reads that
@@ -3746,6 +3913,18 @@ typedef struct {
     pthread_t th[16]; int nw; int started;
 } PipePool;
 static PipePool g_pp;
+#ifdef COLI_PIPE_TEST
+/* Test-only hooks, declared before the worker so the production worker body
+ * remains unchanged outside the focused PIPE harness. */
+static _Atomic int *g_pipe_test_wait_any_enter;
+static void (*g_pipe_test_before_load)(int q);
+static _Atomic int *g_pipe_test_drain_enter;
+static _Atomic int *g_pipe_test_wait_slot_enter;
+static _Atomic int *g_pipe_test_drain_after_slot;
+static void (*g_pipe_test_after_load)(int q);
+static int g_pipe_test_m3_run;
+static void (*g_pipe_test_fatal)(int layer);
+#endif
 
 static void *pipe_worker(void *arg){
     (void)arg; PipePool *p=&g_pp; uint64_t seen=0;
@@ -3764,8 +3943,18 @@ static void *pipe_worker(void *arg){
                     memory_order_acq_rel,memory_order_relaxed)){
                 int L  =atomic_load_explicit(&p->layer,memory_order_relaxed);
                 int eid=atomic_load_explicit(&p->eids[i],memory_order_relaxed); /* AFTER winning CAS */
+                trace_emit(TR_LOAD_START,L,eid,(int)seen,(int)i);
+#ifdef COLI_PIPE_TEST
+                if(g_pipe_test_before_load) g_pipe_test_before_load((int)i);
+#endif
+                if(g_prof) pipe_prof_transition(1,0);
                 expert_load(p->m,L,eid,&p->m->ws[i],1,1);  /* needed-now load: fatal on I/O error (matches serial path); demand=1: this IS moe()'s own miss path */
+#ifdef COLI_PIPE_TEST
+                if(g_pipe_test_after_load) g_pipe_test_after_load((int)i);
+#endif
+                if(g_prof) pipe_prof_transition(-1,0);
                 atomic_store_explicit(&p->ready[i],1,memory_order_release);
+                trace_emit(TR_LOAD_COMPLETE,L,eid,(int)seen,(int)i);
                 if(g_pipe_block){                     /* wake a main thread parked in pipe_wait */
                     pthread_mutex_lock(&p->mx);
                     pthread_cond_broadcast(&p->cv_done);
@@ -3802,6 +3991,7 @@ static void pipe_dispatch(Model *m,int layer,const int *eids,int njobs){
         for(int q=0;q<njobs;q++){
             int li=uring_load_add(&g_ub_pipe,m,layer,eids[q],&m->ws[q],1);
             if(li!=q){ fprintf(stderr,"URING: expert batch overflow\n"); exit(1); }
+            trace_emit(TR_LOAD_QUEUED,layer,eids[q],0,q);
         }
         if(uring_submit_batch(&g_ub_pipe)){ perror("URING: submit"); exit(1); }
         return;
@@ -3814,6 +4004,7 @@ static void pipe_dispatch(Model *m,int layer,const int *eids,int njobs){
     for(int q=0;q<njobs;q++) atomic_store_explicit(&g_pp.ready[q],0,memory_order_relaxed); /* reset BEFORE publish */
     uint64_t g=(atomic_load_explicit(&g_pp.cur,memory_order_relaxed)>>8)+1;
     atomic_store_explicit(&g_pp.cur,(g<<8),memory_order_release);                          /* PUBLISH */
+    for(int q=0;q<njobs;q++) trace_emit(TR_LOAD_QUEUED,layer,eids[q],(int)g,q);
     pthread_mutex_lock(&g_pp.mx); pthread_cond_broadcast(&g_pp.cv); pthread_mutex_unlock(&g_pp.mx);
 }
 /* Non-blocking probe of a pipe slot's load-done flag — an ORDERING hint only (the
@@ -3827,9 +4018,14 @@ static inline int pipe_ready(int q){
     return atomic_load_explicit(&g_pp.ready[q],memory_order_acquire)!=0;
 }
 static inline void pipe_wait(int q){
+    int waited=0;
+    int generation=(int)(atomic_load_explicit(&g_pp.cur,memory_order_acquire)>>8);
+    int eid=atomic_load_explicit(&g_pp.eids[q],memory_order_relaxed);
 #ifdef __linux__
     if(g_uring){
+        trace_emit(TR_WAIT_BEGIN,atomic_load_explicit(&g_pp.layer,memory_order_relaxed),eid,generation,q);
         if(uring_finalize_load(&g_ub_pipe,q,1)){ perror("URING: expert load"); exit(1); }
+        trace_emit(TR_WAIT_END,atomic_load_explicit(&g_pp.layer,memory_order_relaxed),eid,generation,q);
         return;
     }
 #endif
@@ -3838,13 +4034,99 @@ static inline void pipe_wait(int q){
          * wait. EN: the worker stores ready (release) BEFORE it takes mx to
          * broadcast, so a set flag can never be missed (no lost wakeup). */
         if(atomic_load_explicit(&g_pp.ready[q],memory_order_acquire)) return;
+#ifdef COLI_PIPE_TEST
+        if(g_pipe_test_wait_slot_enter) atomic_store_explicit(g_pipe_test_wait_slot_enter,1,memory_order_release);
+#endif
+        waited=1; trace_emit(TR_WAIT_BEGIN,atomic_load_explicit(&g_pp.layer,memory_order_relaxed),eid,generation,q);
         pthread_mutex_lock(&g_pp.mx);
         while(!atomic_load_explicit(&g_pp.ready[q],memory_order_acquire))
             pthread_cond_wait(&g_pp.cv_done,&g_pp.mx);
         pthread_mutex_unlock(&g_pp.mx);
+        trace_emit(TR_WAIT_END,atomic_load_explicit(&g_pp.layer,memory_order_relaxed),eid,generation,q);
         return;
     }
-    while(!atomic_load_explicit(&g_pp.ready[q],memory_order_acquire)) sched_yield();
+    while(!atomic_load_explicit(&g_pp.ready[q],memory_order_acquire)){
+        if(!waited){
+#ifdef COLI_PIPE_TEST
+            if(g_pipe_test_wait_slot_enter) atomic_store_explicit(g_pipe_test_wait_slot_enter,1,memory_order_release);
+#endif
+            waited=1; trace_emit(TR_WAIT_BEGIN,atomic_load_explicit(&g_pp.layer,memory_order_relaxed),eid,generation,q); }
+        sched_yield();
+    }
+    if(waited) trace_emit(TR_WAIT_END,atomic_load_explicit(&g_pp.layer,memory_order_relaxed),eid,generation,q);
+}
+/* Wait until one of the still-unconsumed slots is published.  Unlike choosing
+ * the first pending slot and calling pipe_wait(), this is a predicate wait:
+ * an unrelated earlier load cannot hide a later ready expert.  `expected_gen`
+ * binds the untagged ready[] flags to the one live PIPE batch. */
+static int pipe_wait_any(uint64_t expected_gen,const int *qs,int n,int *did_wait){
+    int waited=0;
+    if(did_wait) *did_wait=0;
+    for(;;){
+        if((atomic_load_explicit(&g_pp.cur,memory_order_acquire)>>8)!=expected_gen){
+            if(waited) trace_emit(TR_WAIT_END,atomic_load_explicit(&g_pp.layer,memory_order_relaxed),-1,(int)expected_gen,-1);
+            return -1;
+        }
+        for(int i=0;i<n;i++) if(atomic_load_explicit(&g_pp.ready[qs[i]],memory_order_acquire)){
+            if(waited) trace_emit(TR_WAIT_END,atomic_load_explicit(&g_pp.layer,memory_order_relaxed),-1,(int)expected_gen,qs[i]);
+            return qs[i];
+        }
+        if(!waited){ waited=1; if(did_wait) *did_wait=1;
+            trace_emit(TR_WAIT_BEGIN,atomic_load_explicit(&g_pp.layer,memory_order_relaxed),-1,(int)expected_gen,-1);
+#ifdef COLI_PIPE_TEST
+            if(g_pipe_test_wait_any_enter) atomic_store_explicit(g_pipe_test_wait_any_enter,1,memory_order_release);
+#endif
+        }
+        if(g_pipe_block){
+            pthread_mutex_lock(&g_pp.mx);
+            for(;;){
+                if((atomic_load_explicit(&g_pp.cur,memory_order_acquire)>>8)!=expected_gen){
+                    pthread_mutex_unlock(&g_pp.mx);
+                    trace_emit(TR_WAIT_END,atomic_load_explicit(&g_pp.layer,memory_order_relaxed),-1,(int)expected_gen,-1);
+                    return -1;
+                }
+                int found=-1;
+                for(int i=0;i<n;i++) if(atomic_load_explicit(&g_pp.ready[qs[i]],memory_order_acquire)){ found=qs[i]; break; }
+                if(found>=0){ pthread_mutex_unlock(&g_pp.mx); trace_emit(TR_WAIT_END,atomic_load_explicit(&g_pp.layer,memory_order_relaxed),-1,(int)expected_gen,found); return found; }
+                pthread_cond_wait(&g_pp.cv_done,&g_pp.mx);
+            }
+        }
+        sched_yield();
+    }
+}
+/* Select one routed task for the Step-4 CPU executor.  A ready task always
+ * wins in task order; otherwise wait for any still-unconsumed PIPE slot and
+ * return the matching waiting task.  The caller performs the acquire-side
+ * slot validation/READY transition before it can execute that task. */
+static int m3_dag_pipe_pick_ready(const M3DagExpertTask *tasks,int ntask,
+                                  const int *qof,uint64_t pipe_generation,int *waited){
+    int pending[64],npending=0;
+    if(waited) *waited=0;
+    for(int q=0;q<ntask;q++){
+        if(tasks[q].compute_state==M3_DAG_COMPUTE_READY) return q;
+        if(tasks[q].compute_state==M3_DAG_COMPUTE_WAITING && qof[q]>=0) pending[npending++]=qof[q];
+    }
+    if(!npending) return -1;
+    int pipe_waited=0;
+    int got=pipe_wait_any(pipe_generation,pending,npending,&pipe_waited);
+    if(waited) *waited=pipe_waited;
+    for(int q=0;q<ntask;q++)
+        if(qof[q]==got && tasks[q].compute_state==M3_DAG_COMPUTE_WAITING) return q;
+    return -1;
+}
+/* The Step-4 failure boundary.  It acknowledges every published slot, not
+ * merely tasks that reached compute, before caller-owned output or slots can
+ * be released/reused. */
+static void m3_dag_pipe_drain_slots(int nslots){
+    for(int q=0;q<nslots;q++){
+#ifdef COLI_PIPE_TEST
+        if(g_pipe_test_drain_enter && q==0) atomic_store_explicit(g_pipe_test_drain_enter,1,memory_order_release);
+#endif
+        pipe_wait(q);
+#ifdef COLI_PIPE_TEST
+        if(g_pipe_test_drain_after_slot && q==0) atomic_store_explicit(g_pipe_test_drain_after_slot,1,memory_order_release);
+#endif
+    }
 }
 
 #ifdef COLI_CUDA
@@ -4385,6 +4667,77 @@ static inline double msa_idx_dot(const float *a, const float *b, int n){
     return d;
 #endif
 }
+
+/* M3 MSA's index score is a max over keys within one block.  Blocks write to
+ * disjoint score cells, so S=1 can split them without changing either the
+ * dot-product implementation or a block's increasing-key reduction order.
+ * The caller deliberately retains the old serial top-k selection afterwards:
+ * tie-breaking and selected-block order remain one well-defined operation. */
+typedef struct { int parallel,workers,blocks; } MsaScanRun;
+static void msa_block_score_scan(const float *iqs,const float *Ic0,
+                                 int idx_h,int idx_d,int blk,int st0,int pos,
+                                 double *bscore,int allow_parallel,MsaScanRun *run){
+    int nblk=pos/blk+1;
+    for(int j=0;j<idx_h*nblk;j++) bscore[j]=-1e300;
+    int parallel=allow_parallel && nblk>=g_msa_scan_min_blocks && omp_get_max_threads()>1;
+    int workers=1;
+    if(parallel){
+        #pragma omp parallel
+        {
+            #pragma omp single
+            workers=omp_get_num_threads();
+            #pragma omp for schedule(static)
+            for(int b=0;b<nblk;b++){
+                int t0=b*blk, t1=t0+blk;
+                if(t0<st0) t0=st0;
+                if(t1>pos+1) t1=pos+1;
+                if(t0>=t1) continue;
+                for(int t=t0;t<t1;t++){
+                    const float *kt=Ic0+(int64_t)t*idx_d;
+                    for(int hi=0;hi<idx_h;hi++){
+                        double d=msa_idx_dot(iqs+(int64_t)hi*idx_d,kt,idx_d);
+                        double *dst=&bscore[(int64_t)hi*nblk+b];
+                        if(d>*dst) *dst=d;
+                    }
+                }
+            }
+        }
+    }else{
+        for(int b=0;b<nblk;b++){
+            int t0=b*blk, t1=t0+blk;
+            if(t0<st0) t0=st0;
+            if(t1>pos+1) t1=pos+1;
+            for(int t=t0;t<t1;t++){
+                const float *kt=Ic0+(int64_t)t*idx_d;
+                for(int hi=0;hi<idx_h;hi++){
+                    double d=msa_idx_dot(iqs+(int64_t)hi*idx_d,kt,idx_d);
+                    double *dst=&bscore[(int64_t)hi*nblk+b];
+                    if(d>*dst) *dst=d;
+                }
+            }
+        }
+    }
+    if(run) *run=(MsaScanRun){parallel,workers,nblk};
+}
+static void msa_select_blocks(double *bscore,int nblk,int idx_h,int topk_cfg,
+                              int local,int pos,int blk,int *sel){
+    for(int hi=0;hi<idx_h;hi++){
+        double *bs=bscore+(int64_t)hi*nblk;
+        int qb=pos/blk;                         /* local blocks always selected */
+        for(int lb=0;lb<local;lb++){ int bb=qb-lb; if(bb>=0) bs[bb]=1e300; }
+        int topk=topk_cfg<nblk?topk_cfg:nblk;
+        int *sg=sel+(int64_t)hi*topk_cfg;
+        for(int j=0;j<topk_cfg;j++) sg[j]=-1;
+        for(int j=0;j<topk;j++){                /* ties -> lowest block index */
+            int best=-1; double bv=-1e300;
+            for(int b=0;b<nblk;b++){ int taken=0;
+                for(int p=0;p<j;p++) if(sg[p]==b){taken=1;break;}
+                if(!taken && bs[b]>bv){ bv=bs[b]; best=b; }
+            }
+            sg[j]=best;
+        }
+    }
+}
 static void attention_gqa(Model *m, Layer *l, int layer, float *x, int S, int pos_base,
                           KVState *const *kvs, const int *positions, float *out){
     Cfg *c=&m->c; int H=c->n_heads, NK=c->n_kv_heads, hd=c->head_dim;
@@ -4413,6 +4766,7 @@ static void attention_gqa(Model *m, Layer *l, int layer, float *x, int S, int po
     if(is_sparse){ iq=falloc((int64_t)S*IDX_H*IDX_D); ik=falloc((int64_t)S*IDX_D);
         matmul_qt(iq,x,&l->idx_q,S); matmul_qt(ik,x,&l->idx_k,S); }
     m->t_aproj+=now_s()-tp0;
+    double tn0=now_s();
     for(int s=0;s<S;s++){                        /* norm+rope, then mirror into the cache */
         KVState *ks=kvs?kvs[s]:m->kv;
         int pos=positions?positions[s]:pos_base+s;
@@ -4431,6 +4785,7 @@ static void attention_gqa(Model *m, Layer *l, int layer, float *x, int S, int po
             memcpy(ks->Ic[layer]+(int64_t)pos*IDX_D, iks, (size_t)IDX_D*sizeof(float));
         }
     }
+    m->t_anormrope+=now_s()-tn0;
     if(is_sparse){                               /* block selection: top-k blocks per (s, index head) */
         sel=malloc((size_t)S*IDX_H*TOPK*sizeof(int));
         #pragma omp parallel for schedule(static) if(S>4)   /* rows independent; Ic rows <= pos
@@ -4440,31 +4795,21 @@ static void attention_gqa(Model *m, Layer *l, int layer, float *x, int S, int po
             int pos=positions?positions[s]:pos_base+s, st0=ks->kv_start[layer];
             const float *Ic0=ks->Ic[layer]; int nblk=pos/BLK+1;
             double *bscore=malloc((size_t)IDX_H*nblk*sizeof(double)); float *iqs=iq+(int64_t)s*IDX_H*IDX_D;
-            for(int j=0;j<IDX_H*nblk;j++) bscore[j]=-1e300;
-            for(int t=st0;t<=pos;t++){            /* max-pool index scores into blocks (f64 like the
-                                                   * ref); t-outer: each cached key row is read once
-                                                   * for all IDX_H heads instead of IDX_H times */
-                const float *kt=Ic0+(int64_t)t*IDX_D; int b=t/BLK;
-                for(int hi=0;hi<IDX_H;hi++){
-                    double d=msa_idx_dot(iqs+(int64_t)hi*IDX_D,kt,IDX_D);
-                    if(d>bscore[(int64_t)hi*nblk+b]) bscore[(int64_t)hi*nblk+b]=d;
-                }
+            double ts0=S==1?now_s():0;
+            if(S==1) trace_emit(TR_MSA_SCAN_BEGIN,layer,-1,0,nblk);
+            MsaScanRun scan_run;
+            msa_block_score_scan(iqs,Ic0,IDX_H,IDX_D,BLK,st0,pos,bscore,S==1,&scan_run);
+            if(S==1){ m->msa_scan_calls++;
+                if(scan_run.parallel){ m->msa_scan_parallel_calls++;
+                    m->msa_scan_parallel_blocks+=scan_run.blocks;
+                    m->msa_scan_parallel_workers+=scan_run.workers; }
             }
-            for(int hi=0;hi<IDX_H;hi++){
-                double *bs=bscore+(int64_t)hi*nblk;
-                int qb=pos/BLK;                  /* local blocks always selected */
-                for(int lb=0;lb<LOCAL;lb++){ int bb=qb-lb; if(bb>=0) bs[bb]=1e300; }
-                int topk = TOPK<nblk?TOPK:nblk;
-                int *sg=&sel[((int64_t)s*IDX_H+hi)*TOPK];
-                for(int j=0;j<TOPK;j++) sg[j]=-1;
-                for(int j=0;j<topk;j++){         /* greedy top-k, ties -> lowest block index */
-                    int best=-1; double bv=-1e300;
-                    for(int b=0;b<nblk;b++){ int taken=0;
-                        for(int p=0;p<j;p++) if(sg[p]==b){taken=1;break;}
-                        if(!taken && bs[b]>bv){ bv=bs[b]; best=b; } }
-                    sg[j]=best;
-                }
-            }
+            if(S==1){ m->t_msa_scan+=now_s()-ts0; trace_emit(TR_MSA_SCAN_END,layer,-1,0,nblk); }
+            double ts1=S==1?now_s():0;
+            if(S==1) trace_emit(TR_MSA_SELECT_BEGIN,layer,-1,0,nblk);
+            msa_select_blocks(bscore,nblk,IDX_H,TOPK,LOCAL,pos,BLK,
+                              &sel[(int64_t)s*IDX_H*TOPK]);
+            if(S==1){ m->t_msa_select+=now_s()-ts1; trace_emit(TR_MSA_SELECT_END,layer,-1,0,nblk); }
             free(bscore);
         }
     }
@@ -5551,6 +5896,333 @@ static int mb_gs_compat(int est_fmt, int est_gs, int fmt, int gs){
     return !(est_fmt==4 && fmt==4 && gs!=est_gs);
 }
 
+/* Step 3's one-thread adapter.  It deliberately borrows the existing scratch
+ * and calls the existing kernels; Step 5 is where this becomes reentrant and
+ * Step 6 is where more than one such task may run.  The ESlot reference keeps
+ * a routed slot non-evictable until its reduction has committed. */
+typedef struct {
+    Model *m; Layer *l; int layer,D,I,sI,K;
+    const float *x; const int *idxs; const float *weights;
+    float *xg,*gg,*uu,*hh,*out;
+    int defer_reduction, direct_task_output;
+} M3DagCpuExec;
+
+typedef struct { const uint8_t *q4; const float *s; int I,O,gs; } M3I4MatrixView;
+typedef struct { M3I4MatrixView gate,up,down; const float *input; int swigluoai; float alpha,limit; } M3I4ExpertContext;
+typedef struct { float *gate,*up; size_t gate_n,up_n; } M3I4ExpertScratch;
+
+static int m3_i4_view(M3I4MatrixView *v,const QT *q){
+    if(!q||q->fmt!=4||q->planar||q->gs!=64||!q->q4||!q->s||q->I<=0||q->O<=0) return 0;
+    *v=(M3I4MatrixView){q->q4,q->s,q->I,q->O,q->gs}; return 1;
+}
+static int m3_i4_context(M3I4ExpertContext *c,const QT *g,const QT *u,const QT *d,const float *input){
+    if(!input || !m3_i4_view(&c->gate,g) || !m3_i4_view(&c->up,u) || !m3_i4_view(&c->down,d)) return 0;
+    if(c->gate.I!=c->up.I || c->gate.O!=c->up.O || c->down.I!=c->gate.O) return 0;
+    c->input=input; c->swigluoai=g_act_swigluoai; c->alpha=g_swiglu_alpha; c->limit=g_swiglu_limit;
+    return 1;
+}
+/* Step-5 serial reference execution.  All mutable storage belongs to this call;
+ * it does not use g_pq, TLS quant scratch, matmul_qt, or an OpenMP team. */
+static int m3_i4_expert_run(const M3I4ExpertContext *c,M3I4ExpertScratch *s,float *output){
+    if(!c||!s||!output||s->gate_n<(size_t)c->gate.O||s->up_n<(size_t)c->up.O) return 0;
+    if(!g_no_fused_pair)
+        matmul_i4_grouped_pair_rows(s->gate,s->up,c->input,c->gate.q4,c->gate.s,c->up.q4,c->up.s,
+                                     1,c->gate.I,c->gate.O,64,0,c->gate.O);
+    else {
+        matmul_i4_grouped_rows(s->gate,c->input,c->gate.q4,c->gate.s,1,c->gate.I,c->gate.O,64,0,c->gate.O);
+        matmul_i4_grouped_rows(s->up,c->input,c->up.q4,c->up.s,1,c->up.I,c->up.O,64,0,c->up.O);
+    }
+    act_glu_range(s->gate,s->up,0,c->gate.O,c->swigluoai,c->alpha,c->limit);
+    matmul_i4_grouped_rows(output,s->gate,c->down.q4,c->down.s,1,c->down.I,c->down.O,64,0,c->down.O);
+    return 1;
+}
+
+/* Step 6 records are deliberately separate from M3DagCpuExec.  The latter is
+ * the serial adapter and contains reusable scratch plus mutable profiling
+ * fields; sharing it from OpenMP tasks would make both the scratch and the
+ * counters race.  A parallel record owns one expert's complete scratch slice
+ * and is touched by exactly one coordinator task after publication. */
+typedef struct {
+    M3I4ExpertContext c;
+    M3I4ExpertScratch scratch;
+    float *output;
+    ESlot *slot;
+    int eid,route,layer,tiles,shared;
+    size_t output_n;
+    uint64_t generation;
+    double elapsed;
+    int ok;
+} M3DagParallelExpert;
+
+typedef struct {
+    M3DagParallelExpert *expert;
+    int n,D,I,sharedI;
+    float *gate_arena,*up_arena,*output_arena,*shared_output;
+    float *shared_gate,*shared_up;
+    int shared_submitted;
+} M3DagParallelBlock;
+
+static int m3_parallel_size_ok(size_t n,size_t elem){ return elem && n<=SIZE_MAX/elem; }
+static M3DagParallelBlock *m3_dag_parallel_preflight(int n,int D,int I,int with_shared,int sharedI){
+#ifndef _OPENMP
+    (void)n;(void)D;(void)I;(void)with_shared;(void)sharedI; return NULL;
+#else
+    if(n<=0||D<=0||I<=0||!m3_parallel_size_ok((size_t)n,sizeof(M3DagParallelExpert))||
+       (size_t)n>SIZE_MAX/(size_t)I || (size_t)n>SIZE_MAX/(size_t)D) return NULL;
+    size_t ni=(size_t)n*(size_t)I, nd=(size_t)n*(size_t)D;
+    if(!m3_parallel_size_ok(ni,sizeof(float)) || !m3_parallel_size_ok(nd,sizeof(float)) ||
+       ni>PTRDIFF_MAX/sizeof(float) || nd>PTRDIFF_MAX/sizeof(float)) return NULL;
+    M3DagParallelBlock *b=calloc(1,sizeof(*b));
+    if(!b) return NULL;
+    b->n=n; b->D=D; b->I=I; b->sharedI=sharedI;
+    b->expert=calloc((size_t)n,sizeof(*b->expert));
+    b->gate_arena=calloc((size_t)n*(size_t)I,sizeof(float));
+    b->up_arena=calloc((size_t)n*(size_t)I,sizeof(float));
+    b->output_arena=calloc((size_t)n*(size_t)D,sizeof(float));
+    if(with_shared){
+        b->shared_output=calloc((size_t)D,sizeof(float));
+        if(sharedI<=0 || !m3_parallel_size_ok((size_t)sharedI,sizeof(float)) ||
+           (size_t)sharedI>PTRDIFF_MAX/sizeof(float)){
+            free(b->shared_output); free(b->output_arena); free(b->up_arena); free(b->gate_arena); free(b->expert); free(b); return NULL;
+        }
+        b->shared_gate=calloc((size_t)sharedI,sizeof(float));
+        b->shared_up=calloc((size_t)sharedI,sizeof(float));
+    }
+    if(!b->expert||!b->gate_arena||!b->up_arena||!b->output_arena||
+       (with_shared&&(!b->shared_output||!b->shared_gate||!b->shared_up))){
+        free(b->shared_up); free(b->shared_gate); free(b->shared_output); free(b->output_arena); free(b->up_arena);
+        free(b->gate_arena); free(b->expert); free(b); return NULL;
+    }
+    for(int i=0;i<n;i++){
+        b->expert[i].scratch.gate=b->gate_arena+(int64_t)i*I;
+        b->expert[i].scratch.up=b->up_arena+(int64_t)i*I;
+        b->expert[i].scratch.gate_n=b->expert[i].scratch.up_n=(size_t)I;
+        b->expert[i].output=b->output_arena+(int64_t)i*D;
+    }
+    return b;
+#endif
+}
+static void m3_dag_parallel_free(M3DagParallelBlock *b){
+    if(!b) return;
+    free(b->shared_up); free(b->shared_gate); free(b->shared_output); free(b->output_arena); free(b->up_arena);
+    free(b->gate_arena); free(b->expert); free(b);
+}
+
+/* Run one expert inside the layer-local OpenMP region.  The function creates
+ * tasks, never a parallel region: row kernels remain non-OpenMP and therefore
+ * cannot form nested teams.  Each task writes a disjoint row interval. */
+static int m3_dag_parallel_expert_run(M3DagParallelExpert *e){
+#ifndef _OPENMP
+    (void)e; return 0;
+#else
+    if(!e||e->tiles<1 || omp_get_level()!=1 || !e->output ||
+       e->scratch.gate_n<(size_t)e->c.gate.O || e->scratch.up_n<(size_t)e->c.up.O ||
+       e->output_n<(size_t)e->c.down.O) return 0;
+#ifdef COLI_PIPE_TEST
+    if(g_pipe_test_m3_run){
+        if(!e->shared) return 0;
+        memset(e->output,0,e->output_n*sizeof(*e->output));
+        return 1;
+    }
+#endif
+    int go=e->c.gate.O, no=e->c.down.O;
+    int gt=(go+e->tiles-1)/e->tiles, dt=(no+e->tiles-1)/e->tiles;
+    double t0=now_s();
+    trace_emit(TR_TEAM_LEVEL,e->layer,e->eid,(int)e->generation,omp_get_level());
+    trace_emit(TR_EXPERT_START,e->layer,e->eid,(int)e->generation,e->route);
+    trace_emit(TR_COMPUTE_START,e->layer,e->eid,(int)e->generation,e->route);
+    if(!g_no_fused_pair){
+        #pragma omp taskgroup
+        for(int lo=0;lo<go;lo+=gt){
+            int hi=lo+gt; if(hi>go) hi=go;
+            #pragma omp task firstprivate(lo,hi) shared(e)
+            matmul_i4_grouped_pair_rows(e->scratch.gate,e->scratch.up,e->c.input,
+                e->c.gate.q4,e->c.gate.s,e->c.up.q4,e->c.up.s,
+                1,e->c.gate.I,e->c.gate.O,64,lo,hi);
+        }
+    } else {
+        #pragma omp taskgroup
+        for(int lo=0;lo<go;lo+=gt){
+            int hi=lo+gt; if(hi>go) hi=go;
+            #pragma omp task firstprivate(lo,hi) shared(e)
+            {
+                matmul_i4_grouped_rows(e->scratch.gate,e->c.input,e->c.gate.q4,
+                    e->c.gate.s,1,e->c.gate.I,e->c.gate.O,64,lo,hi);
+                matmul_i4_grouped_rows(e->scratch.up,e->c.input,e->c.up.q4,
+                    e->c.up.s,1,e->c.up.I,e->c.up.O,64,lo,hi);
+            }
+        }
+    }
+    trace_emit(TR_GATE_UP_DONE,e->layer,e->eid,(int)e->generation,e->route);
+    #pragma omp taskgroup
+    for(int lo=0;lo<go;lo+=gt){
+        int hi=lo+gt; if(hi>go) hi=go;
+        #pragma omp task firstprivate(lo,hi) shared(e)
+        act_glu_range(e->scratch.gate,e->scratch.up,lo,hi,
+                      e->c.swigluoai,e->c.alpha,e->c.limit);
+    }
+    trace_emit(TR_ACTIVATION_DONE,e->layer,e->eid,(int)e->generation,e->route);
+    trace_emit(TR_DOWN_START,e->layer,e->eid,(int)e->generation,e->route);
+    #pragma omp taskgroup
+    for(int lo=0;lo<no;lo+=dt){
+        int hi=lo+dt; if(hi>no) hi=no;
+        #pragma omp task firstprivate(lo,hi) shared(e)
+        matmul_i4_grouped_rows(e->output,e->scratch.gate,e->c.down.q4,
+            e->c.down.s,1,e->c.down.I,e->c.down.O,64,lo,hi);
+    }
+    trace_emit(TR_DOWN_DONE,e->layer,e->eid,(int)e->generation,e->route);
+    e->elapsed=now_s()-t0; e->ok=1;
+    trace_emit(TR_EXPERT_DONE,e->layer,e->eid,(int)e->generation,e->route);
+    trace_emit(TR_COMPUTE_END,e->layer,e->eid,(int)e->generation,e->route);
+    return 1;
+#endif
+}
+
+static int m3_dag_cpu_acquire(void *opaque, M3DagExpertTask *task){
+    (void)opaque;
+    if(task->kind==M3_DAG_ROUTED){
+        if(!task->weight_handle) return 0;
+        eslot_acquire((ESlot*)task->weight_handle);
+    }
+    return 1;
+}
+static void m3_dag_cpu_release(void *opaque, M3DagExpertTask *task){
+    (void)opaque;
+    if(task->kind==M3_DAG_ROUTED) eslot_release((ESlot*)task->weight_handle);
+}
+static int m3_dag_cpu_run(void *opaque, M3DagExpertTask *task){
+    M3DagCpuExec *x=opaque;
+    x->direct_task_output=0;
+#ifdef COLI_PIPE_TEST
+    /* Test seam: the integration harness uses the real scheduler state
+     * transition and failure branch, but avoids manufacturing numerical M3
+     * weights merely to make the routed B task fail after acquisition. */
+    if(g_pipe_test_m3_run){
+        if(task->kind==M3_DAG_SHARED){ memset(x->hh,0,(size_t)x->D*sizeof(*x->hh)); return 1; }
+        return 0;
+    }
+#endif
+    M3I4ExpertContext c;
+    QT *g=task->kind==M3_DAG_SHARED?&x->l->sh_gate:&((ESlot*)task->weight_handle)->g;
+    QT *u=task->kind==M3_DAG_SHARED?&x->l->sh_up:&((ESlot*)task->weight_handle)->u;
+    QT *d=task->kind==M3_DAG_SHARED?&x->l->sh_down:&((ESlot*)task->weight_handle)->d;
+    if(x->defer_reduction && m3_i4_context(&c,g,u,d,(const float*)task->input)){
+        int eid=task->kind==M3_DAG_SHARED?-1:task->expert_id;
+        trace_emit(TR_COMPUTE_START,x->layer,eid,(int)task->id.generation,task->route_index);
+        double t0=now_s();
+        int pipe_prof_compute=g_prof && pipe_prof_enabled();
+        if(pipe_prof_compute) pipe_prof_transition(0,1);
+        M3I4ExpertScratch s={falloc(c.gate.O),falloc(c.up.O),(size_t)c.gate.O,(size_t)c.up.O};
+        int ok=m3_i4_expert_run(&c,&s,(float*)task->output);
+        free(s.gate); free(s.up);
+        if(pipe_prof_compute) pipe_prof_transition(0,-1);
+        if(!ok) return 0;
+        double dt=now_s()-t0; x->m->t_emm+=dt;
+        if(g_prof){ x->m->t_ecpu+=dt; x->m->cpu_expert_bytes+=qt_bytes(g)+qt_bytes(u)+qt_bytes(d); x->m->cpu_expert_rows++; }
+        trace_emit(TR_COMPUTE_END,x->layer,eid,(int)task->id.generation,task->route_index);
+        x->direct_task_output=1;
+        return 1;
+    }
+    if(task->kind==M3_DAG_SHARED){
+        float *sg=falloc(x->sI), *su=falloc(x->sI);
+        matmul_qt(sg,x->x,&x->l->sh_gate,1);
+        matmul_qt(su,x->x,&x->l->sh_up,1);
+        act_glu(sg,su,x->sI);
+        matmul_qt(x->hh,sg,&x->l->sh_down,1);
+        free(sg); free(su);
+        return 1;
+    }
+    ESlot *e=(ESlot*)task->weight_handle;
+    if(!e || task->route_index<0 || task->route_index>=x->K) return 0;
+    memcpy(x->xg,x->x,(size_t)x->D*sizeof(float));
+    g_pq.x=NULL;  /* grouped-int4 is not an IDOT input path; keep no stale context */
+    trace_emit(TR_COMPUTE_START,x->layer,e->eid,(int)task->id.generation,task->route_index);
+    double t0=now_s();
+    expert_ffn(x->hh,x->gg,x->uu,x->xg,&e->g,&e->u,&e->d,1,x->I);
+    double dt=now_s()-t0; x->m->t_emm+=dt;
+    if(g_prof){ x->m->t_ecpu+=dt;
+        x->m->cpu_expert_bytes+=qt_bytes(&e->g)+qt_bytes(&e->u)+qt_bytes(&e->d);
+        x->m->cpu_expert_rows++; }
+    trace_emit(TR_COMPUTE_END,x->layer,e->eid,(int)task->id.generation,task->route_index);
+    return 1;
+}
+static int m3_dag_cpu_commit(void *opaque, M3DagExpertTask *task){
+    M3DagCpuExec *x=opaque;
+    if(x->defer_reduction){ if(!x->direct_task_output) memcpy(task->output,x->hh,(size_t)x->D*sizeof(float)); return 1; }
+    float w=task->kind==M3_DAG_SHARED ? 1.f : x->weights[task->route_index];
+    for(int d=0;d<x->D;d++) x->out[d]+=w*x->hh[d];
+    return 1;
+}
+static int m3_dag_cpu_eligible(const Model *m,const Layer *l,int S){
+    const Cfg *c=&m->c;
+    if(!g_m3_dag_serial || c->arch!=ARCH_M3 || S!=1 || g_pipe || g_uring ||
+       g_pilot_real || g_abl.mode || g_draft>0 || c->shared_inter<=0) return 0;
+#if !defined(_WIN32)
+    if(g_cluster_n) return 0;
+#endif
+#ifdef COLI_CUDA
+    if(g_cuda_enabled) return 0;
+#endif
+#ifdef COLI_METAL
+    if(g_metal_enabled) return 0;
+#endif
+#ifdef COLI_VULKAN
+    if(g_vulkan) return 0;
+#endif
+    return l->sh_gate.fmt==4 && l->sh_gate.gs==64 &&
+           l->sh_up.fmt==4 && l->sh_up.gs==64 && l->sh_down.fmt==4 && l->sh_down.gs==64;
+}
+static int m3_dag_pipe_eligible(const Model *m,const Layer *l,int S){
+    const Cfg *c=&m->c;
+    if(!g_m3_dag_pipe_ready || g_m3_dag_parallel || !g_m3_dag_serial || c->arch!=ARCH_M3 || S!=1 ||
+       !g_pipe || g_mmap || g_uring || g_pilot_real || g_abl.mode || g_draft>0 || c->shared_inter<=0) return 0;
+#if !defined(_WIN32)
+    if(g_cluster_n) return 0;
+#endif
+#ifdef COLI_CUDA
+    if(g_cuda_enabled) return 0;
+#endif
+#ifdef COLI_METAL
+    if(g_metal_enabled) return 0;
+#endif
+#ifdef COLI_VULKAN
+    if(g_vulkan) return 0;
+#endif
+    return l->sh_gate.fmt==4 && l->sh_gate.gs==64 &&
+           l->sh_up.fmt==4 && l->sh_up.gs==64 && l->sh_down.fmt==4 && l->sh_down.gs==64;
+}
+static int m3_dag_parallel_eligible(const Model *m,const Layer *l,int S){
+    const Cfg *c=&m->c;
+    if(!g_m3_dag_parallel || !g_m3_dag_serial || c->arch!=ARCH_M3 || S!=1 || !g_pipe ||
+       g_mmap || g_uring || g_pilot_real || g_abl.mode || g_draft>0 || c->shared_inter<=0) return 0;
+#if !defined(_WIN32)
+    if(g_cluster_n) return 0;
+#endif
+#ifdef COLI_CUDA
+    if(g_cuda_enabled) return 0;
+#endif
+#ifdef COLI_METAL
+    if(g_metal_enabled) return 0;
+#endif
+#ifdef COLI_VULKAN
+    if(g_vulkan) return 0;
+#endif
+#ifndef _OPENMP
+    return 0;
+#endif
+    return l->sh_gate.fmt==4 && l->sh_gate.gs==64 &&
+           l->sh_up.fmt==4 && l->sh_up.gs==64 && l->sh_down.fmt==4 && l->sh_down.gs==64;
+}
+static int m3_dag_parallel_workers(void){
+#ifdef _OPENMP
+    int max=omp_get_max_threads(); if(max<1) max=1;
+    int n=g_m3_dag_workers>0?g_m3_dag_workers:max-g_pipe_nw;
+    if(n<1) n=1; if(n>max) n=max; return n;
+#else
+    return 1;
+#endif
+}
+
 static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out, int with_shared){
     if(g_pilot_real){   /* barriera cross-layer: prendi possesso di QUESTO layer e aspetta
                          * l'eventuale load-pilota in volo sullo stesso layer (dopodiche' il
@@ -5792,6 +6464,8 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out, int 
     free(rank_buf); free(rank_w);
     if(g_prof)m->t_route+=now_s()-route_t0;
     rt_trace_end();
+    if(g_trace_on) for(int s=0;s<S;s++) for(int kk=0;kk<keff[s];kk++)
+        trace_emit(TR_ROUTE_READY,layer,idxs[(int64_t)s*K+kk],0,s);
     if(g_couple && cp_pred && S<=8)
         for(int s2=0;s2<S;s2++) couple_prefetch(m,layer,idxs+(int64_t)s2*K,keff[s2]);
     if(g_looka && S==1 && layer<c->n_layers){
@@ -5950,6 +6624,18 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out, int 
     float *vk_yh2 = vk2_on?falloc((int64_t)S*K*D):NULL;
 #endif
     int shared_on_gpu=0; (void)shared_on_gpu;   /* set by the Metal path when Phase E was fused */
+    /* A forward ID exists independently of tracing.  This is deliberately not
+     * m->n_fw: profiling/serve modes update that counter on different paths. */
+    uint64_t m3_dag_forward=(g_m3_dag_serial || g_m3_dag_parallel || g_m3_dag_digest) && c->arch==ARCH_M3 ?
+        atomic_fetch_add_explicit(&g_m3_dag_forward_seq,1,memory_order_relaxed)+1 : 0;
+    int m3_dag_all_blocks=m3_dag_cpu_eligible(m,l,S);
+    int m3_dag_pipe_all=m3_dag_pipe_eligible(m,l,S), m3_dag_parallel_all=m3_dag_parallel_eligible(m,l,S), m3_dag_pipe_shared_done=0;
+    if(g_m3_dag_parallel && !m3_dag_parallel_all && layer==3)
+        fprintf(stderr,"[M3_DAG] parallel path ineligible at layer 3 (serial=%d pipe=%d mmap=%d uring=%d draft=%d shared=%d)\n",
+                g_m3_dag_serial,g_pipe,g_mmap,g_uring,g_draft,c->shared_inter);
+    float *m3_dag_pipe_shared=NULL;
+    M3DagExpertTask m3_dag_pipe_shared_task={0};
+    int m3_dag_pipe_shared_task_valid=0;
     for(int base=0;base<nu;base+=64){
         int nb = nu-base<64 ? nu-base : 64;
 #if !defined(_WIN32)
@@ -5973,13 +6659,39 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out, int 
             }
 #endif
             use[j]=pin_indexed(m,layer,eid);
-            if(use[j]){ m->hits++; m->hit_pin++; }
+            if(use[j]){ m->hits++; m->hit_pin++; trace_emit(TR_WEIGHT_PIN,layer,eid,0,j); }
             if(!use[j]){
                 use[j]=ecache_indexed(m,layer,eid,0);
-                if(use[j]){ m->hits++; m->hit_ecache++; use[j]->used=(uint64_t)__atomic_add_fetch(&m->eclock,1,__ATOMIC_RELAXED); }
+                if(use[j]){ m->hits++; m->hit_ecache++; use[j]->used=(uint64_t)__atomic_add_fetch(&m->eclock,1,__ATOMIC_RELAXED); trace_emit(TR_WEIGHT_LRU,layer,eid,0,j); }
             }
             if(!use[j]){ qof[j]=nmiss; use[j]=&m->ws[nmiss]; missk[nmiss++]=j; m->miss++;
                 if(g_disk_split){ if(m->ld_ctx==1) m->miss_draft++; else if(m->ld_ctx==2) m->miss_absorb++; } }
+        }
+        M3DagParallelBlock *m3p=NULL;
+        if(m3_dag_parallel_all){
+            int preflight_ok=1;
+            for(int j=0;j<nb;j++) if(qof[j]<0 && use[j] && use[j]->slab &&
+                (use[j]->g.fmt!=4 || use[j]->u.fmt!=4 || use[j]->d.fmt!=4 ||
+                 use[j]->g.gs!=64 || use[j]->u.gs!=64 || use[j]->d.gs!=64)) preflight_ok=0;
+            if(with_shared && (l->sh_gate.fmt!=4 || l->sh_up.fmt!=4 || l->sh_down.fmt!=4 ||
+                               l->sh_gate.gs!=64 || l->sh_up.gs!=64 || l->sh_down.gs!=64)) preflight_ok=0;
+            if(preflight_ok){
+                for(int j=0;j<nb;j++) if(qof[j]<0 && use[j] && use[j]->slab &&
+                    (use[j]->g.I!=D || use[j]->g.O!=I || use[j]->u.I!=D || use[j]->u.O!=I ||
+                     use[j]->d.I!=I || use[j]->d.O!=D)) preflight_ok=0;
+            }
+            if(preflight_ok && base==0 && with_shared &&
+               (l->sh_gate.I!=D || l->sh_gate.O!=c->shared_inter ||
+                l->sh_up.I!=D || l->sh_up.O!=c->shared_inter ||
+                l->sh_down.I!=c->shared_inter || l->sh_down.O!=D)) preflight_ok=0;
+            if(preflight_ok) m3p=m3_dag_parallel_preflight(nb,D,I,base==0&&with_shared,c->shared_inter);
+            if(!m3p){
+                static int warned_parallel_prepare;
+                if(!warned_parallel_prepare){ warned_parallel_prepare=1;
+                    fprintf(stderr,"[M3_DAG] parallel preflight unavailable (nb=%d D=%d I=%d shared=%d fmt=%d/%d/%d)\n",
+                            nb,D,I,base==0&&with_shared,l->sh_gate.fmt,l->sh_up.fmt,l->sh_down.fmt); }
+                m3_dag_parallel_all=0; /* no PIPE work is published for an unprepared block */
+            }
         }
         int metal_done=0;
 #ifdef COLI_METAL
@@ -6112,7 +6824,7 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out, int 
              * pipe_wait() is an idempotent spin on ready[q], so the per-expert waits below stay
              * correct (and free) when a subset falls back to the CPU. */
             if(g_pipe && nmiss){ double tw=now_s();
-                for(int q=0;q<nmiss;q++) pipe_wait(q);
+                m3_dag_pipe_drain_slots(nmiss);
                 m->t_ewait += now_s()-tw; }
             MB_BUILD(1, 0);                                   /* missed experts, now loaded */
             if(nbb>0 && mgs_ok){
@@ -6400,7 +7112,283 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out, int 
             if(g_prof) g_vkb_acc+=now_s()-t_take0;   /* take-wait (t_egpu) + result accumulate */
         }
 #endif
-        if(!metal_done && !xexp_done && !vk_active)
+        int m3_dag_block_done=0;
+        if(m3p && m3_dag_parallel_all && !metal_done && !xexp_done && !vk_active){
+            M3DagExecutionContext dctx={.id={(uint64_t)(uintptr_t)m,m3_dag_forward,
+                ((uint64_t)(unsigned)base<<32)|3u,(uint32_t)layer},.resident_budget=(size_t)m->ecap};
+            M3DagExpertTask tasks[64]; memset(tasks,0,sizeof(tasks));
+            uint64_t pipe_generation=atomic_load_explicit(&g_pp.cur,memory_order_acquire);
+            pipe_generation >>= 8;
+            int fallback=0,submitted=0; unsigned char submitted_mask[64]={0};
+            double block_t0=now_s(), cpu_sum=0;
+            int team_workers=m3_dag_parallel_workers();
+            int tile_count=(team_workers+nb-1)/nb; if(tile_count<1) tile_count=1;
+            M3DagParallelExpert shared_e; M3DagExpertTask shared_task;
+            memset(&shared_e,0,sizeof(shared_e)); memset(&shared_task,0,sizeof(shared_task));
+            int have_shared=base==0 && with_shared;
+            if(have_shared){
+                shared_e.layer=layer; shared_e.eid=-1; shared_e.route=-1;
+                shared_e.generation=dctx.id.generation; shared_e.shared=1; shared_e.tiles=tile_count;
+                shared_e.output=m3p->shared_output;
+                shared_e.scratch.gate=m3p->shared_gate; shared_e.scratch.up=m3p->shared_up;
+                shared_e.scratch.gate_n=shared_e.scratch.up_n=(size_t)c->shared_inter;
+                shared_e.output_n=(size_t)D;
+                if(!m3_i4_context(&shared_e.c,&l->sh_gate,&l->sh_up,&l->sh_down,x) ||
+                   shared_e.c.gate.I!=D || shared_e.c.gate.O!=c->shared_inter ||
+                   shared_e.c.down.I!=c->shared_inter || shared_e.c.down.O!=D) fallback=1;
+                m3_dag_task_init(&shared_task,dctx.id,M3_DAG_SHARED,-1,-1);
+                shared_task.input=x; shared_task.scratch=&shared_e.scratch;
+                shared_task.output=shared_e.output; shared_task.input_ready=1;
+                shared_task.weight_lease=1;
+                if(!fallback && (!m3_dag_weights_queued(&shared_task) || !m3_dag_weights_loading(&shared_task) ||
+                   !m3_dag_weights_resident(&shared_task,&l->sh_gate) || !m3_dag_task_ready(&dctx,&shared_task))) fallback=1;
+            }
+            for(int j=0;j<nb;j++){
+                int route=-1; for(int kk=0;kk<keff[0];kk++) if(idxs[kk]==uniq[base+j]){ route=kk; break; }
+                M3DagParallelExpert *e=&m3p->expert[j];
+                if(route<0 || !use[j]){ fallback=1; break; }
+                e->eid=uniq[base+j]; e->route=route; e->slot=use[j]; e->layer=layer;
+                e->generation=dctx.id.generation; e->tiles=tile_count; e->output_n=(size_t)D;
+                m3_dag_task_init(&tasks[j],dctx.id,M3_DAG_ROUTED,e->eid,route);
+                tasks[j].input=x; tasks[j].scratch=&e->scratch; tasks[j].output=e->output;
+                tasks[j].input_ready=1; tasks[j].route_committed=1;
+                if(!m3_dag_weights_queued(&tasks[j]) || !m3_dag_weights_loading(&tasks[j])){ fallback=1; break; }
+            }
+            #pragma omp parallel num_threads(m3_dag_parallel_workers())
+            #pragma omp single
+            {
+                if(!fallback && have_shared){
+                    m3_dag_parallel_submit(&shared_task);
+                    #pragma omp task shared(shared_e,shared_task)
+                    {
+                        if(m3_dag_context_failed(&dctx)){
+                            shared_e.ok=0; m3_dag_parallel_fail(&shared_task);
+                        } else {
+                            m3_dag_parallel_start(&shared_task);
+                            shared_e.ok=m3_dag_parallel_expert_run(&shared_e);
+                            if(!shared_e.ok) m3_dag_context_fail(&dctx);
+                            if(shared_e.ok) m3_dag_parallel_output_ready(&shared_task); else m3_dag_parallel_fail(&shared_task);
+                        }
+                        shared_task.weight_lease=0;
+                    }
+                }
+                while(!fallback && !m3_dag_context_failed(&dctx) && submitted<nb){
+                    int pick=-1;
+                    for(int q=0;q<nb;q++) if(!submitted_mask[q]){
+                        ESlot *e=use[q];
+                        if(qof[q]>=0 && !pipe_ready(qof[q])) continue;
+                        if(qof[q]>=0) pipe_wait(qof[q]);
+                        if(!e->slab || e->eid!=tasks[q].expert_id ||
+                           !m3_i4_context(&m3p->expert[q].c,&e->g,&e->u,&e->d,x) ||
+                           m3p->expert[q].c.gate.I!=D || m3p->expert[q].c.gate.O!=I ||
+                           m3p->expert[q].c.down.I!=I || m3p->expert[q].c.down.O!=D ||
+                           !m3_dag_weights_resident(&tasks[q],e) || !m3_dag_task_ready(&dctx,&tasks[q])){
+                            fallback=1; break;
+                        }
+                        pick=q; break;
+                    }
+                    if(fallback) break;
+                    if(pick<0){
+                        int pending[64],np=0; for(int q=0;q<nb;q++) if(!submitted_mask[q] && qof[q]>=0) pending[np++]=qof[q];
+                        if(!np){ fallback=1; break; }
+                        int waited=0; double tw=now_s(); int got=pipe_wait_any(pipe_generation,pending,np,&waited);
+                        if(waited) m->t_ewait+=now_s()-tw;
+                        if(got<0){ fallback=1; break; }
+                        continue;
+                    }
+                    if(!m3_dag_cpu_acquire(NULL,&tasks[pick])){ fallback=1; break; }
+                    tasks[pick].weight_lease=1;
+                    if(!m3_dag_parallel_submit(&tasks[pick])){ tasks[pick].weight_lease=0; m3_dag_cpu_release(NULL,&tasks[pick]); fallback=1; break; }
+                    submitted_mask[pick]=1;
+                    trace_emit(TR_COMPUTE_READY,layer,tasks[pick].expert_id,(int)dctx.id.generation,pick);
+                    trace_emit(TR_WEIGHTS_ACQUIRED,layer,tasks[pick].expert_id,(int)dctx.id.generation,pick);
+                    int q=pick;
+                    #pragma omp task firstprivate(q) shared(m3p,tasks)
+                    {
+                        M3DagParallelExpert *e=&m3p->expert[q];
+                        if(m3_dag_context_failed(&dctx)){
+                            e->ok=0; m3_dag_parallel_fail(&tasks[q]);
+                        } else {
+                            m3_dag_parallel_start(&tasks[q]);
+                            e->ok=m3_dag_parallel_expert_run(e);
+                            if(!e->ok) m3_dag_context_fail(&dctx);
+                            if(e->ok) m3_dag_parallel_output_ready(&tasks[q]); else m3_dag_parallel_fail(&tasks[q]);
+                        }
+                        tasks[q].weight_lease=0; m3_dag_cpu_release(NULL,&tasks[q]);
+                        trace_emit(TR_WEIGHTS_RELEASED,layer,tasks[q].expert_id,(int)dctx.id.generation,q);
+                    }
+                    submitted++;
+                }
+                #pragma omp taskwait
+            }
+            if(m3_dag_context_failed(&dctx)) fallback=1;
+            if(!fallback){
+                if(have_shared && !shared_e.ok) fallback=1;
+                for(int q=0;q<nb;q++) if(!m3p->expert[q].ok) fallback=1;
+            }
+            if(fallback){
+                static int warned_parallel_run;
+                if(!warned_parallel_run){ warned_parallel_run=1;
+                    fprintf(stderr,"[M3_DAG] parallel block fell back after dispatch (layer=%d submitted=%d nb=%d)\n",
+                            layer,submitted,nb); }
+                m3_dag_pipe_drain_slots(nmiss);
+                m3_dag_parallel_free(m3p); m3p=NULL; m3_dag_parallel_all=0;
+#ifdef COLI_PIPE_TEST
+                if(g_pipe_test_fatal) g_pipe_test_fatal(layer);
+#endif
+            } else {
+                for(int q=0;q<nb;q++){
+                    M3DagParallelExpert *e=&m3p->expert[q]; cpu_sum+=e->elapsed;
+                    for(int kk=0;kk<keff[0];kk++) if(kk==e->route){
+                        float w=ws[kk]; for(int d=0;d<D;d++) out[d]+=w*e->output[d];
+                        m3_dag_parallel_reduce(&tasks[q]);
+                        trace_emit(TR_REDUCTION_DONE,layer,e->eid,(int)dctx.id.generation,kk); break;
+                    }
+                }
+                if(g_prof){ m->t_ecpu+=cpu_sum; m->cpu_expert_rows+=(uint64_t)(nb*(I+D));
+                    for(int q=0;q<nb;q++){ ESlot *e=m3p->expert[q].slot;
+                        m->cpu_expert_bytes+=qt_bytes(&e->g)+qt_bytes(&e->u)+qt_bytes(&e->d); }}
+                m->t_emm+=now_s()-block_t0;
+                if(have_shared){
+                    m3_dag_pipe_shared_task=shared_task;
+                    m3_dag_pipe_shared_task_valid=1;
+                    m3_dag_pipe_shared=m3p->shared_output; m3p->shared_output=NULL;
+                    m3_dag_pipe_shared_done=1;
+                }
+                trace_emit(TR_EXECUTOR_DRAINED,layer,-1,(int)dctx.id.generation,submitted);
+                if(atomic_fetch_add_explicit(&g_m3_dag_serial_routed_tasks,(uint64_t)nb,memory_order_relaxed)==0)
+                    fprintf(stderr,"[M3_DAG] active: bounded parallel tasks, private scratch, fixed reduction order\n");
+                m3_dag_parallel_free(m3p); m3p=NULL; m3_dag_block_done=1;
+            }
+        }
+        if(m3_dag_pipe_all && !metal_done && !xexp_done && !vk_active){
+            M3DagExecutionContext dctx={.id={(uint64_t)(uintptr_t)m,m3_dag_forward,
+                ((uint64_t)(unsigned)base<<32)|2u,(uint32_t)layer},.resident_budget=(size_t)m->ecap};
+            M3DagCpuExec dx={m,l,layer,D,I,sI,K,x,idxs,ws,xg,gg,uu,hh,out,1,0};
+            M3DagSerialOps ops={m3_dag_cpu_acquire,m3_dag_cpu_release,m3_dag_cpu_run,m3_dag_cpu_commit,&dx};
+            uint64_t pipe_generation=atomic_load_explicit(&g_pp.cur,memory_order_acquire)>>8;
+            M3DagExpertTask tasks[64]; int ntask=0, valid=1, finished=0, pipe_fallback=0;
+            float *private_out=falloc((int64_t)nb*D);
+            /* The shared weights are resident.  Run them while PIPE workers load
+             * routed misses, but defer their add until every routed contribution
+             * has been reduced in the old order. */
+            if(!m3_dag_pipe_shared_done && with_shared){
+                M3DagExpertTask shared;
+                if(!m3_dag_pipe_shared) m3_dag_pipe_shared=falloc(D);
+                m3_dag_task_init(&shared,dctx.id,M3_DAG_SHARED,-1,-1);
+                shared.input=x; shared.scratch=hh; shared.output=m3_dag_pipe_shared; shared.input_ready=1;
+                if(!m3_dag_weights_queued(&shared) || !m3_dag_weights_loading(&shared) ||
+                   !m3_dag_weights_resident(&shared,&l->sh_gate) || !m3_dag_task_ready(&dctx,&shared) ||
+                   !m3_dag_serial_execute(&dctx,&shared,&ops) || !m3_dag_layer_retired(&dctx,&shared,1)) valid=0;
+                else m3_dag_pipe_shared_done=1;
+            }
+            for(int j=0;j<nb && valid;j++){
+                ESlot *e=use[j]; int route=-1;
+                for(int kk=0;kk<keff[0];kk++) if(idxs[kk]==uniq[base+j]){ route=kk; break; }
+                /* A PIPE miss owns this slot until its acquire-side wait.  Do
+                 * not inspect its old eid/QT metadata before that publication. */
+                if(route<0 || !e){ pipe_fallback=1; break; }
+                m3_dag_task_init(&tasks[ntask],dctx.id,M3_DAG_ROUTED,uniq[base+j],route);
+                tasks[ntask].input=x; tasks[ntask].scratch=hh; tasks[ntask].output=private_out+(int64_t)ntask*D;
+                tasks[ntask].input_ready=1; tasks[ntask].route_committed=1;
+                if(!m3_dag_weights_queued(&tasks[ntask]) || !m3_dag_weights_loading(&tasks[ntask])){
+                    pipe_fallback=1; break;
+                }
+                if(valid && qof[j]<0){
+                    if(!e->slab || e->eid!=uniq[base+j] || e->g.fmt!=4 || e->u.fmt!=4 || e->d.fmt!=4 ||
+                       e->g.gs!=64 || e->u.gs!=64 || e->d.gs!=64 ||
+                       !m3_dag_weights_resident(&tasks[ntask],e) || !m3_dag_task_ready(&dctx,&tasks[ntask])){
+                        /* Eligibility is a whole routed block contract.  A resident
+                         * mixed-format expert is valid for the legacy PIPE path, not
+                         * a Step-4 task failure: drain the dispatched misses and let
+                         * that path consume the complete block. */
+                        pipe_fallback=1; break;
+                    }
+                }
+                ntask++;
+            }
+            while(!pipe_fallback && valid && finished<ntask){
+                int waited=0; double tw=now_s();
+                int pick=m3_dag_pipe_pick_ready(tasks,ntask,qof,pipe_generation,&waited);
+                if(waited) m->t_ewait+=now_s()-tw;
+                if(pick<0){ valid=0; break; }
+                if(tasks[pick].compute_state==M3_DAG_COMPUTE_WAITING){
+                    ESlot *e=use[pick];
+                    if(!e->slab || e->eid!=tasks[pick].expert_id ||
+                       !m3_dag_weights_resident(&tasks[pick],e) ||
+                       !m3_dag_task_ready(&dctx,&tasks[pick])){ valid=0; break; }
+                    if(e->g.fmt!=4 || e->u.fmt!=4 || e->d.fmt!=4 ||
+                       e->g.gs!=64 || e->u.gs!=64 || e->d.gs!=64){
+                        /* A just-published mixed-format miss is supported by
+                         * legacy PIPE but outside this grouped-int4 executor. */
+                        pipe_fallback=1; break;
+                    }
+                    continue; /* another completion may now be ready; rescan before choosing */
+                }
+                if(!m3_dag_serial_execute(&dctx,&tasks[pick],&ops)){ valid=0; break; }
+                finished++;
+            }
+            if(pipe_fallback){
+                /* All published loads must finish before the legacy PIPE loop or
+                 * the end-of-block LRU swap can touch ws[].  This is an ordinary
+                 * unsupported-format fallback, never a partial DAG result. */
+                m3_dag_pipe_drain_slots(nmiss);
+                free(private_out);
+                m3_dag_pipe_all=0;
+            } else if(valid && m3_dag_layer_retired(&dctx,tasks,(size_t)ntask)){
+                for(int kk=0;kk<keff[0];kk++) for(int q=0;q<ntask;q++) if(tasks[q].route_index==kk){
+                    float *src=private_out+(int64_t)q*D, w=ws[kk];
+                    for(int d=0;d<D;d++) out[d]+=w*src[d];
+                    break;
+                }
+                free(private_out);
+                m3_dag_block_done=1;
+            } else {
+                /* A failure after publication still acknowledges every worker
+                 * write before the process can reclaim/swap a PIPE slot. */
+                m3_dag_pipe_drain_slots(nmiss);
+                free(private_out);
+#ifdef COLI_PIPE_TEST
+                if(g_pipe_test_fatal) g_pipe_test_fatal(layer);
+#endif
+                fprintf(stderr,"[M3_DAG] PIPE task failure at layer %d; refusing partial fallback\n",layer); exit(1);
+            }
+        }
+        if(m3_dag_all_blocks && !metal_done && !xexp_done && !vk_active){
+            M3DagExecutionContext dctx={.id={(uint64_t)(uintptr_t)m,m3_dag_forward,
+                ((uint64_t)(unsigned)base<<32)|1u,(uint32_t)layer},.resident_budget=(size_t)m->ecap};
+            M3DagCpuExec dx={m,l,layer,D,I,sI,K,x,idxs,ws,xg,gg,uu,hh,out,0,0};
+            M3DagSerialOps ops={m3_dag_cpu_acquire,m3_dag_cpu_release,m3_dag_cpu_run,m3_dag_cpu_commit,&dx};
+            M3DagExpertTask tasks[64]; int ntask=0, valid=1;
+            for(int j=0;j<nb;j++){
+                ESlot *e=use[j]; int route=-1;
+                for(int kk=0;kk<keff[0];kk++) if(idxs[kk]==uniq[base+j]){ route=kk; break; }
+                /* Every selected task is one M3 routed expert.  Keep the old
+                 * route order for reduction even though uniq[] happens to be
+                 * first-occurrence ordered in the S=1 scope. */
+                if(route<0 || !e || !e->slab || e->g.fmt!=4 || e->u.fmt!=4 || e->d.fmt!=4 ||
+                   e->g.gs!=64 || e->u.gs!=64 || e->d.gs!=64){ valid=0; break; }
+                m3_dag_task_init(&tasks[ntask],dctx.id,M3_DAG_ROUTED,e->eid,route);
+                tasks[ntask].input=x; tasks[ntask].scratch=hh; tasks[ntask].output=out;
+                tasks[ntask].input_ready=1; tasks[ntask].route_committed=1;
+                if(!m3_dag_weights_queued(&tasks[ntask]) || !m3_dag_weights_loading(&tasks[ntask]) ||
+                   !m3_dag_weights_resident(&tasks[ntask],e) || !m3_dag_task_ready(&dctx,&tasks[ntask])){ valid=0; break; }
+                ntask++;
+            }
+            if(valid){
+                for(int q=0;q<ntask;q++) if(!m3_dag_serial_execute(&dctx,&tasks[q],&ops)){
+                    fprintf(stderr,"[M3_DAG] serial task failure at layer %d expert %d; refusing partial fallback\n",
+                            layer,tasks[q].expert_id); exit(1);
+                }
+                if(!m3_dag_layer_retired(&dctx,tasks,(size_t)ntask)){
+                    fprintf(stderr,"[M3_DAG] unterminated task at layer %d; refusing cache reuse\n",layer); exit(1);
+                }
+                if(atomic_fetch_add_explicit(&g_m3_dag_serial_routed_tasks,(uint64_t)ntask,memory_order_relaxed)==0)
+                    fprintf(stderr,"[M3_DAG] active: serial routed tasks, fixed reduction order, ESlot leases\n");
+                m3_dag_block_done=1;
+            } else m3_dag_all_blocks=0; /* no task published for this unsupported block */
+        }
+        if(!m3_dag_block_done && !metal_done && !xexp_done && !vk_active)
         for(int j=0;j<nb;j++){ int eid=uniq[base+j]; ESlot *e=use[j];
 #ifdef COLI_CUDA
             if(early_issued && done_j[j]) continue;    /* computing on the GPU right now */
@@ -6467,7 +7455,9 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out, int 
                 for(int r=0;r<nr;r++){ memcpy(xqg+(int64_t)r*D, xq_all+(int64_t)rows[r]*D,(size_t)D); sxg[r]=sx_all[rows[r]]; xsumg[r]=xsum_all[rows[r]]; }
                 g_pq.x=xg; g_pq.S=nr; g_pq.I=D; g_pq.xq=xqg; g_pq.sx=sxg; g_pq.xsum=xsumg;
             }
+            trace_emit(TR_COMPUTE_START,layer,eid,0,j);
             expert_ffn(hh,gg,uu,xg,&e->g,&e->u,&e->d,nr,I);
+            trace_emit(TR_COMPUTE_END,layer,eid,0,j);
             for(int r=0;r<nr;r++){ float *os=out+(int64_t)rows[r]*D, wgt=rw[r], *hr=hh+(int64_t)r*D;
                 for(int d=0;d<D;d++) os[d]+=wgt*hr[d]; }
             double dt=now_s()-t0;m->t_emm+=dt;if(g_prof){m->t_ecpu+=dt;
@@ -6642,6 +7632,34 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out, int 
         }
     }
     /* ---- FASE E: shared expert (PIPE2: gia' sul device; Metal CB: gia' sommata) ---- */
+    if(m3_dag_pipe_shared_done){
+        for(int d=0;d<D;d++) out[d]+=m3_dag_pipe_shared[d];
+        if(m3_dag_pipe_shared_task_valid){
+            if(!m3_dag_parallel_reduce(&m3_dag_pipe_shared_task)){
+                fprintf(stderr,"[M3_DAG] shared parallel reduction lifecycle failure at layer %d; refusing partial fallback\n",layer);
+                exit(1);
+            }
+            trace_emit(TR_REDUCTION_DONE,layer,-1,(int)m3_dag_pipe_shared_task.id.generation,-1);
+        }
+        free(m3_dag_pipe_shared);
+        goto shared_done;
+    }
+    if(m3_dag_all_blocks && with_shared){
+        M3DagExecutionContext dctx={.id={(uint64_t)(uintptr_t)m,m3_dag_forward,UINT64_MAX,(uint32_t)layer},
+                                     .resident_budget=(size_t)m->ecap};
+        M3DagCpuExec dx={m,l,layer,D,I,sI,K,x,idxs,ws,xg,gg,uu,hh,out,0,0};
+        M3DagSerialOps ops={m3_dag_cpu_acquire,m3_dag_cpu_release,m3_dag_cpu_run,m3_dag_cpu_commit,&dx};
+        M3DagExpertTask shared;
+        m3_dag_task_init(&shared,dctx.id,M3_DAG_SHARED,-1,-1);
+        shared.input=x; shared.scratch=hh; shared.output=out; shared.input_ready=1;
+        if(!m3_dag_weights_queued(&shared) || !m3_dag_weights_loading(&shared) ||
+           !m3_dag_weights_resident(&shared,&l->sh_gate) || !m3_dag_task_ready(&dctx,&shared) ||
+           !m3_dag_serial_execute(&dctx,&shared,&ops) || !m3_dag_layer_retired(&dctx,&shared,1)){
+            fprintf(stderr,"[M3_DAG] shared task failure at layer %d; refusing partial fallback\n",layer); exit(1);
+        }
+        atomic_fetch_add_explicit(&g_m3_dag_serial_shared_tasks,1,memory_order_relaxed);
+        goto shared_done;
+    }
     if(!with_shared) goto shared_done;
     {
     float *sg=NULL,*su=NULL;int shared_cuda=0;
@@ -6709,6 +7727,10 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out, int 
     free(sg); free(su);
     }
 shared_done:
+    if(g_m3_dag_digest && c->arch==ARCH_M3 && S==1)
+        fprintf(stderr,"[M3_DAG] output forward=%llu layer=%d fnv64=%016llx\n",
+                (unsigned long long)m3_dag_forward,layer,
+                (unsigned long long)m3_dag_output_hash(out,D));
     free(logits_all); free(choice); free(idxs); free(ws); free(keff); free(uniq);
     g_pq.x=NULL;   /* xg sta per essere liberato: nessun contesto deve sopravvivergli
                     * EN: xg is about to be freed — no context may outlive it */
@@ -7411,6 +8433,12 @@ static void layers_forward_rows_range(Model *m, float *x, int S, int pos_base,
                                       const int *positions,
                                       int layer_begin, int layer_end){
     Cfg *c=&m->c; int D=c->hidden;
+    uint64_t trace_forward=0;
+    if(g_trace_on){
+        trace_forward=atomic_fetch_add_explicit(&g_trace_forward_seq,1,memory_order_relaxed)+1;
+        atomic_store_explicit(&g_trace_forward_active,trace_forward,memory_order_release);
+        trace_emit(TR_FORWARD_BEGIN,layer_begin,-1,0,S);
+    }
     if(g_pilot_real){   /* nuovo forward: il possesso-layer riparte da -1 (i layer si rifanno da 0) */
         pthread_mutex_lock(&g_pilot_mx);
         atomic_store_explicit(&g_cur_moe_layer,-1,memory_order_release);
@@ -7493,6 +8521,10 @@ static void layers_forward_rows_range(Model *m, float *x, int S, int pos_base,
     if(x_dev_on>=0) coli_cuda_pipe_download(x_dev_on,x_dev,x,xb);
 #endif
     free(nrm); free(tmp);
+    if(g_trace_on){
+        trace_emit(TR_FORWARD_END,layer_end-1,-1,0,S);
+        (void)trace_forward;
+    }
 }
 static void layers_forward_rows(Model *m, float *x, int S, int pos_base,
                                 KVState *const *kvs, const int *positions){
@@ -8339,8 +9371,8 @@ static void profile_print(Model *m, double elapsed){
     printf("PROFILE: expert-disk %.3fs service / %.3fs wait | expert-matmul %.3fs | attention %.3fs "
            "(including kvb %.3fs) | lm_head %.3fs | other %.3fs\n",
         edisk_s(),m->t_ewait,m->t_emm,m->t_attn,m->t_kvb,m->t_head,elapsed-accounted);
-    printf("ATTENTION: projection/RoPE %.3fs | score-softmax-value %.3fs | output projection %.3fs\n",
-        m->t_aproj,m->t_acore,m->t_aout);
+    printf("ATTENTION: projections %.3fs | norm/RoPE/cache %.3fs | MSA scan %.3fs | MSA select %.3fs | score-softmax-value %.3fs | output projection %.3fs\n",
+        m->t_aproj,m->t_anormrope,m->t_msa_scan,m->t_msa_select,m->t_acore,m->t_aout);
     if(g_prof)printf("P0-EXEC: routed CPU %.3fs / %.2f GB/s (%llu row) | routed GPU critical %.3fs | router %.3fs | residual P2P %.3fs / %llu hop | orchestration %.3fs\n",
         m->t_ecpu,m->t_ecpu>0?m->cpu_expert_bytes/1e9/m->t_ecpu:0.0,
         (unsigned long long)m->cpu_expert_rows,m->t_egpu,m->t_route,m->t_p2p,(unsigned long long)m->n_p2p,
@@ -8382,7 +9414,8 @@ static void profile_reset(Model *m){
 #ifdef COLI_VULKAN
     g_vkb_cls=g_vkb_issue=g_vkb_acc=g_vkb_wrk=g_vkb_join=0; g_vkb_blocks=g_vkb_nvk=g_vkb_nvk2=g_vkb_ncpu=0;
 #endif
-    m->t_aproj=m->t_acore=m->t_aout=0;
+    m->t_aproj=m->t_anormrope=m->t_msa_scan=m->t_msa_select=m->t_acore=m->t_aout=0;
+    m->msa_scan_calls=m->msa_scan_parallel_calls=m->msa_scan_parallel_blocks=m->msa_scan_parallel_workers=0;
     atomic_store_explicit(&g_edisk_ns,0,memory_order_relaxed);
 }
 
@@ -8423,6 +9456,11 @@ static void prof_report(Model *m, const ProfBase *b, double elapsed, int tokens,
     }
     double io_w=m->t_ewait-b->ewait;    /* stall the compute thread felt */
     double io_svc=edisk_s()-b->edisk;   /* read service on the loading threads (overlaps compute) */
+    int64_t pipe_io_ns,pipe_compute_ns,pipe_overlap_ns;
+    pipe_prof_snapshot(&pipe_io_ns,&pipe_compute_ns,&pipe_overlap_ns);
+    double pipe_io_wall=(pipe_io_ns-b->pipe_io_ns)*1e-9;
+    double pipe_compute_wall=(pipe_compute_ns-b->pipe_compute_ns)*1e-9;
+    double pipe_overlap_wall=(pipe_overlap_ns-b->pipe_overlap_ns)*1e-9;
     uint64_t dhp=m->hit_pin-b->hit_pin, dhe=m->hit_ecache-b->hit_ecache;   /* split #336 */
     fprintf(f,"[PROF] expert I/O: %.3f GB fetched (%.1f MB/token, %.2f GB/s over the run%s) | "
               "hit %.1f%% (%llu pin + %llu lru / %llu load) | %.1f loads/token | %.1fs read service / %.1fs felt wait\n",
@@ -8430,6 +9468,11 @@ static void prof_report(Model *m, const ProfBase *b, double elapsed, int tokens,
         g_mmap?"; COLI_MMAP=1: page cache may serve part":"",
         hitp,(unsigned long long)dhp,(unsigned long long)dhe,(unsigned long long)dm, tokens>0?(double)dq/tokens:0.0,
         io_svc,io_w);
+    if(g_pipe)
+        fprintf(f,"[PROF] PIPE overlap: I/O-active %.3fs | compute-active %.3fs | concurrent %.3fs (%.1f%% of I/O-active, %.1f%% of compute-active)\n",
+            pipe_io_wall,pipe_compute_wall,pipe_overlap_wall,
+            pipe_io_wall>1e-9?100.0*pipe_overlap_wall/pipe_io_wall:0.0,
+            pipe_compute_wall>1e-9?100.0*pipe_overlap_wall/pipe_compute_wall:0.0);
     /* DISK-CLASS: per-load cold/warm classification vs. which fd ACTUALLY served it.
      * Three per-class rates, labeled to keep the units unambiguous (ambiguous units
      * mislead -- measured lesson): GB/s-thread = bytes / thread-seconds (per-read
@@ -8478,6 +9521,15 @@ static void prof_report(Model *m, const ProfBase *b, double elapsed, int tokens,
     double f_io=io_w/elapsed, f_emm=emm/elapsed, f_attn=attn/elapsed;
     fprintf(f,"[PROF] time shares: expert-I/O %.0f%% | expert-matmul %.0f%% | attention %.0f%% | lm_head %.0f%% | other %.0f%%\n",
         100*f_io,100*f_emm,100*f_attn,100*head/elapsed,100*other/elapsed);
+    if(m->c.arch==ARCH_M3)
+        fprintf(f,"[PROF] M3 attention: projections %.3fs | norm/RoPE/cache %.3fs | MSA scan %.3fs | MSA select %.3fs | core %.3fs | output %.3fs\n",
+            m->t_aproj-b->aproj,m->t_anormrope-b->anormrope,m->t_msa_scan-b->msa_scan,
+            m->t_msa_select-b->msa_select,m->t_acore-b->acore,m->t_aout-b->aout);
+    if(m->c.arch==ARCH_M3 && m->msa_scan_calls-b->msa_scan_calls)
+        fprintf(f,"[PROF] M3 MSA scan workers: %llu/%llu S=1 calls parallel | %llu block jobs | %llu worker-team slots | threshold %d blocks\n",
+            (unsigned long long)(m->msa_scan_parallel_calls-b->msa_scan_parallel_calls),(unsigned long long)(m->msa_scan_calls-b->msa_scan_calls),
+            (unsigned long long)(m->msa_scan_parallel_blocks-b->msa_scan_parallel_blocks),(unsigned long long)(m->msa_scan_parallel_workers-b->msa_scan_parallel_workers),
+            g_msa_scan_min_blocks);
     double slow=ecpu>egpu?ecpu:egpu,fast=ecpu<egpu?ecpu:egpu;
     fprintf(f,"[PROF] P0 execution: routed CPU %.3fs / %.2f GB/s (%llu row) | routed GPU critical %.3fs | tier straggler %.2fx | "
               "router %.3fs | residual P2P %.3fs (%llu hop, %.3f ms/hop) | orchestration %.3fs\n",
@@ -11185,6 +12237,16 @@ int main(int argc, char **argv){
     g_prefetch = getenv("PREFETCH")?atoi(getenv("PREFETCH")):0;
     g_mmap = getenv("COLI_MMAP")?atoi(getenv("COLI_MMAP")):0;
     if(g_mmap) fprintf(stderr,"[MMAP] expert = viste zero-copy nei file (page cache = cache)\n");
+    g_m3_dag_serial = getenv("COLI_M3_DAG_SERIAL")?atoi(getenv("COLI_M3_DAG_SERIAL")):0;
+    g_m3_dag_pipe_ready = getenv("COLI_M3_DAG_PIPE")?atoi(getenv("COLI_M3_DAG_PIPE")):0;
+    g_m3_dag_parallel = getenv("COLI_M3_DAG_PARALLEL")?atoi(getenv("COLI_M3_DAG_PARALLEL")):0;
+    g_m3_dag_workers = getenv("COLI_M3_DAG_WORKERS")?atoi(getenv("COLI_M3_DAG_WORKERS")):0;
+    if(g_m3_dag_workers<0) g_m3_dag_workers=0;
+    g_m3_dag_digest = getenv("COLI_M3_DAG_DIGEST")?atoi(getenv("COLI_M3_DAG_DIGEST")):0;
+    if(g_m3_dag_serial) fprintf(stderr,"[M3_DAG] serial contract requested (CPU S=1 grouped-int4/g64 only)\n");
+    if(g_m3_dag_pipe_ready) fprintf(stderr,"[M3_DAG] PIPE ready-first contract requested (requires serial contract and PIPE=1)\n");
+    if(g_m3_dag_parallel) fprintf(stderr,"[M3_DAG] bounded parallel-task contract requested (requires serial contract, PIPE=1, OpenMP)\n");
+    if(g_m3_dag_workers) fprintf(stderr,"[M3_DAG] compute team requested: %d workers (capped at the OpenMP team)\n",g_m3_dag_workers);
     numa_init();                                       /* COLI_NUMA=1: expert-slab interleave (#82) */
     g_topk = getenv("TOPK")?atoi(getenv("TOPK")):0;
     g_topp = getenv("TOPP")?atof(getenv("TOPP")):0;
@@ -11753,8 +12815,13 @@ int main(int argc, char **argv){
       /* SEMPRE: senza clamp la LRU cresce fino a cap*76 layer = decine di GB -> OOM-kill.
        * RAM_GB assente o <=0 = budget automatico da MemAvailable. */
       cap_for_ram(&m, ram_env, ebits, est_ctx);
+      if(getenv("COLI_MSA_SCAN_MIN_BLOCKS")){
+          g_msa_scan_min_blocks=atoi(getenv("COLI_MSA_SCAN_MIN_BLOCKS"));
+          if(g_msa_scan_min_blocks<1) g_msa_scan_min_blocks=1;
+      }
       g_prof = getenv("PROF")?atoi(getenv("PROF")):0;   /* PROF=1: opt-in performance profile */
-      if(g_prof) prof_config(&m, ram_env, est_ctx); }
+      if(g_prof) prof_config(&m, ram_env, est_ctx);
+      trace_init(getenv("COLI_TRACE")); }
 #ifdef COLI_VULKAN
     vk_dense_preload(&m);   /* dense claims VRAM first — the tier fill sizes to the remainder */
     vk_registry_fill(&m);   /* pinned VK expert tier: needs the usage history loaded above */
