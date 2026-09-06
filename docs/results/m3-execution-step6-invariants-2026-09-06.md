@@ -158,7 +158,9 @@ at `tests/test_i4_grouped.c:325`; the executor tasks now use explicit
 run still required to confirm the fix. That report is emitted from GCC's
 `libgomp` task runtime; the CI gate now installs Clang plus LLVM `libomp` and
 will rerun the same focused suite there to separate runtime instrumentation
-noise from an application race.
+noise from an application race. The LLVM run (`34034659201`) instead located
+the same capture at the test-only outer task fan-out, so that harness now uses
+OpenMP sections while retaining the executor's internal taskgroups.
 
 ## Current gate record
 

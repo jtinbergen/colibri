@@ -318,15 +318,16 @@ static int check_parallel_task_group(int unfused){
     M3DagParallelExpert pa={0},pb={0};
     pa.c=a.context; pa.scratch=a.scratch; pa.output=a.output_store+M3C_CAN; pa.output_n=M3C_D; pa.eid=11; pa.route=0; pa.tiles=2; pa.layer=1; pa.generation=1;
     pb.c=b.context; pb.scratch=b.scratch; pb.output=b.output_store+M3C_CAN; pb.output_n=M3C_D; pb.eid=12; pb.route=1; pb.tiles=2; pb.layer=1; pb.generation=1;
-    M3DagParallelExpert *epa=&pa, *epb=&pb;
-    #pragma omp parallel num_threads(2)
-    #pragma omp single
+    /* Use sections for this harness-level fan-out.  The executor under test
+     * still creates its real bounded taskgroups; avoiding a second test-only
+     * task-capture layer keeps TSan focused on those groups rather than on the
+     * compiler/runtime's shared-data environment for epa/epb. */
+    #pragma omp parallel sections num_threads(2)
     {
-        #pragma omp task firstprivate(epa)
-        { epa->ok=m3_dag_parallel_expert_run(epa); }
-        #pragma omp task firstprivate(epb)
-        { epb->ok=m3_dag_parallel_expert_run(epb); }
-        #pragma omp taskwait
+        #pragma omp section
+        { pa.ok=m3_dag_parallel_expert_run(&pa); }
+        #pragma omp section
+        { pb.ok=m3_dag_parallel_expert_run(&pb); }
     }
     g_no_fused_pair=old_pair;
     if(!pa.ok||!pb.ok||memcmp(pa.output,ar,sizeof(ar))||memcmp(pb.output,br,sizeof(br))||
