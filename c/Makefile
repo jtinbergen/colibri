@@ -1928,10 +1928,11 @@ test-tsan-m3:
 	@echo "test-tsan-m3: Step 6 focused suite clean under TSan"
 endif
 
-# Independent fallback race gate for Linux hosts where TSan cannot instrument
-# the selected OpenMP runtime cleanly. Helgrind observes the pthread-backed
-# worker protocol without depending on libomp's TSan annotations. Keep the same
-# three focused binaries and the same Step-6 subset as test-tsan-m3.
+# Independent supplemental race check for Linux hosts where TSan cannot
+# instrument the selected OpenMP runtime cleanly. Helgrind can validate the
+# bounded DAG executor, but it does not model this repository's C11-atomic PIPE
+# protocol reliably; test-tsan-m3 remains the owner of PIPE and grouped-int4
+# race coverage.
 HELGRIND = valgrind --tool=helgrind --fair-sched=yes --history-level=full \
 	--error-exitcode=99 --num-callers=30
 HELGRIND_CFLAGS = -march=x86-64 -O1 -g -fno-omit-frame-pointer
@@ -1943,12 +1944,10 @@ test-helgrind-m3:
 else
 test-helgrind-m3:
 	@$(MAKE) clean
-	@$(MAKE) tests/test_m3_dag tests/test_i4_grouped tests/test_pipe_block \
+	@$(MAKE) tests/test_m3_dag \
 		EXTRA_CFLAGS="$(HELGRIND_CFLAGS)"
-	@$(HELGRIND) ./tests/test_m3_dag
-	@$(HELGRIND) ./tests/test_pipe_block
-	@COLI_STEP6_TSAN_ONLY=1 $(HELGRIND) ./tests/test_i4_grouped
-	@echo "test-helgrind-m3: Step 6 focused suite clean under Helgrind"
+	@OMP_NUM_THREADS=2 $(HELGRIND) ./tests/test_m3_dag
+	@echo "test-helgrind-m3: bounded DAG executor clean under Helgrind"
 endif
 
 # Local validation: one portable CPU build and dependency-free tests.
