@@ -52,6 +52,13 @@ typedef struct {
     int        mdfds[ST_MAX_MIR][512]; /* O_DIRECT twins of the replica copies, -1 = absent */
     int        nmirror[ST_MAX_MIR];    /* files accepted into replica r+1 */
     int        nrep;       /* registered replica copies (0 = mirror inactive) */
+    /* Measured read state for the replica selector. Index 0 is the primary;
+     * indices 1..nrep are mirror copies. These are kept on the index so
+     * separate model stores do not influence one another. */
+    uint64_t   rep_ops[ST_MAX_MIR + 1];
+    uint64_t   rep_bytes[ST_MAX_MIR + 1];
+    uint64_t   rep_busy_ns[ST_MAX_MIR + 1];
+    uint64_t   rep_inflight[ST_MAX_MIR + 1];
     int       *hidx;      /* hash map nome->indice (open addressing): con ~120k tensori
                            * (GLM: 256 expert x 78 layer x 3 x 2) la scansione lineare
                            * costava decine di secondi/token (misurato sul primo run reale) */
