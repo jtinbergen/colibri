@@ -1,0 +1,22 @@
+name: MiniMax-M3 Step 6 TSan
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [dev, main]
+    paths:
+      - 'c/**'
+      - '.github/workflows/m3-step6-tsan.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  tsan:
+    name: Focused executor race gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the focused Step-6 suite under ThreadSanitizer
+        run: make -C c test-tsan-m3
