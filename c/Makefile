@@ -1928,6 +1928,28 @@ test-tsan-m3:
 	@echo "test-tsan-m3: Step 6 focused suite clean under TSan"
 endif
 
+# Independent fallback race gate for Linux hosts where TSan cannot instrument
+# the selected OpenMP runtime cleanly. Helgrind observes the pthread-backed
+# worker protocol without depending on libomp's TSan annotations. Keep the same
+# three focused binaries and the same Step-6 subset as test-tsan-m3.
+HELGRIND = valgrind --tool=helgrind --fair-sched=yes --history-level=full \
+	--error-exitcode=99 --num-callers=30
+
+ifeq (,$(LINUX))
+test-helgrind-m3:
+	@echo "test-helgrind-m3 requires Linux Valgrind/Helgrind" >&2
+	@exit 2
+else
+test-helgrind-m3:
+	@$(MAKE) clean
+	@$(MAKE) tests/test_m3_dag tests/test_i4_grouped tests/test_pipe_block \
+		EXTRA_CFLAGS="-O1 -g -fno-omit-frame-pointer"
+	@$(HELGRIND) ./tests/test_m3_dag
+	@$(HELGRIND) ./tests/test_pipe_block
+	@COLI_STEP6_TSAN_ONLY=1 $(HELGRIND) ./tests/test_i4_grouped
+	@echo "test-helgrind-m3: Step 6 focused suite clean under Helgrind"
+endif
+
 # Local validation: one portable CPU build and dependency-free tests.
 check:
 	$(MAKE) clean
@@ -1980,7 +2002,7 @@ bench: iobench$(EXE)
 
 # Own line: see the TEST_RULES note above on shared .PHONY lines.
 .PHONY: bench-omp-grain
-.PHONY: test-asan test-tsan-m3
+.PHONY: test-asan test-tsan-m3 test-helgrind-m3
 .PHONY: dsv4-cuda-test cuda-dsv4-dll cuda-dsv4-dg-dll dsv4-cuda-loader-test
 
 tests/test_kv_prefix$(EXE): tests/test_kv_prefix.c kv_prefix.h

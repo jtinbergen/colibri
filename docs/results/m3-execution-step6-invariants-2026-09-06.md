@@ -181,7 +181,9 @@ after the atomic fix, then reports the same `libomp` mutex-initialization race
 in the grouped-int4 harness, with no application frame, even after the
 explicit warm-up. This is not counted as a Step-6 race pass or failure; a race
 checker/runtime that can instrument OpenMP taskgroups without reporting its own
-bootstrap is still required for Gate-C.
+bootstrap is still required for Gate-C. The branch now also contains a Linux
+`test-helgrind-m3` fallback and CI job; it is not counted until that independent
+race run has completed and its reports have been classified.
 
 ## Current gate record
 
