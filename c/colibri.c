@@ -6041,7 +6041,22 @@ static int m3_dag_parallel_expert_run(M3DagParallelExpert *e){
         return 1;
     }
 #endif
-    int go=e->c.gate.O, no=e->c.down.O;
+    /* Snapshot all immutable task inputs before creating any OpenMP task.
+     * Capturing the coordinator record pointer itself made GCC/libgomp's TSan
+     * path report a task-environment read/write conflict when two experts
+     * entered this function concurrently.  Tasks must not reach back into the
+     * mutable coordinator record; only their private buffers and scalar/pointer
+     * snapshots are firstprivate. */
+    M3I4ExpertContext c=e->c;
+    M3I4ExpertScratch scratch=e->scratch;
+    float *output=e->output;
+    float *gate=scratch.gate, *up=scratch.up;
+    const float *input=c.input, *gate_s=c.gate.s, *up_s=c.up.s, *down_s=c.down.s;
+    const uint8_t *gate_q4=c.gate.q4, *up_q4=c.up.q4, *down_q4=c.down.q4;
+    int gate_I=c.gate.I, gate_O=c.gate.O, down_I=c.down.I, down_O=c.down.O;
+    int swigluoai=c.swigluoai;
+    float alpha=c.alpha, limit=c.limit;
+    int go=gate_O, no=down_O;
     int gt=(go+e->tiles-1)/e->tiles, dt=(no+e->tiles-1)/e->tiles;
     double t0=now_s();
     trace_emit(TR_TEAM_LEVEL,e->layer,e->eid,(int)e->generation,omp_get_level());
@@ -6051,21 +6066,18 @@ static int m3_dag_parallel_expert_run(M3DagParallelExpert *e){
         #pragma omp taskgroup
         for(int lo=0;lo<go;lo+=gt){
             int hi=lo+gt; if(hi>go) hi=go;
-            #pragma omp task firstprivate(lo,hi,e)
-            matmul_i4_grouped_pair_rows(e->scratch.gate,e->scratch.up,e->c.input,
-                e->c.gate.q4,e->c.gate.s,e->c.up.q4,e->c.up.s,
-                1,e->c.gate.I,e->c.gate.O,64,lo,hi);
+            #pragma omp task firstprivate(lo,hi,gate,up,input,gate_q4,gate_s,up_q4,up_s,gate_I,gate_O)
+            matmul_i4_grouped_pair_rows(gate,up,input,gate_q4,gate_s,up_q4,up_s,
+                1,gate_I,gate_O,64,lo,hi);
         }
     } else {
         #pragma omp taskgroup
         for(int lo=0;lo<go;lo+=gt){
             int hi=lo+gt; if(hi>go) hi=go;
-            #pragma omp task firstprivate(lo,hi,e)
+            #pragma omp task firstprivate(lo,hi,gate,up,input,gate_q4,gate_s,up_q4,up_s,gate_I,gate_O)
             {
-                matmul_i4_grouped_rows(e->scratch.gate,e->c.input,e->c.gate.q4,
-                    e->c.gate.s,1,e->c.gate.I,e->c.gate.O,64,lo,hi);
-                matmul_i4_grouped_rows(e->scratch.up,e->c.input,e->c.up.q4,
-                    e->c.up.s,1,e->c.up.I,e->c.up.O,64,lo,hi);
+                matmul_i4_grouped_rows(gate,input,gate_q4,gate_s,1,gate_I,gate_O,64,lo,hi);
+                matmul_i4_grouped_rows(up,input,up_q4,up_s,1,gate_I,gate_O,64,lo,hi);
             }
         }
     }
@@ -6073,18 +6085,16 @@ static int m3_dag_parallel_expert_run(M3DagParallelExpert *e){
     #pragma omp taskgroup
     for(int lo=0;lo<go;lo+=gt){
         int hi=lo+gt; if(hi>go) hi=go;
-        #pragma omp task firstprivate(lo,hi,e)
-        act_glu_range(e->scratch.gate,e->scratch.up,lo,hi,
-                      e->c.swigluoai,e->c.alpha,e->c.limit);
+        #pragma omp task firstprivate(lo,hi,gate,up,swigluoai,alpha,limit)
+        act_glu_range(gate,up,lo,hi,swigluoai,alpha,limit);
     }
     trace_emit(TR_ACTIVATION_DONE,e->layer,e->eid,(int)e->generation,e->route);
     trace_emit(TR_DOWN_START,e->layer,e->eid,(int)e->generation,e->route);
     #pragma omp taskgroup
     for(int lo=0;lo<no;lo+=dt){
         int hi=lo+dt; if(hi>no) hi=no;
-        #pragma omp task firstprivate(lo,hi,e)
-        matmul_i4_grouped_rows(e->output,e->scratch.gate,e->c.down.q4,
-            e->c.down.s,1,e->c.down.I,e->c.down.O,64,lo,hi);
+        #pragma omp task firstprivate(lo,hi,output,gate,down_q4,down_s,down_I,down_O)
+        matmul_i4_grouped_rows(output,gate,down_q4,down_s,1,down_I,down_O,64,lo,hi);
     }
     trace_emit(TR_DOWN_DONE,e->layer,e->eid,(int)e->generation,e->route);
     e->elapsed=now_s()-t0; e->ok=1;
