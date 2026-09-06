@@ -22,6 +22,7 @@ typedef struct {
     _Atomic int start;
     _Atomic int armed;
     _Atomic int allow_fail;
+    _Atomic int published;
 } FailurePublicationProbe;
 
 static void *publish_failure_after_readers_start(void *opaque){
@@ -30,6 +31,7 @@ static void *publish_failure_after_readers_start(void *opaque){
     atomic_store_explicit(&p->armed,1,memory_order_release);
     while(!atomic_load_explicit(&p->allow_fail,memory_order_acquire)) sched_yield();
     m3_dag_context_fail(p->ctx);
+    atomic_store_explicit(&p->published,1,memory_order_release);
     return NULL;
 }
 
@@ -56,10 +58,15 @@ static int check_failure_publication_interleave(M3DagIdentity id, void *handle){
         task.compute_state=M3_DAG_COMPUTE_WAITING;
         if(i==1000) atomic_store_explicit(&probe.allow_fail,1,memory_order_release);
         int accepted=m3_dag_task_ready(&ctx,&task);
-        if(m3_dag_context_failed(&ctx)){
+        /* A worker may publish immediately after the readiness load.  Do not
+         * classify that legal overlap as a late acceptance; wait for the
+         * worker's release publication before testing the post-failure edge. */
+        if(atomic_load_explicit(&probe.published,memory_order_acquire)){
             observed=1;
-            if(accepted) late_ready=1;
+            task.compute_state=M3_DAG_COMPUTE_WAITING;
+            if(m3_dag_task_ready(&ctx,&task)) late_ready=1;
         }
+        (void)accepted;
     }
     pthread_join(worker,NULL);
     task.compute_state=M3_DAG_COMPUTE_WAITING;
