@@ -4012,7 +4012,8 @@ static void pipe_dispatch(Model *m,int layer,const int *eids,int njobs){
         return;
     }
 #endif
-    g_pp.m=m;
+    /* g_pp.m is published once by pipe_init before workers are created. Do not
+     * rewrite this non-atomic pointer for every batch while workers may read it. */
     atomic_store_explicit(&g_pp.njobs,njobs,memory_order_relaxed);
     atomic_store_explicit(&g_pp.layer,layer,memory_order_relaxed);
     for(int q=0;q<njobs;q++) atomic_store_explicit(&g_pp.eids[q],eids[q],memory_order_relaxed);

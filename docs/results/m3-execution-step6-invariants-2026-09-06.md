@@ -194,7 +194,9 @@ does not model reliably. The fallback is therefore narrowed to the bounded DAG
 check; CI run `34039146571` passes that Helgrind check. The same run's TSan job
 again passes `test_m3_dag` and `test_pipe_block` and stops only on the external
 `libomp` mutex-initialization report in grouped-int4; TSan remains the race gate
-for PIPE and grouped-int4.
+for PIPE and grouped-int4. A follow-up audit also removed an unnecessary
+non-atomic `g_pp.m` rewrite from every PIPE dispatch; the focused Windows suite
+remains green after that change.
 
 ## Current gate record
 
