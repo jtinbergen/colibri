@@ -6066,7 +6066,6 @@ static int m3_dag_parallel_expert_run(M3DagParallelExpert *e){
     trace_emit(TR_EXPERT_START,e->layer,e->eid,(int)e->generation,e->route);
     trace_emit(TR_COMPUTE_START,e->layer,e->eid,(int)e->generation,e->route);
     if(use_fused_pair){
-        #pragma omp taskgroup
         {
             for(int lo=0;lo<go;lo+=gt){
                 int hi=lo+gt; if(hi>go) hi=go;
@@ -6074,9 +6073,9 @@ static int m3_dag_parallel_expert_run(M3DagParallelExpert *e){
                 matmul_i4_grouped_pair_rows(gate,up,input,gate_q4,gate_s,up_q4,up_s,
                     1,gate_I,gate_O,64,lo,hi);
             }
+            #pragma omp taskwait
         }
     } else {
-        #pragma omp taskgroup
         {
             for(int lo=0;lo<go;lo+=gt){
                 int hi=lo+gt; if(hi>go) hi=go;
@@ -6086,26 +6085,27 @@ static int m3_dag_parallel_expert_run(M3DagParallelExpert *e){
                     matmul_i4_grouped_rows(up,input,up_q4,up_s,1,gate_I,gate_O,64,lo,hi);
                 }
             }
+            #pragma omp taskwait
         }
     }
     trace_emit(TR_GATE_UP_DONE,e->layer,e->eid,(int)e->generation,e->route);
-    #pragma omp taskgroup
     {
         for(int lo=0;lo<go;lo+=gt){
             int hi=lo+gt; if(hi>go) hi=go;
             #pragma omp task firstprivate(lo,hi,gate,up,swigluoai,alpha,limit)
             act_glu_range(gate,up,lo,hi,swigluoai,alpha,limit);
         }
+        #pragma omp taskwait
     }
     trace_emit(TR_ACTIVATION_DONE,e->layer,e->eid,(int)e->generation,e->route);
     trace_emit(TR_DOWN_START,e->layer,e->eid,(int)e->generation,e->route);
-    #pragma omp taskgroup
     {
         for(int lo=0;lo<no;lo+=dt){
             int hi=lo+dt; if(hi>no) hi=no;
             #pragma omp task firstprivate(lo,hi,output,gate,down_q4,down_s,down_I,down_O)
             matmul_i4_grouped_rows(output,gate,down_q4,down_s,1,down_I,down_O,64,lo,hi);
         }
+        #pragma omp taskwait
     }
     trace_emit(TR_DOWN_DONE,e->layer,e->eid,(int)e->generation,e->route);
     e->elapsed=now_s()-t0; e->ok=1;
