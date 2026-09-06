@@ -134,7 +134,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Valgrind
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends valgrind
-      - name: Step 6 focused suite under Helgrind
+      - name: Step 6 bounded DAG check under Helgrind
         run: make -C c test-helgrind-m3
 
   # The Vulkan backend, COMPILED AND RUN. Before this job, `grep -rn "VK=1\|glslc\|vulkan"

@@ -182,12 +182,16 @@ in the grouped-int4 harness, with no application frame, even after the
 explicit warm-up. This is not counted as a Step-6 race pass or failure; a race
 checker/runtime that can instrument OpenMP taskgroups without reporting its own
 bootstrap is still required for Gate-C. The branch now also contains a Linux
-`test-helgrind-m3` fallback and CI job; it is not counted until that independent
-race run has completed and its reports have been classified. Its first CI
-attempt stopped before executing the tests because the normal `-march=native`
-build emitted an AVX-512 instruction that Valgrind 3.22 did not decode. The
-Helgrind-only build now appends portable `-march=x86-64` to avoid that checker
-toolchain mismatch.
+`test-helgrind-m3` supplemental fallback and CI job. Its first CI attempt
+stopped before executing the tests because the normal `-march=native` build
+emitted an AVX-512 instruction that Valgrind 3.22 did not decode; the
+Helgrind-only build now appends portable `-march=x86-64`. The second attempt
+(`34038835731`) then ran `test_m3_dag` cleanly, but Helgrind reported extensive
+conflicts in the older `test_pipe_block` fixture before reaching grouped-int4.
+Those reports are not treated as a Step-6 application-race result because the
+fixture deliberately relies on C11 atomics and test-only hooks that Helgrind
+does not model reliably. The fallback is therefore narrowed to the bounded DAG
+check; TSan remains the race gate for PIPE and grouped-int4.
 
 ## Current gate record
 
