@@ -191,7 +191,10 @@ conflicts in the older `test_pipe_block` fixture before reaching grouped-int4.
 Those reports are not treated as a Step-6 application-race result because the
 fixture deliberately relies on C11 atomics and test-only hooks that Helgrind
 does not model reliably. The fallback is therefore narrowed to the bounded DAG
-check; TSan remains the race gate for PIPE and grouped-int4.
+check; CI run `34039146571` passes that Helgrind check. The same run's TSan job
+again passes `test_m3_dag` and `test_pipe_block` and stops only on the external
+`libomp` mutex-initialization report in grouped-int4; TSan remains the race gate
+for PIPE and grouped-int4.
 
 ## Current gate record
 
@@ -199,7 +202,8 @@ check; TSan remains the race gate for PIPE and grouped-int4.
   worker counts 1/2/4/10, both real grouped-int4 configurations, and the real
   post-publication failure/drain path preserve the established outputs and
   release ownership safely under the normal build and ASan+UBSan. The required
-  functioning TSan race checker remains unavailable.
+  TSan race checker passes the bounded DAG and PIPE paths; grouped-int4 remains
+  unclassified because the hosted libomp runtime races during initialization.
 - **M: PASS within the supported opt-in scope.** The final trace proves
   overlap, phase ordering, private-task ownership, zero drops, and OpenMP
   level 1; focused tests cover failure-state transitions, shape/bounds
