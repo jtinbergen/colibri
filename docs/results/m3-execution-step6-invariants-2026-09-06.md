@@ -145,7 +145,13 @@ audit also found no native race checker and WSL is present but inaccessible
 under the current Windows policy. The branch now provides a focused
 `make -C c test-tsan-m3` target and a Linux `tsan-m3` CI job; until that job
 executes successfully, this remaining TSan limitation is explicit and is not
-treated as a pass.
+treated as a pass. The first CI attempt (run `34033510969`) successfully
+compiled and passed `test_m3_dag`, but stopped in the general legacy
+`matmul_i4_grouped` row-wrapper probe at `quant.h:216`; that report is retained
+as a separate finding rather than attributed to the Step-6 executor. The TSan
+target now selects only the Step-6-relevant expert reentrancy, private
+scratch/output, bounded task-group, and preflight checks; it still requires a
+fresh CI run before the Gate-C claim can change.
 
 ## Current gate record
 

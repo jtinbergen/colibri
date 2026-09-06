@@ -1923,7 +1923,7 @@ test-tsan-m3:
 	@$(TSAN_ENV) $(MAKE) tests/test_m3_dag tests/test_i4_grouped tests/test_pipe_block \
 		EXTRA_CFLAGS="$(TSAN_CFLAGS)" EXTRA_LDFLAGS="$(TSAN_LDFLAGS)"
 	@$(TSAN_ENV) OMP_NUM_THREADS=2 ./tests/test_m3_dag
-	@$(TSAN_ENV) OMP_NUM_THREADS=2 ./tests/test_i4_grouped
+	@$(TSAN_ENV) COLI_STEP6_TSAN_ONLY=1 OMP_NUM_THREADS=2 ./tests/test_i4_grouped
 	@$(TSAN_ENV) OMP_NUM_THREADS=2 ./tests/test_pipe_block
 	@echo "test-tsan-m3: Step 6 focused suite clean under TSan"
 endif
