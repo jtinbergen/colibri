@@ -110,6 +110,20 @@ jobs:
         # compiled decode arm; it just had no job to run in.
         run: make -C c fuzz-rans
 
+  # Gate 6 needs a race detector in addition to the Windows ASan+UBSan run.
+  # Native MSYS2/Clang64 does not ship a TSan runtime, so this focused Linux
+  # job is the reproducible fallback for the bounded M3 executor. It is kept
+  # separate from the general C suite because the target is deliberately scoped
+  # to the state machine, private expert scratch/output, and PIPE drain path.
+  tsan-m3:
+    name: MiniMax-M3 Step 6 (TSan)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Step 6 focused suite under ThreadSanitizer
+        run: make -C c test-tsan-m3
+
   # The Vulkan backend, COMPILED AND RUN. Before this job, `grep -rn "VK=1\|glslc\|vulkan"
   # .github/workflows/` returned nothing: backend_vulkan.c and the four GLSL shaders were
   # never built by any job, so they could be broken on dev and every check would stay green.

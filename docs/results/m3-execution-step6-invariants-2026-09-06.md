@@ -141,8 +141,11 @@ Sanitizer status: the Clang64 non-static ASan+UBSan builds of
 parallel failure/drain case. The installed Clang64 package has no TSan runtime,
 so TSan remains **NOT_RUN**. The earlier GCC sanitizer attempts failed because
 the GCC installation lacked `libasan`, `libubsan`, and `libtsan`; capability
-audit also found no native race checker and WSL has no installed distribution.
-This remaining TSan limitation is explicit and is not treated as a pass.
+audit also found no native race checker and WSL is present but inaccessible
+under the current Windows policy. The branch now provides a focused
+`make -C c test-tsan-m3` target and a Linux `tsan-m3` CI job; until that job
+executes successfully, this remaining TSan limitation is explicit and is not
+treated as a pass.
 
 ## Current gate record
 
