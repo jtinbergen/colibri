@@ -255,6 +255,14 @@ warranted from these runtime reports. The focused grouped-int4 Helgrind probe
 6,629 conflicts from `libgomp` task/team allocations and runtime frames; its
 application-level records and numerical checks completed. It is therefore
 retained as capability evidence, not counted as a grouped-int4 race pass.
+The next run (`34042241405`) also tested LLVM's documented
+`TSAN_OPTIONS=...:ignore_noninstrumented_modules=1` mode. Clang/TSan still
+reported the test-only stack-backed shared-pointer access at
+`tests/test_i4_grouped.c:334`, while GCC/libgomp still reported the enclosing
+OpenMP region at line 331. The setting did not remove this hosted
+OpenMP/TSan instrumentation boundary, so no further engine change is
+warranted from that result; grouped-int4 remains unclassified pending a
+compatible OpenMP-aware race-checking runtime.
 
 ## Current gate record
 
