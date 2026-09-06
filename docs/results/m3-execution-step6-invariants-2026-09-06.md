@@ -263,6 +263,15 @@ OpenMP region at line 331. The setting did not remove this hosted
 OpenMP/TSan instrumentation boundary, so no further engine change is
 warranted from that result; grouped-int4 remains unclassified pending a
 compatible OpenMP-aware race-checking runtime.
+The subsequent task-ordering probe (`34043357168`) replaced those three
+taskgroups with explicit `taskwait` barriers; the local numerical suite stayed
+green. Clang then reported the next activation task's compiler-generated
+libomp task environment (`colibri.c:6106`) in another runtime-allocated heap
+block, while GCC still reported the intended task-stage buffer handoff from
+the test stack. Since neither report names a shared engine control object or
+an overlapping scratch allocation, and the reports persist after explicit
+waits, the hosted OpenMP runtimes still cannot provide a trustworthy grouped
+race classification.
 
 ## Current gate record
 
