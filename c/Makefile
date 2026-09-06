@@ -1851,7 +1851,7 @@ test-asan:
 # scratch/output, and the production PIPE failure/drain boundary.
 TSAN_CFLAGS  = -O1 -g -fno-omit-frame-pointer -fsanitize=thread
 TSAN_LDFLAGS = -fsanitize=thread
-TSAN_ENV     = TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1
+TSAN_ENV     = TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1:ignore_noninstrumented_modules=1
 
 ifeq (,$(LINUX))
 test-tsan-m3:
