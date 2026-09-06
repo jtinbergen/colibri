@@ -1229,37 +1229,52 @@ static void matmul_i4_grouped_pair(float *yg, float *yu, const float *x,
  * build AVX-512F (il ramo f32 a 512 bit accumula in altro ordine).
  * EN: K1 planar gate. MoE tensors only; GPU builds, XEXP and AVX-512F builds
  * keep the classic pair layout. PLANAR=0 is the kill switch. */
-static int g_planar=-1;
+static _Atomic int g_planar=-1;
 static int planar_on(void){
-    if(g_planar<0){
+    int v=atomic_load_explicit(&g_planar,memory_order_acquire);
+    if(v<0){
+        int init;
 #if defined(COLI_CUDA)||defined(COLI_METAL)||defined(COLI_VULKAN)
-        g_planar=0;
+        init=0;
 #elif defined(__AVX512F__)&&defined(__AVX512BW__)
-        g_planar=0;
+        init=0;
 #elif !defined(__AVX2__)
-        g_planar=0;   /* matmul_i4p non ha (ancora) un ramo NEON: su ARM il path
+        init=0;       /* matmul_i4p non ha (ancora) un ramo NEON: su ARM il path
                        * f32 planare degraderebbe a scalare E cambierebbe l'ordine
                        * di accumulo rispetto al gemello NEON a coppie — il claim
                        * bit-identico vale solo dove i gemelli esistono entrambi.
                        * EN: no NEON arm in matmul_i4p yet — planar stays off on
                        * non-AVX2 builds until one lands with matching order. */
 #else
-        const char *e=getenv("PLANAR"); g_planar=!(e&&*e=='0');
-        const char *xe=getenv("XEXP"); if(xe&&*xe=='1') g_planar=0;
+        const char *e=getenv("PLANAR"); init=!(e&&*e=='0');
+        const char *xe=getenv("XEXP"); if(xe&&*xe=='1') init=0;
 #endif
+        int expected=-1;
+        if(!atomic_compare_exchange_strong_explicit(&g_planar,&expected,init,
+                memory_order_release,memory_order_acquire)) v=expected;
+        else v=init;
     }
-    return g_planar;
+    return v;
 }
 static _Atomic long g_planar_n;   /* tensori planarizzati (telemetria una-tantum) */
 /* K1b: IDOT a gruppi per fmt=4 (gs%64==0) — OPT-IN, cambia le numeriche
  * (attivazioni int8): resta 0 finche' l'ablazione non benedice un default.
  * EN: opt-in grouped IDOT for fmt=4; int8 activations, awaiting ablation. */
-static int g_idot_gs=-1;
+static _Atomic int g_idot_gs=-1;
 static int idot_gs_on(void){
-    if(g_idot_gs<0){ const char *e=getenv("IDOT_GS"); g_idot_gs=(e&&atoi(e))?1:0;
-        if(g_idot_gs&&!planar_on()) g_idot_gs=0;   /* richiede la famiglia planare */
-        if(g_idot_gs) fprintf(stderr,"[K1b] grouped planar IDOT active for gs64 tensors (opt-in)\n"); }
-    return g_idot_gs;
+    int v=atomic_load_explicit(&g_idot_gs,memory_order_acquire);
+    if(v<0){
+        const char *e=getenv("IDOT_GS"); int init=(e&&atoi(e))?1:0;
+        if(init&&!planar_on()) init=0;   /* richiede la famiglia planare */
+        int expected=-1;
+        if(!atomic_compare_exchange_strong_explicit(&g_idot_gs,&expected,init,
+                memory_order_release,memory_order_acquire)) v=expected;
+        else {
+            v=init;
+            if(v) fprintf(stderr,"[K1b] grouped planar IDOT active for gs64 tensors (opt-in)\n");
+        }
+    }
+    return v;
 }
 static void qt_planarize(QT *t){
     if(!planar_on()||t->planar||!t->q4) return;
