@@ -279,6 +279,47 @@ static void *release_after_scheduler_wait(void *vp){
 }
 static void scheduler_fatal(int layer){ (void)layer; longjmp(g_scheduler_fatal,1); }
 
+typedef struct {
+    _Atomic int dispatcher_entered;
+    _Atomic int failing_worker_started;
+    _Atomic int release_failure;
+    _Atomic int failure_published;
+    _Atomic int readiness_accepted_after_failure;
+    _Atomic int timeout;
+} DispatcherFailureLatch;
+static DispatcherFailureLatch *g_dispatcher_failure_latch;
+
+/* Production-dispatcher regression for the original Gate-C race.  Routed q0
+ * has already been submitted and is held immediately before publication of
+ * its failure.  The dispatcher reaches q1's real readiness probe first; the
+ * hook releases q0 and waits for its atomic failure publication before the
+ * production call to m3_dag_task_ready() proceeds. */
+static void hold_dispatcher_readiness_for_failure(M3DagExecutionContext *ctx,int q){
+    DispatcherFailureLatch *l=g_dispatcher_failure_latch;
+    if(!l || q!=1) return;
+    atomic_store_explicit(&l->dispatcher_entered,1,memory_order_release);
+    int saw_start=0, saw_failure=0;
+    for(int i=0;i<2000000;i++){
+        if(atomic_load_explicit(&l->failing_worker_started,memory_order_acquire)) saw_start=1;
+        if(m3_dag_context_failed(ctx)){ saw_failure=1; break; }
+        sched_yield();
+    }
+    atomic_store_explicit(&l->release_failure,1,memory_order_release);
+    for(int i=0;i<2000000 && !saw_failure;i++){
+        if(m3_dag_context_failed(ctx)){ saw_failure=1; break; }
+        sched_yield();
+    }
+    if(!saw_start || !saw_failure) atomic_store_explicit(&l->timeout,1,memory_order_release);
+    if(saw_failure) atomic_store_explicit(&l->failure_published,1,memory_order_release);
+}
+static void record_dispatcher_readiness(M3DagExecutionContext *ctx,int q,int ready){
+    (void)ctx;
+    DispatcherFailureLatch *l=g_dispatcher_failure_latch;
+    if(l && q==1 && ready && atomic_load_explicit(&l->failure_published,memory_order_acquire))
+        atomic_store_explicit(&l->readiness_accepted_after_failure,1,memory_order_release);
+}
+static void dispatcher_abort_after_drain(int layer){ (void)layer; g_pipe_test_abort=1; }
+
 static int test_scheduler_failure_drain(Model *m,int parallel){
     for(int block=0;block<2;block++){
         Layer l={0}; float x[4]={1,2,3,4}, out[4]={0};
@@ -326,6 +367,51 @@ static int test_scheduler_failure_drain(Model *m,int parallel){
     return 0;
 }
 
+static int test_production_dispatcher_failure_readiness(Model *m){
+    Layer l={0}; float x[4]={1,2,3,4}, out[4]={0};
+    const float untouched[4]={0}; float dummy[4]={0};
+    int pre_idx[2]={0,1}, pre_keff[1]={2}; float pre_w[2]={.5f,.5f};
+    DispatcherFailureLatch dl={0};
+    m->c=(Cfg){.arch=ARCH_M3,.hidden=4,.n_layers=1,.n_experts=2,.topk=2,
+               .moe_inter=3,.n_shared=1,.shared_inter=3,.norm_topk=1};
+    m->ebits=8; m->ecap=2;
+    l.sh_gate=l.sh_up=(QT){.fmt=4,.q4=(uint8_t*)dummy,.s=dummy,.O=3,.I=4,.gs=64};
+    l.sh_down=(QT){.fmt=4,.q4=(uint8_t*)dummy,.s=dummy,.O=4,.I=3,.gs=64};
+    if(!m->eheat){
+        m->eheat=calloc(2,sizeof(*m->eheat)); m->elast=calloc(2,sizeof(*m->elast));
+        m->eroute=calloc(2,sizeof(*m->eroute)); m->enr=calloc(2,sizeof(*m->enr));
+        if(!m->eheat||!m->elast||!m->eroute||!m->enr) return fail("dispatcher fixture bookkeeping");
+        for(int i=0;i<2;i++){ m->eheat[i]=calloc(2,sizeof(**m->eheat)); m->elast[i]=calloc(2,sizeof(**m->elast)); m->eroute[i]=calloc(2,sizeof(**m->eroute)); }
+    }
+    g_pipe=1; g_pipe_nw=4; g_m3_dag_serial=1; g_m3_dag_parallel=1; g_m3_dag_pipe_ready=1;
+    g_pre_idx=pre_idx; g_pre_w=pre_w; g_pre_keff=pre_keff;
+    g_dispatcher_failure_latch=&dl;
+    g_pipe_test_after_load=force_grouped_slot;
+    g_pipe_test_m3_run=1;
+    g_pipe_test_m3_started=&dl.failing_worker_started;
+    g_pipe_test_m3_release=&dl.release_failure;
+    g_pipe_test_before_m3_ready=hold_dispatcher_readiness_for_failure;
+    g_pipe_test_after_m3_ready=record_dispatcher_readiness;
+    g_pipe_test_abort=0;
+    g_pipe_test_fatal=dispatcher_abort_after_drain;
+    moe(m,&l,LAYER,x,1,out,1);
+    g_pre_idx=NULL; g_pre_w=NULL; g_pre_keff=NULL;
+    g_dispatcher_failure_latch=NULL;
+    g_pipe_test_fatal=NULL; g_pipe_test_m3_run=0;
+    g_pipe_test_m3_started=NULL; g_pipe_test_m3_release=NULL;
+    g_pipe_test_before_m3_ready=NULL; g_pipe_test_after_m3_ready=NULL;
+    g_pipe_test_after_load=NULL; g_pipe_test_abort=0;
+    g_m3_dag_serial=0; g_m3_dag_parallel=0; g_m3_dag_pipe_ready=0;
+    if(!atomic_load_explicit(&dl.dispatcher_entered,memory_order_acquire) ||
+       !atomic_load_explicit(&dl.failing_worker_started,memory_order_acquire) ||
+       !atomic_load_explicit(&dl.failure_published,memory_order_acquire) ||
+       atomic_load_explicit(&dl.readiness_accepted_after_failure,memory_order_acquire) ||
+       atomic_load_explicit(&dl.timeout,memory_order_acquire) || memcmp(out,untouched,sizeof(out)))
+        return fail("production dispatcher readiness/failure interleave");
+    puts("  production dispatcher rejects readiness after published worker failure");
+    return 0;
+}
+
 int main(void){
     if(test_implication_table()) return 1;
 
@@ -349,6 +435,17 @@ int main(void){
         free(m.S.t); close(fd); remove(TMPF);
         if(rc) return 1;
         puts("test_pipe_block: parallel failure drain ok");
+        return 0;
+    }
+
+    if(test_production_dispatcher_failure_readiness(&m)){
+        close(fd); remove(TMPF); return 1;
+    }
+    if(getenv("COLI_TEST_DISPATCH_INTERLEAVE_ONLY")){
+        for(int q=0;q<NE;q++){ compat_aligned_free(m.ws[q].slab); free(m.ws[q].fslab); }
+        for(int i=0;i<m.S.n;i++) free(m.S.t[i].name);
+        free(m.S.t); close(fd); remove(TMPF);
+        puts("test_pipe_block: dispatcher interleave ok");
         return 0;
     }
 
