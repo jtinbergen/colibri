@@ -14,6 +14,7 @@
 #include <string.h>
 #include <math.h>   /* ldexpf per ue8m0_to_f32 */
 #include <stdint.h>
+#include <stdatomic.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <unistd.h>
