@@ -437,7 +437,7 @@ een meetbaar beleid; geen onbeperkte busy loop bij disk-wacht of prompt-idle.
 
 ## Stap 6a — correctheidsherstel en gate-reconciliatie
 
-**Status: GEDEELTELIJK AFGEROND op `b06130b`; resterende 6a-gate OPEN vóór stap 7.**
+**Status: AFGEROND op `59b4eab`; Gate 6a C/M-PASS vóór stap 7.**
 
 Statusreconciliatie van 6 september, na inspectie van de reparatiediff en
 [CI-run 34050827680](https://github.com/jtinbergen/colibri/actions/runs/34050827680)
@@ -449,21 +449,21 @@ op `b06130b9c408304a3b698f011301636079b67795`:
   blocking Archer-job. De genoemde CI-run is overall succesvol en Archer,
   ASan/UBSan en Linux-engine zijn afzonderlijk succesvol. `b06130b` bevat de
   eerdere codefixes via zijn ouders; zelf wijzigt het CI-classificatie en docs.
-- Nog te sluiten: de sweep `fail_after<7` in `test_i4_grouped.c` dekt zeven
-  failureposities, maar preflight heeft acht allocaties. Failure van de laatste
-  `shared_up`-allocatie na zeven succesvolle allocaties ontbreekt. De claim
-  “every bounded preflight allocation” in het evidenceverslag is te breed.
-- Nog te sluiten: de interleavingtest gebruikt de echte contexthelper in een
-  synthetische producer/worker-loop; hij forceert nog niet het hieronder
-  vereiste interleavingpad in de productie-`moe()`-dispatcher.
-- Nog te documenteren/verifiëren: de lifecycle-inventaris en expliciete
-  runtimebeperkingen uit werkpakket 3, plus worker-countnumeriek op de
-  herstelde versie uit werkpakket 5. Historische numerieke runs worden niet
-  automatisch nieuwe runs door een succesvolle CI-build.
-- Finale 6a-review: nog geen C/M-afsluiting tegen alle onderstaande eisen.
-  Reconcileer daarna het Step-6-verslag en het 6a-gaterecord. Herhaal geen
-  reeds gerepareerde codewijziging alleen omdat de oorspronkelijke briefing
-  hieronder als herstelrecept behouden blijft.
+- Afgerond in `6558716`/`59b4eab`: alle acht preflightallocaties, een echte
+  `moe()`-dispatcher readiness/failure-interleaving, actieve failure/drain,
+  beide completionpermutaties en worker-counttests 1/2/4. De nieuwe
+  productiepadtest vraagt onder CI expliciet een team van twee workers zodat
+  de interleaving niet achter de PIPE-reservering serialiseert.
+- Afgerond: blocking CI-run `34054894622` op `59b4eab`. Archer/TSan,
+  ASan/UBSan, Linux-engine, Windows-engine en de volledige overige matrix
+  slagen. Hosted TSan/libgomp en Helgrind blijven zichtbare, informatieve
+  runtime-diagnostics met `continue-on-error`; zij zijn niet de gezaghebbende
+  Archer-classificatie.
+- Expliciete beperkingen staan in het 6a-resultatenverslag; niet-injecteerbare
+  thread-create-fouten en geen aparte ondersteunde parallelle cancellation-API
+  worden niet als PASS geclaimd.
+- De actuele Step-6- en 6a-verslagen zijn hiermee gereconcilieerd. Step 7
+  blijft inhoudelijk ongewijzigd en is nog niet geïmplementeerd.
 
 **Briefing**
 
@@ -518,19 +518,20 @@ Werkpakketten, in deze volgorde:
 
 **Gate 6a**
 
-- C: geen mixed atomic/non-atomic contextaccess op het parallelle pad;
-  gerichte regression, numerieke controles en vereiste lifecyclecases groen;
-  schone gezaghebbende Archer-run op de herstelde code. Geen onopgeloste
-  correctnessblocker verborgen achter een scopewijziging of capabilitylabel.
-- M: tests tonen de bedoelde failure/readiness-interleaving, drain vóór reuse
-  en exact-once release/reduction. Herbevestig begrensd expertparallelisme en
-  vaste reductievolgorde; behoud alleen traceclaims die nog op de code passen.
+- C: PASS binnen de ondersteunde scope. Geen mixed atomic/non-atomic
+  contextaccess op het parallelle pad; productie-interleaving, alle acht
+  allocatiefouten, lifecyclecases, worker-counttests en blocking Archer-run
+  zijn groen.
+- M: PASS binnen de ondersteunde scope. Tests tonen de bedoelde
+  failure/readiness-interleaving, drain vóór reuse, completionpermutaties,
+  exact-once lifecycle en begrensd expertparallelisme.
 - P: geen nieuwe winstclaim vereist. `NOT_PROMOTED` en all-resident `NOT_RUN`
   mogen blijven; rapporteer relevante regressies zonder ze als C/M te maskeren.
-- Afsluiting: sterkere review van de finale diff en evidence volgens
-  `AGENTS.md`; actuele 6/6a-gaterecords spreken elkaar niet tegen. Pas na
-  6a C/M-PASS mag stap 7 beginnen. Luna mag testuitvoering en logextractie
-  doen, maar niet deze concurrencycorrectie of de finale gate goedkeuren.
+- Afsluiting: finale diff/evidence is vastgelegd in
+  [`results/m3-execution-step6a-gate-2026-09-06.md`](results/m3-execution-step6a-gate-2026-09-06.md)
+  en CI-run `34054894622`. De actuele 6/6a-gaterecords spreken elkaar niet
+  tegen. Step 7 mag nu beginnen; Step 7 zelf blijft `NIET GEÏMPLEMENTEERD /
+  NIET GEGATED`.
 
 ## Stap 7 — planner in shadow mode
 
