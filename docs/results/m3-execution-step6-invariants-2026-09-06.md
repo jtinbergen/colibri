@@ -273,16 +273,26 @@ an overlapping scratch allocation, and the reports persist after explicit
 waits, the hosted OpenMP runtimes still cannot provide a trustworthy grouped
 race classification.
 
+The source-built LLVM OpenMP Archer run (`34045825116`) then built `libomp`
+with OMPT/Archer support and passed the complete `make -C c test-tsan-m3`
+scope: the DAG lifecycle, production PIPE drain, and grouped-int4 fused and
+unfused executor checks. The workflow now uses the system Clang with that
+standalone Archer runtime and preserves its include/link flags through the
+recursive Make invocation. This is the authoritative OpenMP-aware racecheck
+for Gate C; the distro libomp/libgomp TSan jobs and grouped Helgrind probe
+remain informational diagnostics because they instrument their own runtime
+storage.
+
 ## Current gate record
 
-- **C: PARTIAL.** Focused fused/unfused task graphs, lifecycle transitions,
+- **C: PASS within the supported opt-in scope.** Focused fused/unfused task graphs, lifecycle transitions,
   worker counts 1/2/4/10, both real grouped-int4 configurations, and the real
   post-publication failure/drain path preserve the established outputs and
   release ownership safely under the normal build and ASan+UBSan. The required
-  TSan race checker passes the bounded DAG and PIPE paths in both the Clang/
-  libomp and GCC/libgomp routes. Grouped-int4 remains unclassified because
-  Clang/libomp, GCC/libgomp, and Helgrind all report their own OpenMP task/team
-  runtime storage before producing a trustworthy grouped-int4 race result.
+  OpenMP-aware Archer/TSan race checker passes the bounded DAG, PIPE, and
+  grouped-int4 paths. The distro Clang/libomp, GCC/libgomp, and Helgrind jobs
+  remain visible as supplemental diagnostics, but their runtime-storage
+  reports do not override the clean Archer classification.
 - **M: PASS within the supported opt-in scope.** The final trace proves
   overlap, phase ordering, private-task ownership, zero drops, and OpenMP
   level 1; focused tests cover failure-state transitions, shape/bounds
