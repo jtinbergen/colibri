@@ -186,7 +186,9 @@ jobs:
           export PATH="$prefix/bin:$PATH"
           export LD_LIBRARY_PATH="$prefix/lib:$prefix/lib/x86_64-unknown-linux-gnu:${LD_LIBRARY_PATH:-}"
           export LIBRARY_PATH="$prefix/lib:$prefix/lib/x86_64-unknown-linux-gnu:${LIBRARY_PATH:-}"
-          make -C c test-tsan-m3 CC="$prefix/bin/clang" \
+          # The standalone install contains libomp/libarcher, not a compiler;
+          # use the distro Clang that built the runtime above.
+          make -C c test-tsan-m3 CC=clang \
             EXTRA_CFLAGS="-I$prefix/include" \
             EXTRA_LDFLAGS="-L$prefix/lib -Wl,-rpath,$prefix/lib"
 
