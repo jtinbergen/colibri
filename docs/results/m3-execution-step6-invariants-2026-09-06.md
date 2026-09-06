@@ -78,8 +78,8 @@ implementation and evidence satisfy every item above.
 The opt-in implementation is now present in `c/colibri.c` behind
 `COLI_M3_DAG_PARALLEL=1` (with `COLI_M3_DAG_SERIAL=1`, `PIPE=1`, and
 `COLI_M3_DAG_WORKERS=N`). It uses one layer-local OpenMP region, coordinator
-tasks, taskgroups for gate/up, activation, and down row tiles, and a producer-
-owned submission mask. Per-expert scratch is preflighted before PIPE
+tasks, explicit `taskwait` phase handoffs for gate/up, activation, and down row
+tiles, and a producer-owned submission mask. Per-expert scratch is preflighted before PIPE
 publication; unsupported loaded formats or post-publication task failure drain
 the PIPE slots and discard private outputs before falling back or terminating.
 The reducer commits only after taskwait and walks router order. Shared output
