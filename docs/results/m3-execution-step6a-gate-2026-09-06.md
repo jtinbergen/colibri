@@ -77,13 +77,14 @@ and numerical completion-order cases only; it does not claim untested
 thread-create or unsupported cancellation failures.
 
 The local MSYS2 GCC installation cannot provide ASan/UBSan or TSan runtimes.
-The prior authoritative CI run passed Archer, ASan/UBSan, and the Linux suite;
-a fresh CI run is required after this report's new test changes before the
-race portion of Gate 6a is finally closed.
+Blocking CI run `34054894622` on `59b4eab` passed Archer/TSan, ASan/UBSan,
+the Linux engine suite, the Windows engine suite, and the broader matrix.
+Hosted Clang/libomp TSan, GCC/libgomp TSan, and Helgrind remain visible
+supplemental diagnostics and are not the authoritative race classification.
 
 ## Gate status
 
-- **C: locally PASS, CI confirmation pending.** The mixed atomic-access fix is
+- **C: PASS within the supported scope.** The mixed atomic-access fix is
   present, the production readiness/failure interleaving is exercised, all
   eight preflight allocation failures are covered, active PIPE failure/drain
   is covered, and fused/unfused worker-count and completion-order checks pass.
@@ -93,6 +94,5 @@ race portion of Gate 6a is finally closed.
 - **P: NOT_PROMOTED.** No new performance claim is made. The existing
   all-resident limitation remains unchanged.
 
-After a fresh blocking Archer/ASan/UBSan CI run and final reviewer check, the
-plan may mark 6a C/M complete and permit Step 7. Step 7 itself is not started
-by this report.
+The plan now marks 6a C/M complete and permits Step 7. Step 7 itself is not
+started by this report.
