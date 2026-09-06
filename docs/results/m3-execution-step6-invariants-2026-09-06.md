@@ -232,6 +232,19 @@ engine stack frame; it is treated as a GCC/libgomp+TSan instrumentation
 boundary, not as evidence for another engine fix. The GCC job remains visible
 but is informational (`continue-on-error`) until a compatible OpenMP/TSan
 combination can classify grouped-int4.
+The follow-up run (`34041408849`) reached the current commit and again passed
+the DAG and PIPE tests. Clang/TSan briefly reported the executor's entry check
+(`colibri.c:6036`), but the conflicting address was the test record's main
+thread stack storage, with the other access at the OpenMP-region startup; GCC
+reported the corresponding libgomp task-environment storage. To distinguish
+test-record lifetime from runtime startup, the harness now puts the shared
+records in heap storage and declares `default(none) shared(jobs)`. The next
+run (`34041618511`) moved GCC's report to the `#pragma omp parallel` directive
+itself (`test_i4_grouped.c:331`), while Clang again reported only libomp's
+internal mutex initialization. This confirms that the remaining grouped-int4
+reports are OpenMP/TSan runtime instrumentation boundaries rather than new
+engine data races; they remain unclassified rather than suppressed or counted
+as a pass.
 
 ## Current gate record
 
