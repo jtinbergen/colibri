@@ -1,0 +1,160 @@
+{
+  "schema_version": "0.1.0",
+  "machine_id": "C",
+  "capture_date": "FILL_DATE",
+  "evidence_basis": "NOT_RUN",
+  "units": {
+    "rate": "B/s",
+    "latency": "ns",
+    "bytes": "B",
+    "lanes": "PCIe lanes",
+    "frequency": "MT/s",
+    "voltage": "V",
+    "power": "W",
+    "temperature": "C"
+  },
+  "compute": {
+    "cpu": {
+      "model": "FILL_EPYC_MODEL",
+      "family_model_stepping": "NOT_RUN",
+      "isa_caps": ["SSE4.2", "AVX", "AVX2", "FMA", "AVX-512", "VNNI", "FILL_BCLMUL_PCLMULQDQ"],
+      "isa_caps_missing": ["FILL"],
+      "physical_cores": 0,
+      "logical_cores": 0,
+      "core_layout": "FILL_CCD_LAYOUT",
+      "numa_nodes": 4,
+      "numa_domains": 4,
+      "base_freq_mhz": 0,
+      "boost_freq_mhz": 0,
+      "tdp_w": 0,
+      "package": "FILL_SP3_SP5",
+      "motherboard": "FILL_BOARD",
+      "cpu_roofline": {
+        "scalar_fma_gflops_peak": "NOT_RUN",
+        "avx2_fma_gflops_peak": "NOT_RUN",
+        "avx512_fma_gflops_peak": "NOT_RUN",
+        "mem_bw_gbps_peak": "NOT_RUN",
+        "method": "NOT_RUN"
+      }
+    },
+    "gpu": [
+      {
+        "model": "FILL_GPU_MODEL",
+        "count": "FILL_N",
+        "arch": "FILL",
+        "compute_capability_or_arch": "FILL",
+        "vram_bytes_per_gpu": "FILL",
+        "vram_speed_class": "FILL",
+        "memory_bw_gbps": "FILL",
+        "tensor_cores": "FILL",
+        "nvlink_or_nvswitch": "FILL",
+        "pcie": {
+          "gen": 4,
+          "lanes": "FILL",
+          "root_competition": "FILL: Gen4 root complex layout"
+        },
+        "eligible_for_expert_compute": "NOT_RUN"
+      }
+    ]
+  },
+  "memory_domains": [
+    {
+      "id": "mem:numa0",
+      "kind": "DRAM",
+      "total_bytes": "NOT_RUN",
+      "channels": "NOT_RUN",
+      "speed_class": "DDR4_OR_DDR5",
+      "speed_mt_s": "NOT_RUN",
+      "bandwidth_class_gbps": "NOT_RUN",
+      "form_factor": "DIMM",
+      "numa_attach": "node 0"
+    }
+  ],
+  "storage": [
+    {
+      "id": "drive:c01",
+      "label": "FILL",
+      "model": "FILL",
+      "capacity_bytes": 0,
+      "controller": "FILL",
+      "pci_parent": "FILL",
+      "interface": "FILL",
+      "pcie_gen": 4,
+      "pcie_lanes": "FILL",
+      "media_type": "FILL",
+      "calibration": "NOT_RUN",
+      "notes": "Epyc systems typically have many NVMe drives; capture per-drive"
+    }
+  ],
+  "controllers": [
+    {
+      "id": "ctrl:c0X",
+      "kind": "FILL",
+      "parent": "FILL",
+      "drives": ["drive:c01"]
+    }
+  ],
+  "interconnects": [
+    {
+      "id": "pcie:gen4_root",
+      "kind": "pcie",
+      "gen": 4,
+      "lanes_total": "NOT_RUN",
+      "shared_group": "FILL",
+      "evidence": "FILL"
+    },
+    {
+      "id": "if:ccx_or_infinity_fabric",
+      "kind": "fabric",
+      "rate_bps": "NOT_RUN",
+      "latency_ns": "NOT_RUN",
+      "shared_group": "FILL",
+      "evidence": "FILL: 4 NUMA domain cross-fabric penalty"
+    }
+  ],
+  "machine": {
+    "id": "C",
+    "name": "Epyc 4-NUMA Gen4",
+    "numa_topology": "4 sockets / 4 NUMA domains",
+    "eligibility": {
+      "cpu_island": [
+        { "id": "cpu:0", "isa_match": true },
+        { "id": "cpu:1", "isa_match": true },
+        { "id": "cpu:2", "isa_match": true },
+        { "id": "cpu:3", "isa_match": true }
+      ],
+      "gpu_island": "FILL"
+    }
+  },
+  "operating_environment": {
+    "os": "FILL",
+    "build": "FILL",
+    "filesystem": "FILL",
+    "filesystems_observed": ["FILL"],
+    "backends_enabled": ["CPU", "CUDA_or_ROCm_or_Vulkan"],
+    "backends_disabled": ["FILL"],
+    "compiler": "FILL",
+    "omp_threads_default": "NOT_RUN",
+    "omp_threads_configured": "NOT_RUN"
+  },
+  "open_evidence_gaps": [
+    {
+      "id": "cal:cross_fabric_penalty",
+      "field": "Infinity Fabric cross-NUMA penalty",
+      "status": "NOT_RUN",
+      "rationale": "4-NUMA placement is the headline measurement; interleaving on Epyc showed +40% on 4-socket CPU-only per benchmark table #82"
+    },
+    {
+      "id": "cal:gen4_root_contention",
+      "field": "PCIe Gen4 root contention between drives and GPUs",
+      "status": "NOT_RUN",
+      "rationale": "Gen4 shared-root layout must be measured before scheduler scoring"
+    },
+    {
+      "id": "cal:h2d_d2h",
+      "field": "GPU H2D / D2H",
+      "status": "NOT_RUN",
+      "rationale": "GPU count and arch TBD; H2D/D2H drive the placement cost model"
+    }
+  ]
+}

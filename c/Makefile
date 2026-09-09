@@ -742,8 +742,9 @@ $(file >.build-config,$(BUILD_CONFIG))
 endif
 .build-config: ;
 
-colibri$(EXE): colibri.c cli_args.h st.h uring.h json.h tok.h tok_unicode.h compat.h grammar.h quant.h sample.h kv_persist.h telemetry.h route_trace.h omp_tune.h kv_fp8.h kv_tq.h m3_dag.h abl.h backend_cuda.h backend_metal.h backend_vulkan.h decode_batch.h edge_adapters.h edge_runtime.h edge_tok_internal.h schema_gbnf.h segment_adapter_internal.h segment_adapters.h segment_runtime.h tier.h $(CUDA_OBJ) $(METAL_OBJ) $(VK_OBJ) $(VK_SPV) .build-config
-	$(CC) $(CFLAGS) colibri.c $(CUDA_OBJ) $(METAL_OBJ) $(VK_OBJ) -o colibri$(EXE) $(LDFLAGS)
+COLIBRI_M3_SHADOW_SRCS = m3_shadow_plan.c m3_shadow_m3_bridge.c m3_shadow_m3_runtime.c m3_active_admission.c
+colibri$(EXE): colibri.c cli_args.h st.h uring.h json.h tok.h tok_unicode.h compat.h grammar.h quant.h sample.h kv_persist.h telemetry.h route_trace.h omp_tune.h kv_fp8.h kv_tq.h m3_dag.h m3_shadow_plan.h m3_shadow_m3_bridge.h m3_shadow_m3_runtime.h m3_active_admission.h abl.h backend_cuda.h backend_metal.h backend_vulkan.h decode_batch.h edge_adapters.h edge_runtime.h edge_tok_internal.h schema_gbnf.h segment_adapter_internal.h segment_adapters.h segment_runtime.h tier.h $(COLIBRI_M3_SHADOW_SRCS) $(CUDA_OBJ) $(METAL_OBJ) $(VK_OBJ) $(VK_SPV) .build-config
+	$(CC) $(CFLAGS) -DCOLI_M3_SHADOW_RUNTIME colibri.c $(COLIBRI_M3_SHADOW_SRCS) $(CUDA_OBJ) $(METAL_OBJ) $(VK_OBJ) -o colibri$(EXE) $(LDFLAGS)
 
 # Vulkan backend object (plain C + vulkan headers) and its SPIR-V shaders.
 backend_vulkan.o: backend_vulkan.c backend_vulkan.h .build-config
@@ -1442,8 +1443,10 @@ SEGMENT_V4_UNITS = $(filter-out COLI_V4_UNIT_PROMPT \
 	COLI_V4_UNIT_GENERATE_STATS,$(V4_TARGET_UNITS)) $(V4_SEGMENT_UNIT)
 SEGMENT_V4_OBJS = $(addprefix $(SEGMENT_BUILD_DIR)/,$(addsuffix .o,$(SEGMENT_V4_UNITS)))
 SEGMENT_V4_REGISTRY_OBJ = $(SEGMENT_BUILD_DIR)/expert_store_registry.o
+SEGMENT_V4_SHADOW_OBJS = $(SEGMENT_BUILD_DIR)/m3_shadow_plan.o \
+	$(SEGMENT_BUILD_DIR)/m3_shadow_store.o
 SEGMENT_ALL_OBJS = $(SEGMENT_ENGINE_OBJS) $(SEGMENT_V4_OBJS) \
-	$(SEGMENT_V4_REGISTRY_OBJ)
+	$(SEGMENT_V4_REGISTRY_OBJ) $(SEGMENT_V4_SHADOW_OBJS)
 SEGMENT_RUNTIME_OBJS = \
 	$(SEGMENT_BUILD_DIR)/segment_runtime.o \
 	$(SEGMENT_BUILD_DIR)/edge_runtime.o
@@ -1497,8 +1500,13 @@ $(SEGMENT_V4_OBJS): $(SEGMENT_BUILD_DIR)/%.o: deepseek_v4.c deepseek_v4.h \
 	$(CC) $(SEGMENT_CPU_CFLAGS) -D$* -c deepseek_v4.c -o $@
 
 $(SEGMENT_V4_REGISTRY_OBJ): expert_store_registry.c expert_store_registry.h \
-		expert_store.h | $(SEGMENT_BUILD_DIR)
+		expert_store.h m3_shadow_store.h m3_shadow_plan.h | $(SEGMENT_BUILD_DIR)
 	$(CC) $(SEGMENT_CPU_CFLAGS) -c expert_store_registry.c -o $@
+
+$(SEGMENT_V4_SHADOW_OBJS): $(SEGMENT_BUILD_DIR)/%.o: %.c \
+		m3_shadow_plan.h m3_shadow_plan_log.h m3_shadow_plan_calib.h \
+		m3_shadow_store.h expert_store.h | $(SEGMENT_BUILD_DIR)
+	$(CC) $(SEGMENT_CPU_CFLAGS) -std=c11 -c $< -o $@
 
 $(SEGMENT_BUILD_DIR)/segment_runtime.o: segment_runtime.c segment_runtime.h | $(SEGMENT_BUILD_DIR)
 	$(CC) $(SEGMENT_CPU_CFLAGS) -c segment_runtime.c -o $@
@@ -1637,7 +1645,9 @@ V4_OWNERSHIP_OBJS = \
 	$(V4_OWN_DIR)/COLI_V4_UNIT_CONFIG.o \
 	$(V4_OWN_DIR)/COLI_V4_UNIT_ST.o \
 	$(V4_OWN_DIR)/COLI_V4_UNIT_NATIVE_QUANT.o \
-	$(V4_OWN_DIR)/expert_store_registry.o
+	$(V4_OWN_DIR)/expert_store_registry.o \
+	$(V4_OWN_DIR)/m3_shadow_plan.o \
+	$(V4_OWN_DIR)/m3_shadow_store.o
 
 $(V4_OWN_DIR):
 	mkdir -p $(V4_OWN_DIR)
@@ -1657,8 +1667,17 @@ $(V4_OWN_DIR)/COLI_V4_UNIT_NATIVE_QUANT.o: deepseek_v4.c deepseek_v4.h deepseek_
 # The engine (RUNTIME unit) opens its expert store through the pluggable
 # backend registry, so any test linking RUNTIME also links the registry object
 # (which defines coli_expert_store_backend_open_selected + registers "auto").
-$(V4_OWN_DIR)/expert_store_registry.o: expert_store_registry.c expert_store_registry.h expert_store.h | $(V4_OWN_DIR)
+$(V4_OWN_DIR)/expert_store_registry.o: expert_store_registry.c expert_store_registry.h \
+		expert_store.h m3_shadow_store.h m3_shadow_plan.h | $(V4_OWN_DIR)
 	$(CC) $(V4_OWN_CFLAGS) -c expert_store_registry.c -o $@
+
+$(V4_OWN_DIR)/m3_shadow_plan.o: m3_shadow_plan.c m3_shadow_plan.h \
+		m3_shadow_plan_log.h m3_shadow_plan_calib.h expert_store.h | $(V4_OWN_DIR)
+	$(CC) $(V4_OWN_CFLAGS) -std=c11 -c m3_shadow_plan.c -o $@
+
+$(V4_OWN_DIR)/m3_shadow_store.o: m3_shadow_store.c m3_shadow_store.h \
+		m3_shadow_plan.h expert_store.h | $(V4_OWN_DIR)
+	$(CC) $(V4_OWN_CFLAGS) -std=c11 -c m3_shadow_store.c -o $@
 
 tests/test_v4_ownership$(EXE): tests/test_v4_ownership.c $(V4_OWNERSHIP_OBJS)
 	$(CC) $(V4_OWN_CFLAGS) $< $(V4_OWNERSHIP_OBJS) -o $@ -pthread $(LDFLAGS)
@@ -1896,6 +1915,147 @@ ASAN_CFLAGS  = -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined
 ASAN_LDFLAGS = -fsanitize=address,undefined
 ASAN_ENV     = ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1
 
+# Step 7's deterministic, observer-only planner is intentionally built as a
+# small standalone target.  It has no engine linkage and therefore cannot
+# change the live read path merely by being present in the tree.
+tests/test_m3_shadow_plan$(EXE): m3_shadow_plan.c m3_shadow_plan.h \
+		m3_shadow_plan_log.h m3_shadow_plan_calib.h expert_store.h \
+		tests/test_m3_shadow_plan.c
+	$(CC) $(CFLAGS) -std=c11 m3_shadow_plan.c tests/test_m3_shadow_plan.c \
+		-o $@ $(LDFLAGS)
+
+tests/test_m3_shadow_plan_observer$(EXE): m3_shadow_plan.c m3_shadow_plan.h \
+		m3_shadow_plan_log.h m3_shadow_plan_calib.h expert_store.h \
+		tests/test_m3_shadow_plan_observer.c
+	$(CC) $(CFLAGS) -std=c11 m3_shadow_plan.c \
+	tests/test_m3_shadow_plan_observer.c -o $@ $(LDFLAGS)
+
+tests/test_m3_shadow_store$(EXE): m3_shadow_store.c m3_shadow_store.h \
+		m3_shadow_plan.c m3_shadow_plan.h m3_shadow_plan_log.h \
+		m3_shadow_plan_calib.h expert_store.h tests/test_m3_shadow_store.c
+	$(CC) $(CFLAGS) -std=c11 m3_shadow_plan.c m3_shadow_store.c \
+		tests/test_m3_shadow_store.c -o $@ $(LDFLAGS)
+
+tests/test_m3_shadow_registry$(EXE): expert_store_registry.c \
+		expert_store_registry.h expert_store.h m3_shadow_store.c \
+		m3_shadow_store.h m3_shadow_plan.c m3_shadow_plan.h \
+		m3_shadow_plan_log.h m3_shadow_plan_calib.h \
+		tests/test_m3_shadow_registry.c
+	$(CC) $(CFLAGS) -D_GNU_SOURCE tests/test_m3_shadow_registry.c \
+		expert_store_registry.c m3_shadow_store.c m3_shadow_plan.c \
+		-o $@ $(LDFLAGS)
+
+tests/test_m3_shadow_m3_bridge$(EXE): m3_shadow_m3_bridge.c \
+		m3_shadow_m3_bridge.h m3_shadow_plan.c m3_shadow_plan.h \
+		m3_shadow_plan_log.h \
+		m3_shadow_plan_calib.h expert_store.h tests/test_m3_shadow_m3_bridge.c
+	$(CC) $(CFLAGS) -std=c11 m3_shadow_plan.c m3_shadow_m3_bridge.c \
+		tests/test_m3_shadow_m3_bridge.c -o $@ $(LDFLAGS)
+
+tests/test_m3_shadow_m3_runtime$(EXE): m3_shadow_plan.c m3_shadow_m3_bridge.c \
+		m3_active_admission.c m3_active_admission.h \
+		m3_shadow_m3_runtime.c m3_shadow_m3_runtime.h \
+		m3_shadow_m3_bridge.h m3_shadow_plan.h m3_shadow_plan_log.h \
+		m3_shadow_plan_calib.h expert_store.h tests/test_m3_shadow_m3_runtime.c
+	$(CC) $(CFLAGS) -std=c11 m3_shadow_plan.c m3_shadow_m3_bridge.c \
+	m3_active_admission.c m3_shadow_m3_runtime.c tests/test_m3_shadow_m3_runtime.c -o $@ $(LDFLAGS)
+
+tests/test_m3_active_admission$(EXE): m3_active_admission.c m3_active_admission.h \
+		m3_shadow_plan.h m3_shadow_plan_calib.h expert_store.h \
+		tests/test_m3_active_admission.c
+	$(CC) $(CFLAGS) -std=c11 m3_active_admission.c \
+		tests/test_m3_active_admission.c -o $@ $(LDFLAGS)
+
+test-m3-active-admission: tests/test_m3_active_admission$(EXE)
+	./tests/test_m3_active_admission$(EXE)
+
+test-shadow-m3: tests/test_m3_shadow_plan$(EXE)
+	./tests/test_m3_shadow_plan$(EXE)
+
+test-shadow-observer-m3: tests/test_m3_shadow_plan_observer$(EXE)
+	./tests/test_m3_shadow_plan_observer$(EXE)
+
+test-shadow-store-m3: tests/test_m3_shadow_store$(EXE)
+	./tests/test_m3_shadow_store$(EXE)
+
+test-shadow-registry-m3: tests/test_m3_shadow_registry$(EXE)
+	./tests/test_m3_shadow_registry$(EXE)
+
+test-shadow-m3-bridge: tests/test_m3_shadow_m3_bridge$(EXE)
+	./tests/test_m3_shadow_m3_bridge$(EXE)
+
+test-shadow-m3-runtime: tests/test_m3_shadow_m3_runtime$(EXE)
+	./tests/test_m3_shadow_m3_runtime$(EXE)
+
+# Slice 7a-ext: parser fixtures for the new cpu_island / gpu_island /
+# memory_dom / link resource kinds.  Data-model only; no read-path touch.
+tests/test_m3_shadow_plan_topology$(EXE): m3_shadow_plan.c m3_shadow_plan.h \
+		m3_shadow_plan_log.h m3_shadow_plan_calib.h expert_store.h \
+		tests/test_m3_shadow_plan_topology.c
+	$(CC) $(CFLAGS) -std=c11 m3_shadow_plan.c \
+		tests/test_m3_shadow_plan_topology.c -o $@ $(LDFLAGS)
+
+test-shadow-m3-topology: tests/test_m3_shadow_plan_topology$(EXE)
+	./tests/test_m3_shadow_plan_topology$(EXE)
+
+# Slice 7b-ext: end-to-end gate for the calibration emit.  Reads a planner
+# text dump produced by ``m3_shadow_calibrate.py --emit-planner-text`` and
+# feeds it into ``m3_shd_parse_text`` to confirm the emit is planner-
+# acceptable.  Caller must pass the path to the planner text dump as
+# the first argument.
+tests/test_m3_shadow_calibration_emit$(EXE): m3_shadow_plan.c m3_shadow_plan.h \
+		m3_shadow_plan_log.h m3_shadow_plan_calib.h expert_store.h \
+		tests/test_m3_shadow_calibration_emit.c
+	$(CC) $(CFLAGS) -std=c11 m3_shadow_plan.c \
+		tests/test_m3_shadow_calibration_emit.c -o $@ $(LDFLAGS)
+
+test-shadow-m3-calibration-emit: tests/test_m3_shadow_calibration_emit$(EXE) \
+		../docs/results/m3-execution-slice-7b-ext-2026-09-07.planner.txt
+	./tests/test_m3_shadow_calibration_emit$(EXE) \
+		../docs/results/m3-execution-slice-7b-ext-2026-09-07.planner.txt
+
+# Full-model capacity evidence: 60*128 expert identities on two replicas.
+tests/test_m3_shadow_copy_scale$(EXE): m3_shadow_plan.c m3_shadow_plan.h \
+		m3_shadow_plan_log.h m3_shadow_plan_calib.h expert_store.h \
+		tests/test_m3_shadow_copy_scale.c
+	$(CC) $(CFLAGS) -std=c11 m3_shadow_plan.c \
+		tests/test_m3_shadow_copy_scale.c -o $@ $(LDFLAGS)
+
+test-shadow-m3-copy-scale: tests/test_m3_shadow_copy_scale$(EXE)
+	./tests/test_m3_shadow_copy_scale$(EXE)
+
+tests/test_m3_shadow_residency$(EXE): m3_shadow_plan.c m3_shadow_plan.h \
+		m3_shadow_plan_log.h m3_shadow_plan_calib.h expert_store.h \
+		tests/test_m3_shadow_residency.c
+	$(CC) $(CFLAGS) -std=c11 m3_shadow_plan.c \
+		tests/test_m3_shadow_residency.c -o $@ $(LDFLAGS)
+
+test-shadow-m3-residency: tests/test_m3_shadow_residency$(EXE)
+	./tests/test_m3_shadow_residency$(EXE)
+
+test-shadow-m3-runtime-replay: colibri$(EXE)
+	$(PYTHON) tests/test_m3_shadow_runtime_replay.py \
+		--binary ./colibri$(EXE) --snap m3tiny_i8 --ref ref_m3.json \
+		--config ../docs/results/m3-execution-step7-fixtures/m3_runtime_tiny/config.txt \
+		--expected-counterfactual-drive 102 --expected-actual-drive 101
+
+test-tsan-m3-shadow:
+	@$(MAKE) clean
+	@$(TSAN_ENV) $(MAKE) tests/test_m3_shadow_plan \
+		tests/test_m3_shadow_plan_observer tests/test_m3_shadow_store \
+		tests/test_m3_shadow_registry tests/test_m3_shadow_m3_bridge \
+		tests/test_m3_shadow_m3_runtime tests/test_m3_active_admission \
+		CC=$(CC) EXTRA_CFLAGS="$(TSAN_CFLAGS) $(EXTRA_CFLAGS)" \
+		EXTRA_LDFLAGS="$(TSAN_LDFLAGS) $(EXTRA_LDFLAGS)"
+	@$(TSAN_ENV) ./tests/test_m3_shadow_plan
+	@$(TSAN_ENV) ./tests/test_m3_shadow_plan_observer
+	@$(TSAN_ENV) ./tests/test_m3_shadow_store
+	@$(TSAN_ENV) ./tests/test_m3_shadow_registry
+	@$(TSAN_ENV) ./tests/test_m3_shadow_m3_bridge
+	@$(TSAN_ENV) ./tests/test_m3_shadow_m3_runtime
+	@$(TSAN_ENV) ./tests/test_m3_active_admission
+	@echo "test-tsan-m3-shadow: shadow + Step-8 admission boundary clean under TSan"
+
 # `make clean` first is not optional: tools/clean.py had to be fixed to remove
 # Unix test binaries at all (it globbed only *.exe), and without that step this
 # target re-runs binaries built with the NORMAL flags and reports them clean.
@@ -2010,7 +2170,11 @@ bench: iobench$(EXE)
 
 # Own line: see the TEST_RULES note above on shared .PHONY lines.
 .PHONY: bench-omp-grain
-.PHONY: test-asan test-tsan-m3 test-helgrind-m3
+.PHONY: test-asan test-tsan-m3 test-tsan-m3-shadow test-shadow-m3 \
+	test-shadow-observer-m3 test-shadow-store-m3 test-shadow-registry-m3 \
+	test-shadow-m3-bridge test-shadow-m3-runtime \
+	test-shadow-m3-runtime-replay \
+	test-helgrind-m3
 .PHONY: dsv4-cuda-test cuda-dsv4-dll cuda-dsv4-dg-dll dsv4-cuda-loader-test
 
 tests/test_kv_prefix$(EXE): tests/test_kv_prefix.c kv_prefix.h

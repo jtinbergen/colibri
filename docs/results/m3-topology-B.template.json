@@ -1,0 +1,193 @@
+{
+  "schema_version": "0.1.0",
+  "machine_id": "B",
+  "capture_date": "FILL_DATE",
+  "evidence_basis": "NOT_RUN",
+  "units": {
+    "rate": "B/s",
+    "latency": "ns",
+    "bytes": "B",
+    "lanes": "PCIe lanes",
+    "frequency": "MT/s",
+    "voltage": "V",
+    "power": "W",
+    "temperature": "C"
+  },
+  "compute": {
+    "cpu": {
+      "model": "NOT_RUN",
+      "family_model_stepping": "NOT_RUN",
+      "isa_caps": ["SSE4.2", "AVX", "FILL_AVX1_ONLY_OR_LATER"],
+      "isa_caps_missing": ["FILL_LIST"],
+      "physical_cores": 0,
+      "logical_cores": 0,
+      "core_layout": "NOT_RUN",
+      "numa_nodes": 0,
+      "numa_domains": 0,
+      "base_freq_mhz": 0,
+      "boost_freq_mhz": 0,
+      "tdp_w": 0,
+      "package": "FILL_SOCKET_PACKAGE",
+      "motherboard": "FILL_BOARD",
+      "cpu_roofline": {
+        "scalar_fma_gflops_peak": "NOT_RUN",
+        "vector_fma_gflops_peak": "NOT_RUN",
+        "mem_bw_gbps_peak": "NOT_RUN",
+        "method": "NOT_RUN"
+      }
+    },
+    "gpu": [
+      {
+        "model": "NVIDIA GeForce GTX 1080 Ti",
+        "count": 6,
+        "arch": "Pascal",
+        "compute_capability": "sm_61",
+        "vram_bytes_per_gpu": 11811160064,
+        "vram_speed_class": "GDDR5X 11 Gbps",
+        "memory_bw_gbps": 484,
+        "fp32_tflops_per_gpu": 11.34,
+        "tensor_cores": 0,
+        "nvlink": false,
+        "pcie": {
+          "gen": 3,
+          "lanes": "FILL_PER_GPU",
+          "root_competition": "FILL_WHICH_GPUS_SHARE_ROOT_COMPLEX"
+        },
+        "eligible_for_expert_compute": "NOT_RUN",
+        "eligibility_reason": "FILL: sm_61 is engine-known but Pascal lacks FP16 accumulator; per-host smoke required"
+      }
+    ]
+  },
+  "memory_domains": [
+    {
+      "id": "mem:numa0",
+      "kind": "DRAM",
+      "total_bytes": "NOT_RUN",
+      "channels": "NOT_RUN",
+      "speed_class": "DDR3",
+      "speed_mt_s": "NOT_RUN",
+      "bandwidth_class_gbps": "NOT_RUN",
+      "form_factor": "DIMM",
+      "numa_attach": "node 0"
+    },
+    {
+      "id": "mem:numa1",
+      "kind": "DRAM",
+      "total_bytes": "NOT_RUN",
+      "channels": "NOT_RUN",
+      "speed_class": "DDR3",
+      "speed_mt_s": "NOT_RUN",
+      "bandwidth_class_gbps": "NOT_RUN",
+      "form_factor": "DIMM",
+      "numa_attach": "node 1"
+    },
+    {
+      "id": "vram:gpu_i",
+      "kind": "VRAM",
+      "total_bytes": 11811160064,
+      "bandwidth_class_gbps": 484,
+      "kind_detail": "per-gpu; one domain per GPU",
+      "numa_attach": "node nearest to the GPU's PCIe slot"
+    }
+  ],
+  "storage": [
+    {
+      "id": "drive:b01",
+      "label": "FILL_LABEL",
+      "model": "FILL_MODEL",
+      "capacity_bytes": 0,
+      "controller": "FILL_CONTROLLER_ID",
+      "pci_parent": "FILL_PCI_PATH",
+      "interface": "FILL_NVME_OR_SATA",
+      "pcie_gen": "FILL",
+      "pcie_lanes": "FILL",
+      "media_type": "FILL",
+      "sequential_read_mbps_peak": "NOT_RUN",
+      "random_read_iops_4k_qd1": "NOT_RUN",
+      "random_read_iops_4k_qd32": "NOT_RUN",
+      "calibration": "NOT_RUN",
+      "notes": "Fill one row per physical drive (target: 6-7 drives, 3 controllers)"
+    }
+  ],
+  "controllers": [
+    {
+      "id": "ctrl:bFILL",
+      "kind": "nvme_or_sata",
+      "parent": "FILL_PCH_OR_CPU_ROOT",
+      "drives": ["drive:bFILL1", "drive:bFILL2"]
+    }
+  ],
+  "interconnects": [
+    {
+      "id": "pcie:root_A",
+      "kind": "pcie",
+      "gen": 3,
+      "lanes_total": "NOT_RUN",
+      "shared_group": "pch_or_cpu:A",
+      "evidence": "FILL"
+    },
+    {
+      "id": "qpi:cpu0-cpu1",
+      "kind": "qpi",
+      "rate_bps": "NOT_RUN",
+      "latency_ns": "NOT_RUN",
+      "shared_group": "qpi:link0",
+      "evidence": "FILL: cross-socket penalty measured only when memory or weights cross the link"
+    }
+  ],
+  "machine": {
+    "id": "B",
+    "name": "dual Sandy Bridge + 6x 1080 Ti",
+    "numa_topology": "2 sockets / 2 NUMA",
+    "eligibility": {
+      "cpu_island": [
+        { "id": "cpu:0", "isa_match": true, "score": "primary" },
+        { "id": "cpu:1", "isa_match": true, "score": "primary" }
+      ],
+      "gpu_island": "FILL: per-GPU eligibility after a smoke run on the host"
+    }
+  },
+  "operating_environment": {
+    "os": "FILL: Linux distro + kernel",
+    "build": "NOT_RUN",
+    "filesystem": "FILL: ext4/xfs/zfs",
+    "filesystems_observed": ["FILL"],
+    "backends_enabled": ["CPU", "CUDA"],
+    "backends_disabled": ["Metal", "Vulkan", "ROCm"],
+    "compiler": "FILL: gcc/clang/icx",
+    "omp_threads_default": "NOT_RUN",
+    "omp_threads_configured": "NOT_RUN"
+  },
+  "open_evidence_gaps": [
+    {
+      "id": "cal:same_controller_contention",
+      "field": "drives behind same controller",
+      "status": "NOT_RUN",
+      "rationale": "this machine has 3 controllers and 6+ drives — same-controller contention is the headline measurement"
+    },
+    {
+      "id": "cal:qpi_penalty",
+      "field": "QPI cross-socket penalty",
+      "status": "NOT_RUN",
+      "rationale": "two-socket NUMA penalty must be measured before planner scoring is sound"
+    },
+    {
+      "id": "cal:h2d_d2h",
+      "field": "GTX 1080 Ti H2D / D2H",
+      "status": "NOT_RUN",
+      "rationale": "no Tensor cores; Pascal H2D bandwidth is the per-expert transfer cost"
+    },
+    {
+      "id": "cal:p2p_pairs",
+      "field": "P2P GPU pairs",
+      "status": "NOT_RUN",
+      "rationale": "no NVLink; P2P is PCIe-switch based and bandwidth-class-dependent"
+    },
+    {
+      "id": "cal:gpu_tier_smoke",
+      "field": "GTX 1080 Ti eligible tier smoke",
+      "status": "NOT_RUN",
+      "rationale": "engine's CUDA tier known to underperform CPU on sm_61 (Step 6 evidence on machine A); this must be re-measured on B"
+    }
+  ]
+}

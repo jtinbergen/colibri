@@ -1,0 +1,56 @@
+# planner text dump -- m3-shadow-calibration-v2 emitter
+# topology_hash = 18437471596682960890
+# topology_hash_algorithm = sha256-trunc64-v1
+# topology_hash_verified = True
+# manifest_sha256 = e8307f4c469e8409c2eaa33b3b50da06488b80be591ecfc01595367fc4610f7b
+# capture_sha256 = fae6354ecc44ec308cad9daf271431bf6f62fec25129856b0bfbc54aa653bb9c
+# capture_schema = m3-shadow-calibration-v2
+# calibrator_tool = m3_shadow_calibrate/2
+# calibrator_source_sha256 = e167fa8a9c50c663b368c55950208d47d9ee6b48870044200b89e486f9b119fd
+# quantiles = nearest-rank-ceil/request-completions
+# cache_condition = cold
+# io_mode = overlapped
+# io_backend = win32-overlapped
+# asynchronous = True
+# async_request_protocol = submit_first_wave_before_reap
+# pcie_traffic_status = UNAVAILABLE
+# pcie_traffic_policy = endpoint_and_shared_path_only
+# platform_topology_status = OBSERVED
+# platform_topology_method = windows-pnp
+# pcie_negotiated_link = resource=201 drive=101 speed_gts=16.0 width=4 payload_bps=7876923076 status=OBSERVED_NEGOTIATED
+# pcie_parent_chain = resource=201 depth=5 root=HTREE\ROOT\0
+# pcie_negotiated_link = resource=202 drive=102 speed_gts=8.0 width=4 payload_bps=3938461538 status=OBSERVED_NEGOTIATED
+# pcie_parent_chain = resource=202 depth=5 root=HTREE\ROOT\0
+# pcie_negotiated_link = resource=700 drive=UNKNOWN speed_gts=2.5 width=16 payload_bps=4000000000 status=OBSERVED_NEGOTIATED
+# pcie_parent_chain = resource=700 depth=5 root=HTREE\ROOT\0
+# pcie_common_ancestor = ACPI\PNP0A08\0
+# unavailable_resource_policy = conservative_unknown
+# unavailable_resource_fallback = storage_bounds.max_inflight; rate=UNKNOWN
+# range_reuse = False
+# range_reuse_allowed = False
+# range_reuse_scope = capture
+# range_slots_required = {"101":2448,"102":2448}
+# range_slots_available = {"101":2556,"102":2556}
+# range_slots_reused = {"101":0,"102":0}
+# configuration_status = candidate_only
+# profile_rows = 4; source=review
+# host_memory_method = host_memcpy
+# host_memory_evidence = method=host_memcpy p50_bps=8298363299 p95_bps=8407867270 status=EVIDENCE_ONLY
+# physical_traffic_note: direct/unbuffered reads; OS page cache bypass requested
+resource 101 0 201 1 31850496
+resource 201 1 901 1 31850496
+resource 901 2 0 1 31850496
+resource 102 0 202 1 31850496
+resource 202 1 901 1 31850496
+# review_schema = m3-shadow-calibration-review-v2
+# review_sha256 = 9c37ac9a3c64057ba159c1c275bb3d60796512d5264daba995d96e5683251ce5
+# active_admission_allowed = False
+profile 101 3 1 4947611436 0 4602500 8 950000
+profile 102 3 2 3091268249 0 6344600 8 950000
+profile 201 3 1 5375384329 0 4404200 8 950000
+profile 202 3 2 3111642073 0 6064500 8 950000
+cpu_island 400 500 6 10 1
+memory_dom 500 0 0 2
+link 600 400 901 0
+gpu_island 700 600 8589934592 0 901 0
+gpu_island 701 600 536870912 0 901 0

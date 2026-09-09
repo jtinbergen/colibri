@@ -8,6 +8,7 @@ Run GLM-5.2 (744B) locally on CPU with roughly 15-26 GB of RAM.
   coli run "prompt"         one-shot generation
   coli info                 model, RAM, disk, and configuration status
   coli plan                 Disk / RAM / VRAM resource plan
+  coli profile              save a read-only machine evidence profile
   coli mirror               Plan, stage, or verify a learned partial mirror
   coli doctor               installation and execution-plan diagnostics
   coli bench [task...]      quality benchmarks (MMLU/HellaSwag/...)
@@ -1113,12 +1114,59 @@ def cmd_plan(a):
                         kv_slots=requested_kv_slots(a,os.environ))
     except (OSError, ValueError, json.JSONDecodeError) as error:
         sys.exit(f"{C.yel}cannot create resource plan:{C.r} {error}")
+    # The profile is evidence attached to the plan, not an input that changes
+    # placement.  Auto-discover only the per-model sidecar; never create it or
+    # benchmark a drive during `coli plan`.
+    profile_path = getattr(a, "machine_profile", None)
+    if profile_path is None:
+        candidate = os.path.join(a.model, ".coli_machine_profile.json")
+        if os.path.exists(candidate):
+            profile_path = candidate
+    if profile_path:
+        from machine_profile import (attach_machine_profile,
+                                     baseline_planner_contract,
+                                     load_machine_profile)
+        try:
+            attach_machine_profile(plan, load_machine_profile(profile_path), profile_path)
+        except ValueError as error:
+            plan["machine_profile"] = {"status": "UNKNOWN", "path": profile_path,
+                                        "reason": str(error),
+                                        "planner_contract": baseline_planner_contract()}
+            plan["warnings"].append(f"machine profile unavailable: {error}")
+    else:
+        from machine_profile import baseline_planner_contract
+        plan["machine_profile"] = {
+            "status": "NOT_FOUND",
+            "path": None,
+            "reason": "run `coli profile --model <dir>` to create a read-only machine profile",
+            "planner_contract": baseline_planner_contract(),
+        }
     if a.json:
         print(json.dumps(plan,indent=2))
         return
     banner("plan · Disk / RAM / VRAM", model=a.model)
     print(textwrap.indent(format_plan(plan),"  "))
     print()
+
+def cmd_profile(a):
+    from machine_profile import (build_machine_profile, format_machine_profile,
+                                 write_machine_profile)
+    if a.output:
+        output = a.output
+    elif a.model:
+        output = os.path.join(a.model, ".coli_machine_profile.json")
+    else:
+        output = os.path.join(os.getcwd(), "coli-machine-profile.json")
+    profile = build_machine_profile(a.model, a.calibration, a.review,
+                                    a.runtime_report)
+    try:
+        write_machine_profile(output, profile)
+    except (OSError, ValueError) as error:
+        sys.exit(f"{C.yel}cannot write machine profile:{C.r} {error}")
+    if a.json:
+        print(json.dumps(profile, indent=2))
+    else:
+        print(format_machine_profile(profile, output))
 
 def cmd_doctor(a):
     from doctor import exit_code, format_doctor, run_doctor
@@ -2157,6 +2205,19 @@ def main():
     sub.add_parser("build", parents=[common]); sub.add_parser("info", parents=[common])
     pp=sub.add_parser("plan",parents=[common])
     pp.add_argument("--json",action="store_true")
+    pp.add_argument("--machine-profile",default=None,
+                    help="read an existing machine profile without measuring hardware")
+    pf=sub.add_parser("profile",parents=[common],
+                      help="save a read-only hardware and calibration evidence profile")
+    pf.add_argument("--output",default=None,
+                    help="profile path (default: <model>/.coli_machine_profile.json)")
+    pf.add_argument("--calibration",default=None,
+                    help="optional Step-7 raw calibration capture to reference")
+    pf.add_argument("--review",default=None,
+                    help="optional reviewed calibration JSON to attach as evidence")
+    pf.add_argument("--runtime-report", default=None,
+                    help="optional m3-shadow runtime report to attach as evidence-only candidates")
+    pf.add_argument("--json",action="store_true",help="also emit the profile JSON")
     pm=sub.add_parser("mirror", parents=[common],
                       help="plan, stage, or verify a usage-ranked partial model mirror")
     pm.add_argument("action", choices=("plan", "stage", "verify"))
@@ -2251,7 +2312,7 @@ def main():
         help="int4 scale group size: 64 (default, group-scaled quality) or 0 (legacy per-row)")
     pc.add_argument("--no-mtp",action="store_true",help="skip the MTP head (no speculative drafts)")
     a=ap.parse_args()
-    handler={"build":cmd_build,"info":cmd_info,"plan":cmd_plan,"mirror":cmd_mirror,
+    handler={"build":cmd_build,"info":cmd_info,"plan":cmd_plan,"profile":cmd_profile,"mirror":cmd_mirror,
              "doctor":cmd_doctor,"tune":cmd_tune,
              "run":cmd_run,"chat":cmd_chat,"serve":cmd_serve,"stop":cmd_stop,"bench":cmd_bench,
              "convert":cmd_convert,"web":cmd_web}.get(a.cmd)

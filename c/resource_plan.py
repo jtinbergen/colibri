@@ -1214,6 +1214,12 @@ def format_plan(plan):
     lines.append(f"limit  {plan['expected_bottleneck']}")
     hit = plan.get("projected_hit_rate", 0)
     lines.append(f"hit    {hit:.0%} projected expert residency")
+    machine_profile = plan.get("machine_profile")
+    if machine_profile:
+        status = machine_profile.get("status", "UNKNOWN")
+        if "calibration_status" in machine_profile:
+            status += f" · calibration {machine_profile['calibration_status']}"
+        lines.append(f"profile {status}")
     tune = plan.get("tune", {})
     if tune:
         lines.append("")

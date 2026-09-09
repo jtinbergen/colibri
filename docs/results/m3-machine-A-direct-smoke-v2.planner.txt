@@ -1,0 +1,22 @@
+# planner text dump -- m3-shadow-calibration-v2 emitter
+# topology_hash = 20260908
+# manifest_sha256 = 49d2072b4447ec7bb2115aa13cc7ae6318cd7cf92d0f75bc45e7a5fe5ab306ef
+# cache_condition = cold
+# io_mode = direct
+# io_backend = win32-no-buffering
+# asynchronous = False
+# range_reuse = True
+# configuration_status = shadow_only
+# host_memory_method = NOT_RUN
+# physical_traffic_note: direct/unbuffered reads; OS page cache bypass requested; range reuse enabled
+resource 101 0 201 1 31850496
+resource 201 1 901 1 31850496
+resource 901 2 0 1 31850496
+resource 102 0 202 1 31850496
+resource 202 1 901 1 31850496
+profile 101 0 0 20613990 0 0 1 0
+profile 102 0 0 377143 0 0 1 0
+profile 201 0 0 21717921 0 0 1 0
+profile 202 0 0 39346781 0 0 1 0
+profile 901 0 0 18458765 0 0 1 0
+cpu_island 400 500 6 10 1

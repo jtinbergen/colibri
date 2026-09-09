@@ -1,0 +1,1278 @@
+{
+  "calibration": {
+    "capture": {
+      "cache_condition": "cold",
+      "capture_hash_verified": true,
+      "capture_sha256": "fae6354ecc44ec308cad9daf271431bf6f62fec25129856b0bfbc54aa653bb9c",
+      "groups": [
+        {
+          "all_group_drives_active": true,
+          "drive_ids": [
+            101
+          ],
+          "full_matrix_cells": 0,
+          "inflight_levels": [
+            1,
+            2,
+            4,
+            8,
+            16
+          ],
+          "matrix_cells": 0,
+          "max_observed_inflight": 16,
+          "measurement_kinds": [
+            "scalar"
+          ],
+          "name": "controller-201",
+          "target_kind": "controller"
+        },
+        {
+          "all_group_drives_active": true,
+          "drive_ids": [
+            102
+          ],
+          "full_matrix_cells": 0,
+          "inflight_levels": [
+            1,
+            2,
+            4,
+            8,
+            16
+          ],
+          "matrix_cells": 0,
+          "max_observed_inflight": 16,
+          "measurement_kinds": [
+            "scalar"
+          ],
+          "name": "controller-202",
+          "target_kind": "controller"
+        },
+        {
+          "all_group_drives_active": true,
+          "drive_ids": [
+            101
+          ],
+          "full_matrix_cells": 0,
+          "inflight_levels": [
+            1,
+            2,
+            4,
+            8,
+            16
+          ],
+          "matrix_cells": 0,
+          "max_observed_inflight": 16,
+          "measurement_kinds": [
+            "scalar"
+          ],
+          "name": "drive-101",
+          "target_kind": "drive"
+        },
+        {
+          "all_group_drives_active": true,
+          "drive_ids": [
+            102
+          ],
+          "full_matrix_cells": 0,
+          "inflight_levels": [
+            1,
+            2,
+            4,
+            8,
+            16
+          ],
+          "matrix_cells": 0,
+          "max_observed_inflight": 16,
+          "measurement_kinds": [
+            "scalar"
+          ],
+          "name": "drive-102",
+          "target_kind": "drive"
+        },
+        {
+          "all_group_drives_active": true,
+          "drive_ids": [
+            101,
+            102
+          ],
+          "full_matrix_cells": 16,
+          "inflight_levels": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            8,
+            9,
+            10,
+            12,
+            16
+          ],
+          "matrix_cells": 26,
+          "max_observed_inflight": 16,
+          "measurement_kinds": [
+            "contention_matrix"
+          ],
+          "name": "shared-upstream-901",
+          "target_kind": "upstream"
+        }
+      ],
+      "inflight_levels": [
+        1,
+        2,
+        4,
+        8,
+        16
+      ],
+      "io": {
+        "async_request_protocol": "submit_first_wave_before_reap",
+        "asynchronous": true,
+        "backend": "win32-overlapped",
+        "cache_protocol": "uncontrolled",
+        "dma_evidence": {
+          "backend": "win32-overlapped",
+          "completion": "OVERLAPPED ReadFile completed through GetOverlappedResult after the destination buffer was populated",
+          "limitations": [
+            "the profiler does not independently attest the device DMA engine",
+            "this is not an active-admission approval"
+          ],
+          "method": "overlapped_read_into_reusable_aligned_user_buffer",
+          "status": "OBSERVED_NOT_ATTESTED"
+        },
+        "mode": "overlapped",
+        "pcie_traffic_evidence": {
+          "candidates": [],
+          "limitations": [
+            "endpoint negotiation and shared-upstream throughput remain available as separate evidence",
+            "no PCH/DMI capacity is inferred"
+          ],
+          "method": "command-capability-scan",
+          "reason": "no supported unprivileged PCH/DMI traffic counter was found",
+          "status": "UNAVAILABLE"
+        },
+        "platform_topology": {
+          "common_ancestor_instance_ids": [
+            "ACPI\\PNP0A08\\0",
+            "ACPI_HAL\\PNP0C08\\0",
+            "HTREE\\ROOT\\0",
+            "ROOT\\ACPI_HAL\\0000"
+          ],
+          "limitations": [
+            "negotiated endpoint properties are not a PCH/DMI traffic benchmark",
+            "a common OS parent identifies topology only; it does not prove a shared bandwidth limit",
+            "power-management state may lower the current link speed",
+            "hardware DMA completion is not independently attested"
+          ],
+          "links": [
+            {
+              "drive_id": 101,
+              "evidence_status": "OBSERVED_NEGOTIATED",
+              "friendly_name": "Standard NVM Express Controller",
+              "instance_id": "PCI\\VEN_144D&DEV_A80A&SUBSYS_A801144D&REV_00\\4&21705936&0&00EC",
+              "location": "PCI bus 6, device 0, function 0",
+              "location_path": "PCIROOT(0)#PCI(1D04)#PCI(0000)",
+              "negotiated_payload_bytes_per_s": 7876923076,
+              "parent_chain": [
+                {
+                  "friendly_name": "Intel(R) PCI Express Root Port #13 - 7AB4",
+                  "instance_id": "PCI\\VEN_8086&DEV_7AB4&SUBSYS_50011458&REV_11\\3&11583659&0&EC",
+                  "location": "PCI bus 0, device 29, function 4",
+                  "location_path": "PCIROOT(0)#PCI(1D04)",
+                  "parent_instance_id": "ACPI\\PNP0A08\\0",
+                  "status": "PRESENT"
+                },
+                {
+                  "friendly_name": "PCI Express Root Complex",
+                  "instance_id": "ACPI\\PNP0A08\\0",
+                  "location": null,
+                  "location_path": "ACPI(_SB_)#ACPI(PC00)",
+                  "parent_instance_id": "ACPI_HAL\\PNP0C08\\0",
+                  "status": "PRESENT"
+                },
+                {
+                  "friendly_name": "Microsoft ACPI-Compliant System",
+                  "instance_id": "ACPI_HAL\\PNP0C08\\0",
+                  "location": null,
+                  "location_path": null,
+                  "parent_instance_id": "ROOT\\ACPI_HAL\\0000",
+                  "status": "PRESENT"
+                },
+                {
+                  "friendly_name": "ACPI x64-based PC",
+                  "instance_id": "ROOT\\ACPI_HAL\\0000",
+                  "location": null,
+                  "location_path": null,
+                  "parent_instance_id": "HTREE\\ROOT\\0",
+                  "status": "PRESENT"
+                },
+                {
+                  "friendly_name": null,
+                  "instance_id": "HTREE\\ROOT\\0",
+                  "location": null,
+                  "location_path": null,
+                  "parent_instance_id": null,
+                  "status": "PRESENT"
+                }
+              ],
+              "parent_instance_id": "PCI\\VEN_8086&DEV_7AB4&SUBSYS_50011458&REV_11\\3&11583659&0&EC",
+              "resource_id": 201,
+              "resource_kind": "controller",
+              "root_instance_id": "HTREE\\ROOT\\0",
+              "speed_code": 4,
+              "speed_gts": 16.0,
+              "status": "PRESENT",
+              "width": 4
+            },
+            {
+              "drive_id": 102,
+              "evidence_status": "OBSERVED_NEGOTIATED",
+              "friendly_name": "Standard NVM Express Controller",
+              "instance_id": "PCI\\VEN_144D&DEV_A80B&SUBSYS_A80B144D&REV_02\\4&1E1F98A2&0&00E8",
+              "location": "PCI bus 5, device 0, function 0",
+              "location_path": "PCIROOT(0)#PCI(1D00)#PCI(0000)",
+              "negotiated_payload_bytes_per_s": 3938461538,
+              "parent_chain": [
+                {
+                  "friendly_name": "Intel(R) PCI Express Root Port #9 - 7AB0",
+                  "instance_id": "PCI\\VEN_8086&DEV_7AB0&SUBSYS_50011458&REV_11\\3&11583659&0&E8",
+                  "location": "PCI bus 0, device 29, function 0",
+                  "location_path": "PCIROOT(0)#PCI(1D00)",
+                  "parent_instance_id": "ACPI\\PNP0A08\\0",
+                  "status": "PRESENT"
+                },
+                {
+                  "friendly_name": "PCI Express Root Complex",
+                  "instance_id": "ACPI\\PNP0A08\\0",
+                  "location": null,
+                  "location_path": "ACPI(_SB_)#ACPI(PC00)",
+                  "parent_instance_id": "ACPI_HAL\\PNP0C08\\0",
+                  "status": "PRESENT"
+                },
+                {
+                  "friendly_name": "Microsoft ACPI-Compliant System",
+                  "instance_id": "ACPI_HAL\\PNP0C08\\0",
+                  "location": null,
+                  "location_path": null,
+                  "parent_instance_id": "ROOT\\ACPI_HAL\\0000",
+                  "status": "PRESENT"
+                },
+                {
+                  "friendly_name": "ACPI x64-based PC",
+                  "instance_id": "ROOT\\ACPI_HAL\\0000",
+                  "location": null,
+                  "location_path": null,
+                  "parent_instance_id": "HTREE\\ROOT\\0",
+                  "status": "PRESENT"
+                },
+                {
+                  "friendly_name": null,
+                  "instance_id": "HTREE\\ROOT\\0",
+                  "location": null,
+                  "location_path": null,
+                  "parent_instance_id": null,
+                  "status": "PRESENT"
+                }
+              ],
+              "parent_instance_id": "PCI\\VEN_8086&DEV_7AB0&SUBSYS_50011458&REV_11\\3&11583659&0&E8",
+              "resource_id": 202,
+              "resource_kind": "controller",
+              "root_instance_id": "HTREE\\ROOT\\0",
+              "speed_code": 3,
+              "speed_gts": 8.0,
+              "status": "PRESENT",
+              "width": 4
+            },
+            {
+              "evidence_status": "OBSERVED_NEGOTIATED",
+              "friendly_name": "NVIDIA GeForce GTX 1080",
+              "instance_id": "PCI\\VEN_10DE&DEV_1B80&SUBSYS_33621462&REV_A1\\4&AA66160&0&0008",
+              "location": "PCI bus 1, device 0, function 0",
+              "location_path": "PCIROOT(0)#PCI(0100)#PCI(0000)",
+              "negotiated_payload_bytes_per_s": 4000000000,
+              "parent_chain": [
+                {
+                  "friendly_name": "Intel(R) PEG10 - 460D",
+                  "instance_id": "PCI\\VEN_8086&DEV_460D&SUBSYS_50001458&REV_02\\3&11583659&0&08",
+                  "location": "PCI bus 0, device 1, function 0",
+                  "location_path": "PCIROOT(0)#PCI(0100)",
+                  "parent_instance_id": "ACPI\\PNP0A08\\0",
+                  "status": "PRESENT"
+                },
+                {
+                  "friendly_name": "PCI Express Root Complex",
+                  "instance_id": "ACPI\\PNP0A08\\0",
+                  "location": null,
+                  "location_path": "ACPI(_SB_)#ACPI(PC00)",
+                  "parent_instance_id": "ACPI_HAL\\PNP0C08\\0",
+                  "status": "PRESENT"
+                },
+                {
+                  "friendly_name": "Microsoft ACPI-Compliant System",
+                  "instance_id": "ACPI_HAL\\PNP0C08\\0",
+                  "location": null,
+                  "location_path": null,
+                  "parent_instance_id": "ROOT\\ACPI_HAL\\0000",
+                  "status": "PRESENT"
+                },
+                {
+                  "friendly_name": "ACPI x64-based PC",
+                  "instance_id": "ROOT\\ACPI_HAL\\0000",
+                  "location": null,
+                  "location_path": null,
+                  "parent_instance_id": "HTREE\\ROOT\\0",
+                  "status": "PRESENT"
+                },
+                {
+                  "friendly_name": null,
+                  "instance_id": "HTREE\\ROOT\\0",
+                  "location": null,
+                  "location_path": null,
+                  "parent_instance_id": null,
+                  "status": "PRESENT"
+                }
+              ],
+              "parent_instance_id": "PCI\\VEN_8086&DEV_460D&SUBSYS_50001458&REV_02\\3&11583659&0&08",
+              "resource_id": 700,
+              "resource_kind": "gpu_island",
+              "root_instance_id": "HTREE\\ROOT\\0",
+              "speed_code": 1,
+              "speed_gts": 2.5,
+              "status": "PRESENT",
+              "width": 16
+            }
+          ],
+          "method": "windows-pnp",
+          "status": "OBSERVED"
+        },
+        "range_reuse": false,
+        "range_reuse_allowed": false
+      },
+      "manifest_sha256": "e8307f4c469e8409c2eaa33b3b50da06488b80be591ecfc01595367fc4610f7b",
+      "matrix_inflight_levels": [
+        0,
+        1,
+        2,
+        4,
+        8,
+        16
+      ],
+      "max_total_inflight": 16,
+      "memory": {
+        "bytes": 268435456,
+        "bytes_per_s_p50": 8298363299,
+        "bytes_per_s_p95": 8407867270,
+        "duration_ns_p50": 32316500,
+        "duration_ns_p95": 34128600,
+        "kind": "memory_dom",
+        "method": "host_memcpy",
+        "samples": 16,
+        "units": {
+          "bytes": "B",
+          "duration": "ns",
+          "rate": "B/s"
+        }
+      },
+      "memory_method": "host_memcpy",
+      "operations_per_worker": 2,
+      "path": "C:\\Users\\jaapj\\.lmstudio\\models\\colibri-dev\\docs\\results\\m3-machine-A-disjoint-calibration-v2.json",
+      "quantiles": {
+        "method": "nearest-rank-ceil",
+        "population": "request-completions"
+      },
+      "range_allocation": {
+        "scope": "capture",
+        "slots_available": {
+          "101": 2556,
+          "102": 2556
+        },
+        "slots_required": {
+          "101": 2448,
+          "102": 2448
+        },
+        "slots_reused": {
+          "101": 0,
+          "102": 0
+        },
+        "slots_unique": {
+          "101": 2448,
+          "102": 2448
+        }
+      },
+      "read_bytes": 31850496,
+      "review": {
+        "active_admission_allowed": false,
+        "allowed_tail_multiplier": 2.0,
+        "candidate_rows": [
+          {
+            "candidate_inflight": 2,
+            "candidate_is_observed_not_extrapolated": true,
+            "candidate_latency_ns_max": 14316500,
+            "candidate_latency_ns_p50": 9792300,
+            "candidate_latency_ns_tail": 14196500,
+            "candidate_min_retention": null,
+            "candidate_normalized_jain": null,
+            "candidate_queue_depths": null,
+            "candidate_rate": 5375384329,
+            "candidate_sample_count": 8,
+            "candidate_tail_spread_ns": 4404200,
+            "drive_ids": [
+              101
+            ],
+            "group": "controller-201",
+            "review_policy": {
+              "min_fairness": 0.9,
+              "min_per_drive_retention": 0.7,
+              "min_samples": 8
+            },
+            "tail_percentile_ppm": 950000,
+            "target_kind": "controller",
+            "target_resource_id": 201
+          },
+          {
+            "candidate_inflight": 4,
+            "candidate_is_observed_not_extrapolated": true,
+            "candidate_latency_ns_max": 44915500,
+            "candidate_latency_ns_p50": 38663900,
+            "candidate_latency_ns_tail": 44728400,
+            "candidate_min_retention": null,
+            "candidate_normalized_jain": null,
+            "candidate_queue_depths": null,
+            "candidate_rate": 3111642073,
+            "candidate_sample_count": 8,
+            "candidate_tail_spread_ns": 6064500,
+            "drive_ids": [
+              102
+            ],
+            "group": "controller-202",
+            "review_policy": {
+              "min_fairness": 0.9,
+              "min_per_drive_retention": 0.7,
+              "min_samples": 8
+            },
+            "tail_percentile_ppm": 950000,
+            "target_kind": "controller",
+            "target_resource_id": 202
+          },
+          {
+            "candidate_inflight": 2,
+            "candidate_is_observed_not_extrapolated": true,
+            "candidate_latency_ns_max": 16574200,
+            "candidate_latency_ns_p50": 11194400,
+            "candidate_latency_ns_tail": 15796900,
+            "candidate_min_retention": null,
+            "candidate_normalized_jain": null,
+            "candidate_queue_depths": null,
+            "candidate_rate": 4947611436,
+            "candidate_sample_count": 8,
+            "candidate_tail_spread_ns": 4602500,
+            "drive_ids": [
+              101
+            ],
+            "group": "drive-101",
+            "review_policy": {
+              "min_fairness": 0.9,
+              "min_per_drive_retention": 0.7,
+              "min_samples": 8
+            },
+            "tail_percentile_ppm": 950000,
+            "target_kind": "drive",
+            "target_resource_id": 101
+          },
+          {
+            "candidate_inflight": 4,
+            "candidate_is_observed_not_extrapolated": true,
+            "candidate_latency_ns_max": 46014300,
+            "candidate_latency_ns_p50": 38415900,
+            "candidate_latency_ns_tail": 44760500,
+            "candidate_min_retention": null,
+            "candidate_normalized_jain": null,
+            "candidate_queue_depths": null,
+            "candidate_rate": 3091268249,
+            "candidate_sample_count": 8,
+            "candidate_tail_spread_ns": 6344600,
+            "drive_ids": [
+              102
+            ],
+            "group": "drive-102",
+            "review_policy": {
+              "min_fairness": 0.9,
+              "min_per_drive_retention": 0.7,
+              "min_samples": 8
+            },
+            "tail_percentile_ppm": 950000,
+            "target_kind": "drive",
+            "target_resource_id": 102
+          },
+          {
+            "candidate_inflight": null,
+            "candidate_is_observed_not_extrapolated": false,
+            "candidate_latency_ns_max": null,
+            "candidate_latency_ns_p50": null,
+            "candidate_latency_ns_tail": null,
+            "candidate_min_retention": null,
+            "candidate_normalized_jain": null,
+            "candidate_queue_depths": null,
+            "candidate_rate": null,
+            "candidate_sample_count": null,
+            "candidate_tail_spread_ns": null,
+            "drive_ids": [
+              101,
+              102
+            ],
+            "group": "shared-upstream-901",
+            "review_policy": {
+              "min_fairness": 0.9,
+              "min_per_drive_retention": 0.7,
+              "min_samples": 8
+            },
+            "tail_percentile_ppm": 950000,
+            "target_kind": "upstream",
+            "target_resource_id": 901
+          }
+        ],
+        "capture_binding_verified": true,
+        "capture_sha256": "fae6354ecc44ec308cad9daf271431bf6f62fec25129856b0bfbc54aa653bb9c",
+        "manifest_sha256": "e8307f4c469e8409c2eaa33b3b50da06488b80be591ecfc01595367fc4610f7b",
+        "path": "C:\\Users\\jaapj\\.lmstudio\\models\\colibri-dev\\docs\\results\\m3-machine-A-disjoint-calibration-v2.review.json",
+        "promotion_status": "CANDIDATE_ONLY",
+        "review_sha256": "9c37ac9a3c64057ba159c1c275bb3d60796512d5264daba995d96e5683251ce5",
+        "schema": "m3-shadow-calibration-review-v2",
+        "tail_percentile_ppm": 950000,
+        "topology_hash": 18437471596682960890
+      },
+      "sample_count": 8,
+      "schema": "m3-shadow-calibration-v2",
+      "source_count": 2,
+      "tool": {
+        "name": "m3_shadow_calibrate",
+        "source_sha256": "e167fa8a9c50c663b368c55950208d47d9ee6b48870044200b89e486f9b119fd",
+        "version": 2
+      },
+      "tool_provenance": "VERIFIED",
+      "topology": {
+        "active_admission": false,
+        "groups": [
+          {
+            "drive_ids": [
+              101
+            ],
+            "kind": "drive",
+            "name": "drive-101",
+            "resource_id": 101
+          },
+          {
+            "drive_ids": [
+              102
+            ],
+            "kind": "drive",
+            "name": "drive-102",
+            "resource_id": 102
+          },
+          {
+            "drive_ids": [
+              101
+            ],
+            "kind": "controller",
+            "name": "controller-201",
+            "resource_id": 201
+          },
+          {
+            "drive_ids": [
+              102
+            ],
+            "kind": "controller",
+            "name": "controller-202",
+            "resource_id": 202
+          },
+          {
+            "drive_ids": [
+              101,
+              102
+            ],
+            "kind": "upstream",
+            "name": "shared-upstream-901",
+            "resource_id": 901,
+            "sweep": "matrix"
+          }
+        ],
+        "islands": [
+          {
+            "cores": 10,
+            "eligible": 1,
+            "isa_bits": 6,
+            "kind": "cpu_island",
+            "parent_mem_id": 500,
+            "resource_id": 400
+          },
+          {
+            "bandwidth_class": 2,
+            "kind": "memory_dom",
+            "measurement": "host_memcpy",
+            "parent_id": 0,
+            "resource_id": 500
+          },
+          {
+            "kind": "link",
+            "parent_cpu_id": 400,
+            "pcie_parent_id": 901,
+            "rate_status": "NOT_RUN",
+            "reason": "PCH/DMI link capacity was not independently measured",
+            "resource_id": 600,
+            "status": "NOT_RUN"
+          },
+          {
+            "eligible": 0,
+            "kind": "gpu_island",
+            "p2p_class": 0,
+            "parent_link_id": 600,
+            "pcie_parent_id": 901,
+            "platform": {
+              "windows_pci_instance_id": "PCI\\VEN_10DE&DEV_1B80&SUBSYS_33621462&REV_A1\\4&AA66160&0&0008"
+            },
+            "reason": "GTX 1080 is not eligible for the expert-compute tier",
+            "resource_id": 700,
+            "status": "NOT_RUN",
+            "vram_bytes": 8589934592
+          },
+          {
+            "eligible": 0,
+            "kind": "gpu_island",
+            "p2p_class": 0,
+            "parent_link_id": 600,
+            "pcie_parent_id": 901,
+            "reason": "Intel UHD Graphics 770 has no expert-compute backend",
+            "resource_id": 701,
+            "status": "NOT_RUN",
+            "vram_bytes": 536870912
+          }
+        ],
+        "manifest_sha256": "e8307f4c469e8409c2eaa33b3b50da06488b80be591ecfc01595367fc4610f7b",
+        "profile_status": "raw_only",
+        "sources": [
+          {
+            "available_slots": 2556,
+            "controller_id": 201,
+            "drive_id": 101,
+            "files": [
+              {
+                "device_id": 10418595037658538998,
+                "file_id": "83035118129955430",
+                "path": "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00002.safetensors",
+                "size_bytes": 4526467992,
+                "slot_base": 0,
+                "slot_count": 142
+              },
+              {
+                "device_id": 10418595037658538998,
+                "file_id": "5348024558314958",
+                "path": "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00003.safetensors",
+                "size_bytes": 4526467992,
+                "slot_base": 142,
+                "slot_count": 142
+              },
+              {
+                "device_id": 10418595037658538998,
+                "file_id": "175358910490751287",
+                "path": "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00004.safetensors",
+                "size_bytes": 4526467992,
+                "slot_base": 284,
+                "slot_count": 142
+              },
+              {
+                "device_id": 10418595037658538998,
+                "file_id": "499336608684713666",
+                "path": "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00005.safetensors",
+                "size_bytes": 4526467992,
+                "slot_base": 426,
+                "slot_count": 142
+              },
+              {
+                "device_id": 10418595037658538998,
+                "file_id": "70087269201033929",
+                "path": "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00006.safetensors",
+                "size_bytes": 4526467992,
+                "slot_base": 568,
+                "slot_count": 142
+              },
+              {
+                "device_id": 10418595037658538998,
+                "file_id": "160440736725121348",
+                "path": "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00007.safetensors",
+                "size_bytes": 4526467992,
+                "slot_base": 710,
+                "slot_count": 142
+              },
+              {
+                "device_id": 10418595037658538998,
+                "file_id": "28147497671212127",
+                "path": "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00008.safetensors",
+                "size_bytes": 4526467992,
+                "slot_base": 852,
+                "slot_count": 142
+              },
+              {
+                "device_id": 10418595037658538998,
+                "file_id": "10977524092522257",
+                "path": "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00009.safetensors",
+                "size_bytes": 4526468784,
+                "slot_base": 994,
+                "slot_count": 142
+              },
+              {
+                "device_id": 10418595037658538998,
+                "file_id": "66428094503924260",
+                "path": "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00010.safetensors",
+                "size_bytes": 4526468784,
+                "slot_base": 1136,
+                "slot_count": 142
+              },
+              {
+                "device_id": 10418595037658538998,
+                "file_id": "143552238122448249",
+                "path": "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00011.safetensors",
+                "size_bytes": 4526468784,
+                "slot_base": 1278,
+                "slot_count": 142
+              },
+              {
+                "device_id": 10418595037658538998,
+                "file_id": "44754521297180667",
+                "path": "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00012.safetensors",
+                "size_bytes": 4526468784,
+                "slot_base": 1420,
+                "slot_count": 142
+              },
+              {
+                "device_id": 10418595037658538998,
+                "file_id": "120752765009189696",
+                "path": "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00013.safetensors",
+                "size_bytes": 4526468784,
+                "slot_base": 1562,
+                "slot_count": 142
+              },
+              {
+                "device_id": 10418595037658538998,
+                "file_id": "114841790498037164",
+                "path": "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00014.safetensors",
+                "size_bytes": 4526468784,
+                "slot_base": 1704,
+                "slot_count": 142
+              },
+              {
+                "device_id": 10418595037658538998,
+                "file_id": "13229323906207946",
+                "path": "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00015.safetensors",
+                "size_bytes": 4526468784,
+                "slot_base": 1846,
+                "slot_count": 142
+              },
+              {
+                "device_id": 10418595037658538998,
+                "file_id": "254171903969917266",
+                "path": "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00016.safetensors",
+                "size_bytes": 4526468784,
+                "slot_base": 1988,
+                "slot_count": 142
+              },
+              {
+                "device_id": 10418595037658538998,
+                "file_id": "28428972648149371",
+                "path": "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00017.safetensors",
+                "size_bytes": 4526468784,
+                "slot_base": 2130,
+                "slot_count": 142
+              },
+              {
+                "device_id": 10418595037658538998,
+                "file_id": "10977524092524893",
+                "path": "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00018.safetensors",
+                "size_bytes": 4526468784,
+                "slot_base": 2272,
+                "slot_count": 142
+              },
+              {
+                "device_id": 10418595037658538998,
+                "file_id": "339177346936353513",
+                "path": "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00019.safetensors",
+                "size_bytes": 4526468784,
+                "slot_base": 2414,
+                "slot_count": 142
+              }
+            ],
+            "path": "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00002.safetensors",
+            "paths": [
+              "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00002.safetensors",
+              "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00003.safetensors",
+              "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00004.safetensors",
+              "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00005.safetensors",
+              "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00006.safetensors",
+              "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00007.safetensors",
+              "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00008.safetensors",
+              "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00009.safetensors",
+              "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00010.safetensors",
+              "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00011.safetensors",
+              "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00012.safetensors",
+              "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00013.safetensors",
+              "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00014.safetensors",
+              "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00015.safetensors",
+              "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00016.safetensors",
+              "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00017.safetensors",
+              "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00018.safetensors",
+              "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00019.safetensors"
+            ],
+            "physical_volume": {
+              "disk_numbers": [
+                1
+              ],
+              "extents": [
+                {
+                  "disk_number": 1,
+                  "extent_length": 999226153472,
+                  "starting_offset": 122683392
+                }
+              ],
+              "method": "windows-ioctl-volume-disk-extents",
+              "status": "OBSERVED",
+              "volume": "C:"
+            },
+            "size_bytes": 81476432568,
+            "upstream_id": 901
+          },
+          {
+            "available_slots": 2556,
+            "controller_id": 202,
+            "drive_id": 102,
+            "files": [
+              {
+                "device_id": 3375570751820102347,
+                "file_id": "281474976710709",
+                "path": "E:\\Models\\minimax_m3_i4\\out-00002.safetensors",
+                "size_bytes": 4526467992,
+                "slot_base": 0,
+                "slot_count": 142
+              },
+              {
+                "device_id": 3375570751820102347,
+                "file_id": "281474976710710",
+                "path": "E:\\Models\\minimax_m3_i4\\out-00003.safetensors",
+                "size_bytes": 4526467992,
+                "slot_base": 142,
+                "slot_count": 142
+              },
+              {
+                "device_id": 3375570751820102347,
+                "file_id": "281474976710711",
+                "path": "E:\\Models\\minimax_m3_i4\\out-00004.safetensors",
+                "size_bytes": 4526467992,
+                "slot_base": 284,
+                "slot_count": 142
+              },
+              {
+                "device_id": 3375570751820102347,
+                "file_id": "281474976710712",
+                "path": "E:\\Models\\minimax_m3_i4\\out-00005.safetensors",
+                "size_bytes": 4526467992,
+                "slot_base": 426,
+                "slot_count": 142
+              },
+              {
+                "device_id": 3375570751820102347,
+                "file_id": "281474976710713",
+                "path": "E:\\Models\\minimax_m3_i4\\out-00006.safetensors",
+                "size_bytes": 4526467992,
+                "slot_base": 568,
+                "slot_count": 142
+              },
+              {
+                "device_id": 3375570751820102347,
+                "file_id": "281474976710714",
+                "path": "E:\\Models\\minimax_m3_i4\\out-00007.safetensors",
+                "size_bytes": 4526467992,
+                "slot_base": 710,
+                "slot_count": 142
+              },
+              {
+                "device_id": 3375570751820102347,
+                "file_id": "281474976710715",
+                "path": "E:\\Models\\minimax_m3_i4\\out-00008.safetensors",
+                "size_bytes": 4526467992,
+                "slot_base": 852,
+                "slot_count": 142
+              },
+              {
+                "device_id": 3375570751820102347,
+                "file_id": "281474976710716",
+                "path": "E:\\Models\\minimax_m3_i4\\out-00009.safetensors",
+                "size_bytes": 4526468784,
+                "slot_base": 994,
+                "slot_count": 142
+              },
+              {
+                "device_id": 3375570751820102347,
+                "file_id": "281474976710717",
+                "path": "E:\\Models\\minimax_m3_i4\\out-00010.safetensors",
+                "size_bytes": 4526468784,
+                "slot_base": 1136,
+                "slot_count": 142
+              },
+              {
+                "device_id": 3375570751820102347,
+                "file_id": "281474976710718",
+                "path": "E:\\Models\\minimax_m3_i4\\out-00011.safetensors",
+                "size_bytes": 4526468784,
+                "slot_base": 1278,
+                "slot_count": 142
+              },
+              {
+                "device_id": 3375570751820102347,
+                "file_id": "281474976710719",
+                "path": "E:\\Models\\minimax_m3_i4\\out-00012.safetensors",
+                "size_bytes": 4526468784,
+                "slot_base": 1420,
+                "slot_count": 142
+              },
+              {
+                "device_id": 3375570751820102347,
+                "file_id": "281474976710720",
+                "path": "E:\\Models\\minimax_m3_i4\\out-00013.safetensors",
+                "size_bytes": 4526468784,
+                "slot_base": 1562,
+                "slot_count": 142
+              },
+              {
+                "device_id": 3375570751820102347,
+                "file_id": "281474976710721",
+                "path": "E:\\Models\\minimax_m3_i4\\out-00014.safetensors",
+                "size_bytes": 4526468784,
+                "slot_base": 1704,
+                "slot_count": 142
+              },
+              {
+                "device_id": 3375570751820102347,
+                "file_id": "281474976710722",
+                "path": "E:\\Models\\minimax_m3_i4\\out-00015.safetensors",
+                "size_bytes": 4526468784,
+                "slot_base": 1846,
+                "slot_count": 142
+              },
+              {
+                "device_id": 3375570751820102347,
+                "file_id": "281474976710723",
+                "path": "E:\\Models\\minimax_m3_i4\\out-00016.safetensors",
+                "size_bytes": 4526468784,
+                "slot_base": 1988,
+                "slot_count": 142
+              },
+              {
+                "device_id": 3375570751820102347,
+                "file_id": "281474976710724",
+                "path": "E:\\Models\\minimax_m3_i4\\out-00017.safetensors",
+                "size_bytes": 4526468784,
+                "slot_base": 2130,
+                "slot_count": 142
+              },
+              {
+                "device_id": 3375570751820102347,
+                "file_id": "281474976710725",
+                "path": "E:\\Models\\minimax_m3_i4\\out-00018.safetensors",
+                "size_bytes": 4526468784,
+                "slot_base": 2272,
+                "slot_count": 142
+              },
+              {
+                "device_id": 3375570751820102347,
+                "file_id": "281474976710726",
+                "path": "E:\\Models\\minimax_m3_i4\\out-00019.safetensors",
+                "size_bytes": 4526468784,
+                "slot_base": 2414,
+                "slot_count": 142
+              }
+            ],
+            "path": "E:\\Models\\minimax_m3_i4\\out-00002.safetensors",
+            "paths": [
+              "E:\\Models\\minimax_m3_i4\\out-00002.safetensors",
+              "E:\\Models\\minimax_m3_i4\\out-00003.safetensors",
+              "E:\\Models\\minimax_m3_i4\\out-00004.safetensors",
+              "E:\\Models\\minimax_m3_i4\\out-00005.safetensors",
+              "E:\\Models\\minimax_m3_i4\\out-00006.safetensors",
+              "E:\\Models\\minimax_m3_i4\\out-00007.safetensors",
+              "E:\\Models\\minimax_m3_i4\\out-00008.safetensors",
+              "E:\\Models\\minimax_m3_i4\\out-00009.safetensors",
+              "E:\\Models\\minimax_m3_i4\\out-00010.safetensors",
+              "E:\\Models\\minimax_m3_i4\\out-00011.safetensors",
+              "E:\\Models\\minimax_m3_i4\\out-00012.safetensors",
+              "E:\\Models\\minimax_m3_i4\\out-00013.safetensors",
+              "E:\\Models\\minimax_m3_i4\\out-00014.safetensors",
+              "E:\\Models\\minimax_m3_i4\\out-00015.safetensors",
+              "E:\\Models\\minimax_m3_i4\\out-00016.safetensors",
+              "E:\\Models\\minimax_m3_i4\\out-00017.safetensors",
+              "E:\\Models\\minimax_m3_i4\\out-00018.safetensors",
+              "E:\\Models\\minimax_m3_i4\\out-00019.safetensors"
+            ],
+            "physical_volume": {
+              "disk_numbers": [
+                0
+              ],
+              "extents": [
+                {
+                  "disk_number": 0,
+                  "extent_length": 511097962496,
+                  "starting_offset": 122683392
+                }
+              ],
+              "method": "windows-ioctl-volume-disk-extents",
+              "status": "OBSERVED",
+              "volume": "E:"
+            },
+            "size_bytes": 81476432568,
+            "upstream_id": 901
+          }
+        ],
+        "storage_bounds": {
+          "max_bytes": 31850496,
+          "max_inflight": 1,
+          "policy": "shadow-safe single-request bound; not a measured capacity claim"
+        },
+        "topology_hash": 18437471596682960890,
+        "topology_hash_algorithm": "sha256-trunc64-v1",
+        "topology_hash_verified": true
+      },
+      "topology_hash": 18437471596682960890
+    },
+    "coverage": {
+      "controller_service": "EVIDENCE_ONLY",
+      "drive_service": "EVIDENCE_ONLY",
+      "gpu_transfer": "NOT_APPLICABLE",
+      "host_memory": "EVIDENCE_ONLY",
+      "numa": "OBSERVED",
+      "pch_dmi": "UNAVAILABLE",
+      "pcie_negotiated_topology": "OBSERVED",
+      "shared_controller": "NOT_APPLICABLE",
+      "shared_upstream": "EVIDENCE_ONLY",
+      "storage": "EVIDENCE_ONLY",
+      "to_memory_dma": "OBSERVED_NOT_ATTESTED"
+    },
+    "reason": "raw capture is evidence-only, not an admitted planner profile; unattested or unavailable hardware limits remain conservative UNKNOWN",
+    "status": "EVIDENCE_ONLY"
+  },
+  "calibration_review": {
+    "active_admission_allowed": false,
+    "allowed_tail_multiplier": 2.0,
+    "candidate_rows": [
+      {
+        "candidate_inflight": 2,
+        "candidate_is_observed_not_extrapolated": true,
+        "candidate_latency_ns_max": 14316500,
+        "candidate_latency_ns_p50": 9792300,
+        "candidate_latency_ns_tail": 14196500,
+        "candidate_min_retention": null,
+        "candidate_normalized_jain": null,
+        "candidate_queue_depths": null,
+        "candidate_rate": 5375384329,
+        "candidate_sample_count": 8,
+        "candidate_tail_spread_ns": 4404200,
+        "drive_ids": [
+          101
+        ],
+        "group": "controller-201",
+        "review_policy": {
+          "min_fairness": 0.9,
+          "min_per_drive_retention": 0.7,
+          "min_samples": 8
+        },
+        "tail_percentile_ppm": 950000,
+        "target_kind": "controller",
+        "target_resource_id": 201
+      },
+      {
+        "candidate_inflight": 4,
+        "candidate_is_observed_not_extrapolated": true,
+        "candidate_latency_ns_max": 44915500,
+        "candidate_latency_ns_p50": 38663900,
+        "candidate_latency_ns_tail": 44728400,
+        "candidate_min_retention": null,
+        "candidate_normalized_jain": null,
+        "candidate_queue_depths": null,
+        "candidate_rate": 3111642073,
+        "candidate_sample_count": 8,
+        "candidate_tail_spread_ns": 6064500,
+        "drive_ids": [
+          102
+        ],
+        "group": "controller-202",
+        "review_policy": {
+          "min_fairness": 0.9,
+          "min_per_drive_retention": 0.7,
+          "min_samples": 8
+        },
+        "tail_percentile_ppm": 950000,
+        "target_kind": "controller",
+        "target_resource_id": 202
+      },
+      {
+        "candidate_inflight": 2,
+        "candidate_is_observed_not_extrapolated": true,
+        "candidate_latency_ns_max": 16574200,
+        "candidate_latency_ns_p50": 11194400,
+        "candidate_latency_ns_tail": 15796900,
+        "candidate_min_retention": null,
+        "candidate_normalized_jain": null,
+        "candidate_queue_depths": null,
+        "candidate_rate": 4947611436,
+        "candidate_sample_count": 8,
+        "candidate_tail_spread_ns": 4602500,
+        "drive_ids": [
+          101
+        ],
+        "group": "drive-101",
+        "review_policy": {
+          "min_fairness": 0.9,
+          "min_per_drive_retention": 0.7,
+          "min_samples": 8
+        },
+        "tail_percentile_ppm": 950000,
+        "target_kind": "drive",
+        "target_resource_id": 101
+      },
+      {
+        "candidate_inflight": 4,
+        "candidate_is_observed_not_extrapolated": true,
+        "candidate_latency_ns_max": 46014300,
+        "candidate_latency_ns_p50": 38415900,
+        "candidate_latency_ns_tail": 44760500,
+        "candidate_min_retention": null,
+        "candidate_normalized_jain": null,
+        "candidate_queue_depths": null,
+        "candidate_rate": 3091268249,
+        "candidate_sample_count": 8,
+        "candidate_tail_spread_ns": 6344600,
+        "drive_ids": [
+          102
+        ],
+        "group": "drive-102",
+        "review_policy": {
+          "min_fairness": 0.9,
+          "min_per_drive_retention": 0.7,
+          "min_samples": 8
+        },
+        "tail_percentile_ppm": 950000,
+        "target_kind": "drive",
+        "target_resource_id": 102
+      },
+      {
+        "candidate_inflight": null,
+        "candidate_is_observed_not_extrapolated": false,
+        "candidate_latency_ns_max": null,
+        "candidate_latency_ns_p50": null,
+        "candidate_latency_ns_tail": null,
+        "candidate_min_retention": null,
+        "candidate_normalized_jain": null,
+        "candidate_queue_depths": null,
+        "candidate_rate": null,
+        "candidate_sample_count": null,
+        "candidate_tail_spread_ns": null,
+        "drive_ids": [
+          101,
+          102
+        ],
+        "group": "shared-upstream-901",
+        "review_policy": {
+          "min_fairness": 0.9,
+          "min_per_drive_retention": 0.7,
+          "min_samples": 8
+        },
+        "tail_percentile_ppm": 950000,
+        "target_kind": "upstream",
+        "target_resource_id": 901
+      }
+    ],
+    "capture_binding_verified": true,
+    "capture_sha256": "fae6354ecc44ec308cad9daf271431bf6f62fec25129856b0bfbc54aa653bb9c",
+    "manifest_sha256": "e8307f4c469e8409c2eaa33b3b50da06488b80be591ecfc01595367fc4610f7b",
+    "path": "C:\\Users\\jaapj\\.lmstudio\\models\\colibri-dev\\docs\\results\\m3-machine-A-disjoint-calibration-v2.review.json",
+    "promotion_status": "CANDIDATE_ONLY",
+    "review_sha256": "9c37ac9a3c64057ba159c1c275bb3d60796512d5264daba995d96e5683251ce5",
+    "schema": "m3-shadow-calibration-review-v2",
+    "tail_percentile_ppm": 950000,
+    "topology_hash": 18437471596682960890
+  },
+  "cpu": {
+    "logical_cores": 16,
+    "numa": {
+      "method": "GetNumaHighestNodeNumber",
+      "node_count": 1,
+      "nodes": [
+        0
+      ],
+      "single_node": true,
+      "status": "OBSERVED"
+    },
+    "physical_cores": 10,
+    "sockets": 1
+  },
+  "generated_at_utc": "2026-09-09T07:11:28Z",
+  "gpus": {
+    "devices": [
+      {
+        "free_bytes": 6129975296,
+        "index": 0,
+        "name": "NVIDIA GeForce GTX 1080",
+        "total_bytes": 8589934592,
+        "unified_memory": false
+      }
+    ],
+    "status": "DISCOVERED"
+  },
+  "host": {
+    "machine": "AMD64",
+    "processor": "Intel64 Family 6 Model 151 Stepping 2, GenuineIntel",
+    "python": "3.13.3",
+    "release": "11",
+    "system": "Windows"
+  },
+  "memory": {
+    "available_bytes": 34359738368
+  },
+  "next_actions": [
+    {
+      "id": "calibrate-storage",
+      "reason": "reviewed candidate rows are attached; active admission remains disabled until physical I/O and held-out gates close",
+      "status": "evidence_only"
+    },
+    {
+      "id": "calibrate-contention",
+      "reason": "reviewed controller/upstream envelopes are attached; DMA and admission gates remain open",
+      "status": "evidence_only"
+    },
+    {
+      "id": "calibrate-numa",
+      "reason": "measure CPU/memory/link placement before enabling NUMA-sensitive planning",
+      "status": "optional"
+    }
+  ],
+  "planner_contract": {
+    "admission": "DISABLED",
+    "baseline_fallback": {
+      "admission": "disabled",
+      "max_inflight": 1,
+      "mode": "original_colibri_baseline",
+      "rate_policy": "UNKNOWN; do not infer unavailable link/DMA capacity",
+      "unknown_capacity": "conservative"
+    },
+    "cache_condition_required": true,
+    "unknown_is_not_optimistic_capacity": true
+  },
+  "schema": "colibri-machine-profile-v1",
+  "storage": {
+    "free_bytes": 76743004160,
+    "model_path": "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4",
+    "ssd_probe": {
+      "gbs": null,
+      "state": "absent"
+    },
+    "status": "DISCOVERED",
+    "total_bytes": 999226150912
+  },
+  "version": 1
+}

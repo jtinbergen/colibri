@@ -1,0 +1,24 @@
+# planner text dump -- m3-shadow-calibration-v1 emitter
+# topology_hash = 20260908
+# manifest_sha256 = 49d2072b4447ec7bb2115aa13cc7ae6318cd7cf92d0f75bc45e7a5fe5ab306ef
+# cache_condition = unknown
+# io_mode = buffered_os_read
+# range_reuse = True
+# configuration_status = shadow_only
+# host_memory_method = NOT_RUN
+# physical_traffic_note: OS cache state and controller traffic were not flushed or inferred
+resource 101 0 201 1 31850496
+resource 201 1 901 1 31850496
+resource 901 2 0 1 31850496
+resource 102 0 202 1 31850496
+resource 202 1 901 1 31850496
+profile 101 0 0 55351351 0 0 1 0
+profile 101 0 1 69189189 0 36500 1 950000
+profile 102 0 0 56574585 0 0 1 0
+profile 102 0 1 73735373 0 44800 1 950000
+profile 201 0 0 65015873 0 0 1 0
+profile 201 0 1 75502304 0 31500 1 950000
+profile 202 0 0 75992578 0 0 1 0
+profile 202 0 1 73077609 0 47200 1 950000
+profile 901 0 1 108791500 0 12600 1 950000
+cpu_island 400 500 6 10 1

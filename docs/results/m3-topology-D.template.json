@@ -1,0 +1,120 @@
+{
+  "schema_version": "0.1.0",
+  "machine_id": "D",
+  "capture_date": "FILL_DATE",
+  "evidence_basis": "NOT_RUN",
+  "units": {
+    "rate": "B/s",
+    "latency": "ns",
+    "bytes": "B",
+    "lanes": "PCIe lanes",
+    "frequency": "MT/s",
+    "voltage": "V",
+    "power": "W",
+    "temperature": "C"
+  },
+  "compute": {
+    "cpu": {
+      "model": "FILL_2X_XEON_V3",
+      "family_model_stepping": "NOT_RUN",
+      "isa_caps": ["SSE4.2", "AVX", "AVX2", "FMA", "FILL_TSX_OR_AES"],
+      "isa_caps_missing": ["AVX-512", "AMX", "VNNI", "SVE", "i8mm"],
+      "physical_cores": 0,
+      "logical_cores": 0,
+      "core_layout": "FILL",
+      "numa_nodes": "FILL_1_OR_2",
+      "numa_domains": "FILL_1_OR_2",
+      "base_freq_mhz": 0,
+      "boost_freq_mhz": 0,
+      "tdp_w": 0,
+      "package": "FILL_LGA2011_V3",
+      "motherboard": "FILL",
+      "cpu_roofline": {
+        "scalar_fma_gflops_peak": "NOT_RUN",
+        "avx2_fma_gflops_peak": "NOT_RUN",
+        "mem_bw_gbps_peak": "NOT_RUN",
+        "method": "NOT_RUN"
+      }
+    },
+    "gpu": []
+  },
+  "memory_domains": [
+    {
+      "id": "mem:drama",
+      "kind": "DRAM",
+      "total_bytes": 493921239040,
+      "total_bytes_unit_note": "460 GB per project description",
+      "channels": "NOT_RUN",
+      "speed_class": "DDR4",
+      "speed_mt_s": "NOT_RUN",
+      "bandwidth_class_gbps": "NOT_RUN",
+      "form_factor": "DIMM",
+      "numa_attach": "FILL"
+    }
+  ],
+  "storage": [
+    {
+      "id": "drive:d01",
+      "label": "FILL",
+      "model": "FILL",
+      "capacity_bytes": 0,
+      "controller": "FILL",
+      "pci_parent": "FILL",
+      "interface": "FILL",
+      "calibration": "NOT_RUN",
+      "notes": "Fill one row per physical drive. With 460 GB RAM the engine is resident on DRAM in many cases; the planner must choose resident-compute (free) over streamed-weights (PCIe)"
+    }
+  ],
+  "controllers": [],
+  "interconnects": [],
+  "machine": {
+    "id": "D",
+    "name": "Lenovo 2x Xeon v3 + 460 GB DDR4, no GPU",
+    "numa_topology": "FILL",
+    "eligibility": {
+      "cpu_island": [
+        { "id": "cpu:0", "isa_match": true },
+        { "id": "cpu:1", "isa_match": true }
+      ],
+      "gpu_island": [],
+      "no_gpu_fallback": "this machine is the CPU-only placement test; the planner must converge to DRAM-resident compute naturally"
+    }
+  },
+  "operating_environment": {
+    "os": "FILL",
+    "build": "FILL",
+    "filesystem": "FILL",
+    "filesystems_observed": ["FILL"],
+    "backends_enabled": ["CPU"],
+    "backends_disabled": ["CUDA", "Metal", "Vulkan", "ROCm"],
+    "compiler": "FILL",
+    "omp_threads_default": "NOT_RUN",
+    "omp_threads_configured": "NOT_RUN"
+  },
+  "open_evidence_gaps": [
+    {
+      "id": "cal:numa_topology",
+      "field": "single vs dual socket",
+      "status": "NOT_RUN",
+      "rationale": "Lenovo dual Xeon v3: confirm whether single or dual socket"
+    },
+    {
+      "id": "cal:qpi_penalty",
+      "field": "QPI penalty if dual socket",
+      "status": "NOT_RUN",
+      "rationale": "needed for cross-socket weight placement scoring"
+    },
+    {
+      "id": "cal:drive_count",
+      "field": "drive inventory and controller layout",
+      "status": "NOT_RUN",
+      "rationale": "needed for storage-side admission"
+    },
+    {
+      "id": "cal:all_resident_threshold",
+      "field": "all-resident path",
+      "status": "NOT_RUN",
+      "rationale": "with 460 GB DRAM the 224 GB model may be all-resident; this is the strongest place to validate 8c-ext residency optimizer"
+    }
+  ]
+}

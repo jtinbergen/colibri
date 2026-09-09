@@ -1,0 +1,5 @@
+topology: drives=1,2,3,4; controller=100; all controller links are shared
+drive_rate_bytes_per_s: 524288000
+controller_rate_bytes_per_s: 524288000
+request_bytes: 104857600
+clock: fake monotone, dispatch=0 ns

@@ -1,0 +1,20 @@
+{
+  "topology_hash": 20260907,
+  "sources": [
+    {
+      "drive_id": 101,
+      "controller_id": 201,
+      "path": "$COLI_M3_C_EXPERT"
+    },
+    {
+      "drive_id": 102,
+      "controller_id": 202,
+      "path": "$COLI_M3_E_EXPERT"
+    }
+  ],
+  "groups": [
+    {"name": "drive-101", "drive_ids": [101]},
+    {"name": "drive-102", "drive_ids": [102]},
+    {"name": "nvme-pair", "drive_ids": [101, 102]}
+  ]
+}

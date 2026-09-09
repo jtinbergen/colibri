@@ -1,0 +1,157 @@
+{
+  "allowed_tail_multiplier": 2.0,
+  "policy": "largest observed full-group inflight within allowed p99; no extrapolation",
+  "results": [
+    {
+      "allowed_latency_ns_tail": 10912000,
+      "baseline_inflight": 1,
+      "baseline_latency_ns_tail": 5456000,
+      "candidate_is_observed_not_extrapolated": true,
+      "candidate_latency_ns_max": 9556200,
+      "candidate_latency_ns_p50": 8786400,
+      "candidate_latency_ns_tail": 9556200,
+      "candidate_tail_spread_ns": 769800,
+      "drive_ids": [
+        101
+      ],
+      "group": "drive-101",
+      "max_inflight_candidate": 4,
+      "observations": [
+        {
+          "active_drive_ids": [
+            101
+          ],
+          "aggregate_bytes_per_s_p50": 3075002932,
+          "all_group_drives_active": true,
+          "inflight": 1,
+          "latency_ns_max": 5456000,
+          "latency_ns_p50": 5187100,
+          "latency_ns_p99": 5456000
+        },
+        {
+          "active_drive_ids": [
+            101
+          ],
+          "aggregate_bytes_per_s_p50": 4996118580,
+          "all_group_drives_active": true,
+          "inflight": 2,
+          "latency_ns_max": 6716100,
+          "latency_ns_p50": 6476000,
+          "latency_ns_p99": 6716100
+        },
+        {
+          "active_drive_ids": [
+            101
+          ],
+          "aggregate_bytes_per_s_p50": 7022547037,
+          "all_group_drives_active": true,
+          "inflight": 4,
+          "latency_ns_max": 9556200,
+          "latency_ns_p50": 8786400,
+          "latency_ns_p99": 9556200
+        }
+      ],
+      "read_bytes": 16777216,
+      "tail_percentile_ppm": 990000
+    },
+    {
+      "allowed_latency_ns_tail": 10749600,
+      "baseline_inflight": 1,
+      "baseline_latency_ns_tail": 5374800,
+      "candidate_is_observed_not_extrapolated": true,
+      "candidate_latency_ns_max": 9706200,
+      "candidate_latency_ns_p50": 8827400,
+      "candidate_latency_ns_tail": 9706200,
+      "candidate_tail_spread_ns": 878800,
+      "drive_ids": [
+        102
+      ],
+      "group": "drive-102",
+      "max_inflight_candidate": 4,
+      "observations": [
+        {
+          "active_drive_ids": [
+            102
+          ],
+          "aggregate_bytes_per_s_p50": 3121458658,
+          "all_group_drives_active": true,
+          "inflight": 1,
+          "latency_ns_max": 5374800,
+          "latency_ns_p50": 5254900,
+          "latency_ns_p99": 5374800
+        },
+        {
+          "active_drive_ids": [
+            102
+          ],
+          "aggregate_bytes_per_s_p50": 4583813557,
+          "all_group_drives_active": true,
+          "inflight": 2,
+          "latency_ns_max": 7320200,
+          "latency_ns_p50": 7034100,
+          "latency_ns_p99": 7320200
+        },
+        {
+          "active_drive_ids": [
+            102
+          ],
+          "aggregate_bytes_per_s_p50": 6914020316,
+          "all_group_drives_active": true,
+          "inflight": 4,
+          "latency_ns_max": 9706200,
+          "latency_ns_p50": 8827400,
+          "latency_ns_p99": 9706200
+        }
+      ],
+      "read_bytes": 16777216,
+      "tail_percentile_ppm": 990000
+    },
+    {
+      "allowed_latency_ns_tail": 13682200,
+      "baseline_inflight": 2,
+      "baseline_latency_ns_tail": 6841100,
+      "candidate_is_observed_not_extrapolated": true,
+      "candidate_latency_ns_max": 9429300,
+      "candidate_latency_ns_p50": 8861100,
+      "candidate_latency_ns_tail": 9429300,
+      "candidate_tail_spread_ns": 568200,
+      "drive_ids": [
+        101,
+        102
+      ],
+      "group": "nvme-pair",
+      "max_inflight_candidate": 4,
+      "observations": [
+        {
+          "active_drive_ids": [
+            101,
+            102
+          ],
+          "aggregate_bytes_per_s_p50": 4904829925,
+          "all_group_drives_active": true,
+          "inflight": 2,
+          "latency_ns_max": 6841100,
+          "latency_ns_p50": 6544600,
+          "latency_ns_p99": 6841100
+        },
+        {
+          "active_drive_ids": [
+            101,
+            102
+          ],
+          "aggregate_bytes_per_s_p50": 7117056833,
+          "all_group_drives_active": true,
+          "inflight": 4,
+          "latency_ns_max": 9429300,
+          "latency_ns_p50": 8861100,
+          "latency_ns_p99": 9429300
+        }
+      ],
+      "read_bytes": 16777216,
+      "tail_percentile_ppm": 990000
+    }
+  ],
+  "schema": "m3-shadow-calibration-review-v1",
+  "tail_percentile": 99,
+  "tail_percentile_ppm": 990000
+}

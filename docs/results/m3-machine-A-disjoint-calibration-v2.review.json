@@ -1,0 +1,1755 @@
+{
+  "allowed_tail_multiplier": 2.0,
+  "captures": [
+    {
+      "capture_sha256": "fae6354ecc44ec308cad9daf271431bf6f62fec25129856b0bfbc54aa653bb9c",
+      "manifest_sha256": "e8307f4c469e8409c2eaa33b3b50da06488b80be591ecfc01595367fc4610f7b",
+      "range_reuse": false,
+      "range_reuse_allowed": false,
+      "tool": {
+        "name": "m3_shadow_calibrate",
+        "source_sha256": "e167fa8a9c50c663b368c55950208d47d9ee6b48870044200b89e486f9b119fd",
+        "version": 2
+      },
+      "topology_hash": 18437471596682960890
+    }
+  ],
+  "policy": "largest observed full-group inflight within allowed p95; no extrapolation",
+  "promotion": {
+    "active_admission_allowed": false,
+    "physical_io_cache_dma_verified": false,
+    "required_by_policy": true,
+    "status": "CANDIDATE_ONLY"
+  },
+  "results": [
+    {
+      "allowed_latency_ns_tail": 19699800,
+      "baseline_inflight": 1,
+      "baseline_latency_ns_tail": 9849900,
+      "candidate_is_observed_not_extrapolated": true,
+      "candidate_latency_ns_max": 14316500,
+      "candidate_latency_ns_p50": 9792300,
+      "candidate_latency_ns_tail": 14196500,
+      "candidate_min_retention": null,
+      "candidate_normalized_jain": null,
+      "candidate_per_drive": null,
+      "candidate_queue_depths": null,
+      "candidate_rate": 5375384329,
+      "candidate_retention": null,
+      "candidate_sample_count": 8,
+      "candidate_tail_spread_ns": 4404200,
+      "drive_ids": [
+        101
+      ],
+      "group": "controller-201",
+      "max_inflight_candidate": 2,
+      "measurement_kind": "scalar",
+      "observations": [
+        {
+          "active_drive_ids": [
+            101
+          ],
+          "aggregate_bytes_per_s_p50": 4419966000,
+          "all_group_drives_active": true,
+          "inflight": 1,
+          "latency_ns_max": 9849900,
+          "latency_ns_p50": 5715100,
+          "latency_ns_p95": 9849900,
+          "measurement_kind": "scalar",
+          "sample_count": 8,
+          "target_kind": "controller",
+          "target_resource_id": 201
+        },
+        {
+          "active_drive_ids": [
+            101
+          ],
+          "aggregate_bytes_per_s_p50": 5375384329,
+          "all_group_drives_active": true,
+          "inflight": 2,
+          "latency_ns_max": 14316500,
+          "latency_ns_p50": 9792300,
+          "latency_ns_p95": 14196500,
+          "measurement_kind": "scalar",
+          "sample_count": 8,
+          "target_kind": "controller",
+          "target_resource_id": 201
+        },
+        {
+          "active_drive_ids": [
+            101
+          ],
+          "aggregate_bytes_per_s_p50": 5917705415,
+          "all_group_drives_active": true,
+          "inflight": 4,
+          "latency_ns_max": 24942400,
+          "latency_ns_p50": 18765200,
+          "latency_ns_p95": 24123700,
+          "measurement_kind": "scalar",
+          "sample_count": 8,
+          "target_kind": "controller",
+          "target_resource_id": 201
+        },
+        {
+          "active_drive_ids": [
+            101
+          ],
+          "aggregate_bytes_per_s_p50": 6259586205,
+          "all_group_drives_active": true,
+          "inflight": 8,
+          "latency_ns_max": 78253700,
+          "latency_ns_p50": 35364300,
+          "latency_ns_p95": 48899400,
+          "measurement_kind": "scalar",
+          "sample_count": 8,
+          "target_kind": "controller",
+          "target_resource_id": 201
+        },
+        {
+          "active_drive_ids": [
+            101
+          ],
+          "aggregate_bytes_per_s_p50": 6418434019,
+          "all_group_drives_active": true,
+          "inflight": 16,
+          "latency_ns_max": 134397200,
+          "latency_ns_p50": 72319600,
+          "latency_ns_p95": 97624500,
+          "measurement_kind": "scalar",
+          "sample_count": 8,
+          "target_kind": "controller",
+          "target_resource_id": 201
+        }
+      ],
+      "observed_downward_envelope": [
+        {
+          "all_observed_partitions_pass": true,
+          "observed_partitions": 1,
+          "partitions": [
+            {
+              "min_retention": null,
+              "normalized_jain": null,
+              "pass": true,
+              "queue_depths": null
+            }
+          ],
+          "passing_partitions": 1,
+          "total_inflight": 1
+        },
+        {
+          "all_observed_partitions_pass": true,
+          "observed_partitions": 1,
+          "partitions": [
+            {
+              "min_retention": null,
+              "normalized_jain": null,
+              "pass": true,
+              "queue_depths": null
+            }
+          ],
+          "passing_partitions": 1,
+          "total_inflight": 2
+        },
+        {
+          "all_observed_partitions_pass": false,
+          "observed_partitions": 1,
+          "partitions": [
+            {
+              "min_retention": null,
+              "normalized_jain": null,
+              "pass": false,
+              "queue_depths": null
+            }
+          ],
+          "passing_partitions": 0,
+          "total_inflight": 4
+        },
+        {
+          "all_observed_partitions_pass": false,
+          "observed_partitions": 1,
+          "partitions": [
+            {
+              "min_retention": null,
+              "normalized_jain": null,
+              "pass": false,
+              "queue_depths": null
+            }
+          ],
+          "passing_partitions": 0,
+          "total_inflight": 8
+        },
+        {
+          "all_observed_partitions_pass": false,
+          "observed_partitions": 1,
+          "partitions": [
+            {
+              "min_retention": null,
+              "normalized_jain": null,
+              "pass": false,
+              "queue_depths": null
+            }
+          ],
+          "passing_partitions": 0,
+          "total_inflight": 16
+        }
+      ],
+      "read_bytes": 31850496,
+      "review_policy": {
+        "min_fairness": 0.9,
+        "min_per_drive_retention": 0.7,
+        "min_samples": 8
+      },
+      "tail_percentile_ppm": 950000,
+      "target_kind": "controller",
+      "target_resource_id": 201
+    },
+    {
+      "allowed_latency_ns_tail": 49862000,
+      "baseline_inflight": 1,
+      "baseline_latency_ns_tail": 24931000,
+      "candidate_is_observed_not_extrapolated": true,
+      "candidate_latency_ns_max": 44915500,
+      "candidate_latency_ns_p50": 38663900,
+      "candidate_latency_ns_tail": 44728400,
+      "candidate_min_retention": null,
+      "candidate_normalized_jain": null,
+      "candidate_per_drive": null,
+      "candidate_queue_depths": null,
+      "candidate_rate": 3111642073,
+      "candidate_retention": null,
+      "candidate_sample_count": 8,
+      "candidate_tail_spread_ns": 6064500,
+      "drive_ids": [
+        102
+      ],
+      "group": "controller-202",
+      "max_inflight_candidate": 4,
+      "measurement_kind": "scalar",
+      "observations": [
+        {
+          "active_drive_ids": [
+            102
+          ],
+          "aggregate_bytes_per_s_p50": 2604835513,
+          "all_group_drives_active": true,
+          "inflight": 1,
+          "latency_ns_max": 24931000,
+          "latency_ns_p50": 11006100,
+          "latency_ns_p95": 24931000,
+          "measurement_kind": "scalar",
+          "sample_count": 8,
+          "target_kind": "controller",
+          "target_resource_id": 202
+        },
+        {
+          "active_drive_ids": [
+            102
+          ],
+          "aggregate_bytes_per_s_p50": 2914596869,
+          "all_group_drives_active": true,
+          "inflight": 2,
+          "latency_ns_max": 24545700,
+          "latency_ns_p50": 20233300,
+          "latency_ns_p95": 24285700,
+          "measurement_kind": "scalar",
+          "sample_count": 8,
+          "target_kind": "controller",
+          "target_resource_id": 202
+        },
+        {
+          "active_drive_ids": [
+            102
+          ],
+          "aggregate_bytes_per_s_p50": 3111642073,
+          "all_group_drives_active": true,
+          "inflight": 4,
+          "latency_ns_max": 44915500,
+          "latency_ns_p50": 38663900,
+          "latency_ns_p95": 44728400,
+          "measurement_kind": "scalar",
+          "sample_count": 8,
+          "target_kind": "controller",
+          "target_resource_id": 202
+        },
+        {
+          "active_drive_ids": [
+            102
+          ],
+          "aggregate_bytes_per_s_p50": 3209301893,
+          "all_group_drives_active": true,
+          "inflight": 8,
+          "latency_ns_max": 108308600,
+          "latency_ns_p50": 73067700,
+          "latency_ns_p95": 87932200,
+          "measurement_kind": "scalar",
+          "sample_count": 8,
+          "target_kind": "controller",
+          "target_resource_id": 202
+        },
+        {
+          "active_drive_ids": [
+            102
+          ],
+          "aggregate_bytes_per_s_p50": 3272194268,
+          "all_group_drives_active": true,
+          "inflight": 16,
+          "latency_ns_max": 244377500,
+          "latency_ns_p50": 146071700,
+          "latency_ns_p95": 174765200,
+          "measurement_kind": "scalar",
+          "sample_count": 8,
+          "target_kind": "controller",
+          "target_resource_id": 202
+        }
+      ],
+      "observed_downward_envelope": [
+        {
+          "all_observed_partitions_pass": true,
+          "observed_partitions": 1,
+          "partitions": [
+            {
+              "min_retention": null,
+              "normalized_jain": null,
+              "pass": true,
+              "queue_depths": null
+            }
+          ],
+          "passing_partitions": 1,
+          "total_inflight": 1
+        },
+        {
+          "all_observed_partitions_pass": true,
+          "observed_partitions": 1,
+          "partitions": [
+            {
+              "min_retention": null,
+              "normalized_jain": null,
+              "pass": true,
+              "queue_depths": null
+            }
+          ],
+          "passing_partitions": 1,
+          "total_inflight": 2
+        },
+        {
+          "all_observed_partitions_pass": true,
+          "observed_partitions": 1,
+          "partitions": [
+            {
+              "min_retention": null,
+              "normalized_jain": null,
+              "pass": true,
+              "queue_depths": null
+            }
+          ],
+          "passing_partitions": 1,
+          "total_inflight": 4
+        },
+        {
+          "all_observed_partitions_pass": false,
+          "observed_partitions": 1,
+          "partitions": [
+            {
+              "min_retention": null,
+              "normalized_jain": null,
+              "pass": false,
+              "queue_depths": null
+            }
+          ],
+          "passing_partitions": 0,
+          "total_inflight": 8
+        },
+        {
+          "all_observed_partitions_pass": false,
+          "observed_partitions": 1,
+          "partitions": [
+            {
+              "min_retention": null,
+              "normalized_jain": null,
+              "pass": false,
+              "queue_depths": null
+            }
+          ],
+          "passing_partitions": 0,
+          "total_inflight": 16
+        }
+      ],
+      "read_bytes": 31850496,
+      "review_policy": {
+        "min_fairness": 0.9,
+        "min_per_drive_retention": 0.7,
+        "min_samples": 8
+      },
+      "tail_percentile_ppm": 950000,
+      "target_kind": "controller",
+      "target_resource_id": 202
+    },
+    {
+      "allowed_latency_ns_tail": 21297800,
+      "baseline_inflight": 1,
+      "baseline_latency_ns_tail": 10648900,
+      "candidate_is_observed_not_extrapolated": true,
+      "candidate_latency_ns_max": 16574200,
+      "candidate_latency_ns_p50": 11194400,
+      "candidate_latency_ns_tail": 15796900,
+      "candidate_min_retention": null,
+      "candidate_normalized_jain": null,
+      "candidate_per_drive": null,
+      "candidate_queue_depths": null,
+      "candidate_rate": 4947611436,
+      "candidate_retention": null,
+      "candidate_sample_count": 8,
+      "candidate_tail_spread_ns": 4602500,
+      "drive_ids": [
+        101
+      ],
+      "group": "drive-101",
+      "max_inflight_candidate": 2,
+      "measurement_kind": "scalar",
+      "observations": [
+        {
+          "active_drive_ids": [
+            101
+          ],
+          "aggregate_bytes_per_s_p50": 4147308002,
+          "all_group_drives_active": true,
+          "inflight": 1,
+          "latency_ns_max": 10648900,
+          "latency_ns_p50": 7260900,
+          "latency_ns_p95": 10648900,
+          "measurement_kind": "scalar",
+          "sample_count": 8,
+          "target_kind": "drive",
+          "target_resource_id": 101
+        },
+        {
+          "active_drive_ids": [
+            101
+          ],
+          "aggregate_bytes_per_s_p50": 4947611436,
+          "all_group_drives_active": true,
+          "inflight": 2,
+          "latency_ns_max": 16574200,
+          "latency_ns_p50": 11194400,
+          "latency_ns_p95": 15796900,
+          "measurement_kind": "scalar",
+          "sample_count": 8,
+          "target_kind": "drive",
+          "target_resource_id": 101
+        },
+        {
+          "active_drive_ids": [
+            101
+          ],
+          "aggregate_bytes_per_s_p50": 5484278531,
+          "all_group_drives_active": true,
+          "inflight": 4,
+          "latency_ns_max": 30910900,
+          "latency_ns_p50": 21041300,
+          "latency_ns_p95": 27933300,
+          "measurement_kind": "scalar",
+          "sample_count": 8,
+          "target_kind": "drive",
+          "target_resource_id": 101
+        },
+        {
+          "active_drive_ids": [
+            101
+          ],
+          "aggregate_bytes_per_s_p50": 5179216137,
+          "all_group_drives_active": true,
+          "inflight": 8,
+          "latency_ns_max": 82574400,
+          "latency_ns_p50": 40535500,
+          "latency_ns_p95": 68763700,
+          "measurement_kind": "scalar",
+          "sample_count": 8,
+          "target_kind": "drive",
+          "target_resource_id": 101
+        },
+        {
+          "active_drive_ids": [
+            101
+          ],
+          "aggregate_bytes_per_s_p50": 6404028543,
+          "all_group_drives_active": true,
+          "inflight": 16,
+          "latency_ns_max": 142105200,
+          "latency_ns_p50": 68580800,
+          "latency_ns_p95": 105437200,
+          "measurement_kind": "scalar",
+          "sample_count": 8,
+          "target_kind": "drive",
+          "target_resource_id": 101
+        }
+      ],
+      "observed_downward_envelope": [
+        {
+          "all_observed_partitions_pass": true,
+          "observed_partitions": 1,
+          "partitions": [
+            {
+              "min_retention": null,
+              "normalized_jain": null,
+              "pass": true,
+              "queue_depths": null
+            }
+          ],
+          "passing_partitions": 1,
+          "total_inflight": 1
+        },
+        {
+          "all_observed_partitions_pass": true,
+          "observed_partitions": 1,
+          "partitions": [
+            {
+              "min_retention": null,
+              "normalized_jain": null,
+              "pass": true,
+              "queue_depths": null
+            }
+          ],
+          "passing_partitions": 1,
+          "total_inflight": 2
+        },
+        {
+          "all_observed_partitions_pass": false,
+          "observed_partitions": 1,
+          "partitions": [
+            {
+              "min_retention": null,
+              "normalized_jain": null,
+              "pass": false,
+              "queue_depths": null
+            }
+          ],
+          "passing_partitions": 0,
+          "total_inflight": 4
+        },
+        {
+          "all_observed_partitions_pass": false,
+          "observed_partitions": 1,
+          "partitions": [
+            {
+              "min_retention": null,
+              "normalized_jain": null,
+              "pass": false,
+              "queue_depths": null
+            }
+          ],
+          "passing_partitions": 0,
+          "total_inflight": 8
+        },
+        {
+          "all_observed_partitions_pass": false,
+          "observed_partitions": 1,
+          "partitions": [
+            {
+              "min_retention": null,
+              "normalized_jain": null,
+              "pass": false,
+              "queue_depths": null
+            }
+          ],
+          "passing_partitions": 0,
+          "total_inflight": 16
+        }
+      ],
+      "read_bytes": 31850496,
+      "review_policy": {
+        "min_fairness": 0.9,
+        "min_per_drive_retention": 0.7,
+        "min_samples": 8
+      },
+      "tail_percentile_ppm": 950000,
+      "target_kind": "drive",
+      "target_resource_id": 101
+    },
+    {
+      "allowed_latency_ns_tail": 51637000,
+      "baseline_inflight": 1,
+      "baseline_latency_ns_tail": 25818500,
+      "candidate_is_observed_not_extrapolated": true,
+      "candidate_latency_ns_max": 46014300,
+      "candidate_latency_ns_p50": 38415900,
+      "candidate_latency_ns_tail": 44760500,
+      "candidate_min_retention": null,
+      "candidate_normalized_jain": null,
+      "candidate_per_drive": null,
+      "candidate_queue_depths": null,
+      "candidate_rate": 3091268249,
+      "candidate_retention": null,
+      "candidate_sample_count": 8,
+      "candidate_tail_spread_ns": 6344600,
+      "drive_ids": [
+        102
+      ],
+      "group": "drive-102",
+      "max_inflight_candidate": 4,
+      "measurement_kind": "scalar",
+      "observations": [
+        {
+          "active_drive_ids": [
+            102
+          ],
+          "aggregate_bytes_per_s_p50": 2569748918,
+          "all_group_drives_active": true,
+          "inflight": 1,
+          "latency_ns_max": 25818500,
+          "latency_ns_p50": 10815500,
+          "latency_ns_p95": 25818500,
+          "measurement_kind": "scalar",
+          "sample_count": 8,
+          "target_kind": "drive",
+          "target_resource_id": 102
+        },
+        {
+          "active_drive_ids": [
+            102
+          ],
+          "aggregate_bytes_per_s_p50": 2905093045,
+          "all_group_drives_active": true,
+          "inflight": 2,
+          "latency_ns_max": 24717700,
+          "latency_ns_p50": 19932500,
+          "latency_ns_p95": 24648300,
+          "measurement_kind": "scalar",
+          "sample_count": 8,
+          "target_kind": "drive",
+          "target_resource_id": 102
+        },
+        {
+          "active_drive_ids": [
+            102
+          ],
+          "aggregate_bytes_per_s_p50": 3091268249,
+          "all_group_drives_active": true,
+          "inflight": 4,
+          "latency_ns_max": 46014300,
+          "latency_ns_p50": 38415900,
+          "latency_ns_p95": 44760500,
+          "measurement_kind": "scalar",
+          "sample_count": 8,
+          "target_kind": "drive",
+          "target_resource_id": 102
+        },
+        {
+          "active_drive_ids": [
+            102
+          ],
+          "aggregate_bytes_per_s_p50": 3230928788,
+          "all_group_drives_active": true,
+          "inflight": 8,
+          "latency_ns_max": 131011100,
+          "latency_ns_p50": 72129300,
+          "latency_ns_p95": 91558800,
+          "measurement_kind": "scalar",
+          "sample_count": 8,
+          "target_kind": "drive",
+          "target_resource_id": 102
+        },
+        {
+          "active_drive_ids": [
+            102
+          ],
+          "aggregate_bytes_per_s_p50": 3281475765,
+          "all_group_drives_active": true,
+          "inflight": 16,
+          "latency_ns_max": 233302200,
+          "latency_ns_p50": 146155800,
+          "latency_ns_p95": 188049000,
+          "measurement_kind": "scalar",
+          "sample_count": 8,
+          "target_kind": "drive",
+          "target_resource_id": 102
+        }
+      ],
+      "observed_downward_envelope": [
+        {
+          "all_observed_partitions_pass": true,
+          "observed_partitions": 1,
+          "partitions": [
+            {
+              "min_retention": null,
+              "normalized_jain": null,
+              "pass": true,
+              "queue_depths": null
+            }
+          ],
+          "passing_partitions": 1,
+          "total_inflight": 1
+        },
+        {
+          "all_observed_partitions_pass": true,
+          "observed_partitions": 1,
+          "partitions": [
+            {
+              "min_retention": null,
+              "normalized_jain": null,
+              "pass": true,
+              "queue_depths": null
+            }
+          ],
+          "passing_partitions": 1,
+          "total_inflight": 2
+        },
+        {
+          "all_observed_partitions_pass": true,
+          "observed_partitions": 1,
+          "partitions": [
+            {
+              "min_retention": null,
+              "normalized_jain": null,
+              "pass": true,
+              "queue_depths": null
+            }
+          ],
+          "passing_partitions": 1,
+          "total_inflight": 4
+        },
+        {
+          "all_observed_partitions_pass": false,
+          "observed_partitions": 1,
+          "partitions": [
+            {
+              "min_retention": null,
+              "normalized_jain": null,
+              "pass": false,
+              "queue_depths": null
+            }
+          ],
+          "passing_partitions": 0,
+          "total_inflight": 8
+        },
+        {
+          "all_observed_partitions_pass": false,
+          "observed_partitions": 1,
+          "partitions": [
+            {
+              "min_retention": null,
+              "normalized_jain": null,
+              "pass": false,
+              "queue_depths": null
+            }
+          ],
+          "passing_partitions": 0,
+          "total_inflight": 16
+        }
+      ],
+      "read_bytes": 31850496,
+      "review_policy": {
+        "min_fairness": 0.9,
+        "min_per_drive_retention": 0.7,
+        "min_samples": 8
+      },
+      "tail_percentile_ppm": 950000,
+      "target_kind": "drive",
+      "target_resource_id": 102
+    },
+    {
+      "allowed_latency_ns_tail": 30717600,
+      "baseline_inflight": 2,
+      "baseline_latency_ns_tail": 15358800,
+      "candidate_is_observed_not_extrapolated": false,
+      "candidate_latency_ns_max": null,
+      "candidate_latency_ns_p50": null,
+      "candidate_latency_ns_tail": null,
+      "candidate_min_retention": null,
+      "candidate_normalized_jain": null,
+      "candidate_per_drive": null,
+      "candidate_queue_depths": null,
+      "candidate_rate": null,
+      "candidate_retention": null,
+      "candidate_sample_count": null,
+      "candidate_tail_spread_ns": null,
+      "drive_ids": [
+        101,
+        102
+      ],
+      "group": "shared-upstream-901",
+      "max_inflight_candidate": null,
+      "measurement_kind": "contention_matrix",
+      "observations": [
+        {
+          "active_drive_ids": [
+            101,
+            102
+          ],
+          "aggregate_bytes_per_s_p50": 4950841474,
+          "all_group_drives_active": true,
+          "inflight": 2,
+          "latency_ns_max": 15407000,
+          "latency_ns_p50": 9775200,
+          "latency_ns_p95": 15358800,
+          "measurement_kind": "contention_matrix",
+          "min_retention": 0.5968741014186194,
+          "normalized_jain": 0.9477248281972251,
+          "per_drive": {
+            "101": {
+              "aggregate_bytes_per_s_p50": 2475420737,
+              "inflight": 1,
+              "latency_ns_max": 9775200,
+              "latency_ns_p50": 6012900,
+              "latency_ns_p95": 9775200,
+              "latency_ns_p99": 9775200,
+              "request_count": 16
+            },
+            "102": {
+              "aggregate_bytes_per_s_p50": 2475420737,
+              "inflight": 1,
+              "latency_ns_max": 15407000,
+              "latency_ns_p50": 11418300,
+              "latency_ns_p95": 15407000,
+              "latency_ns_p99": 15407000,
+              "request_count": 16
+            }
+          },
+          "queue_depths": {
+            "101": 1,
+            "102": 1
+          },
+          "retention": {
+            "101": 0.5968741014186194,
+            "102": 0.9632928414370482
+          },
+          "sample_count": 8,
+          "target_kind": "upstream",
+          "target_resource_id": 901
+        },
+        {
+          "active_drive_ids": [
+            101,
+            102
+          ],
+          "aggregate_bytes_per_s_p50": 4472159450,
+          "all_group_drives_active": true,
+          "inflight": 3,
+          "latency_ns_max": 27862700,
+          "latency_ns_p50": 16842200,
+          "latency_ns_p95": 24681300,
+          "measurement_kind": "contention_matrix",
+          "min_retention": 0.3594427554647773,
+          "normalized_jain": 0.8119699967016478,
+          "per_drive": {
+            "101": {
+              "aggregate_bytes_per_s_p50": 1490719816,
+              "inflight": 1,
+              "latency_ns_max": 10606000,
+              "latency_ns_p50": 5748800,
+              "latency_ns_p95": 10606000,
+              "latency_ns_p99": 10606000,
+              "request_count": 16
+            },
+            "102": {
+              "aggregate_bytes_per_s_p50": 2981439633,
+              "inflight": 2,
+              "latency_ns_max": 27862700,
+              "latency_ns_p50": 18908000,
+              "latency_ns_p95": 24787100,
+              "latency_ns_p99": 27862700,
+              "request_count": 32
+            }
+          },
+          "queue_depths": {
+            "101": 1,
+            "102": 2
+          },
+          "retention": {
+            "101": 0.3594427554647773,
+            "102": 1.026280255681105
+          },
+          "sample_count": 8,
+          "target_kind": "upstream",
+          "target_resource_id": 901
+        },
+        {
+          "active_drive_ids": [
+            101,
+            102
+          ],
+          "aggregate_bytes_per_s_p50": 7616698923,
+          "all_group_drives_active": true,
+          "inflight": 3,
+          "latency_ns_max": 16438000,
+          "latency_ns_p50": 9882200,
+          "latency_ns_p95": 15280700,
+          "measurement_kind": "contention_matrix",
+          "min_retention": 0.987995217437815,
+          "normalized_jain": 0.9996382589385283,
+          "per_drive": {
+            "101": {
+              "aggregate_bytes_per_s_p50": 5077799282,
+              "inflight": 2,
+              "latency_ns_max": 14362100,
+              "latency_ns_p50": 9400600,
+              "latency_ns_p95": 14321400,
+              "latency_ns_p99": 14362100,
+              "request_count": 32
+            },
+            "102": {
+              "aggregate_bytes_per_s_p50": 2538899641,
+              "inflight": 1,
+              "latency_ns_max": 16438000,
+              "latency_ns_p50": 10928600,
+              "latency_ns_p95": 16438000,
+              "latency_ns_p99": 16438000,
+              "request_count": 16
+            }
+          },
+          "queue_depths": {
+            "101": 2,
+            "102": 1
+          },
+          "retention": {
+            "101": 1.0263132721079755,
+            "102": 0.987995217437815
+          },
+          "sample_count": 8,
+          "target_kind": "upstream",
+          "target_resource_id": 901
+        },
+        {
+          "active_drive_ids": [
+            101,
+            102
+          ],
+          "aggregate_bytes_per_s_p50": 5959796977,
+          "all_group_drives_active": true,
+          "inflight": 4,
+          "latency_ns_max": 24723900,
+          "latency_ns_p50": 14152700,
+          "latency_ns_p95": 23657000,
+          "measurement_kind": "contention_matrix",
+          "min_retention": 0.6022903226226596,
+          "normalized_jain": 0.9366330339591836,
+          "per_drive": {
+            "101": {
+              "aggregate_bytes_per_s_p50": 2979898488,
+              "inflight": 2,
+              "latency_ns_max": 15449500,
+              "latency_ns_p50": 9788100,
+              "latency_ns_p95": 14964100,
+              "latency_ns_p99": 15449500,
+              "request_count": 32
+            },
+            "102": {
+              "aggregate_bytes_per_s_p50": 2979898488,
+              "inflight": 2,
+              "latency_ns_max": 24723900,
+              "latency_ns_p50": 18710400,
+              "latency_ns_p95": 24708000,
+              "latency_ns_p99": 24723900,
+              "request_count": 32
+            }
+          },
+          "queue_depths": {
+            "101": 2,
+            "102": 2
+          },
+          "retention": {
+            "101": 0.6022903226226596,
+            "102": 1.0257497580426034
+          },
+          "sample_count": 8,
+          "target_kind": "upstream",
+          "target_resource_id": 901
+        },
+        {
+          "active_drive_ids": [
+            101,
+            102
+          ],
+          "aggregate_bytes_per_s_p50": 3940898090,
+          "all_group_drives_active": true,
+          "inflight": 5,
+          "latency_ns_max": 49982700,
+          "latency_ns_p50": 32788300,
+          "latency_ns_p95": 48959600,
+          "measurement_kind": "contention_matrix",
+          "min_retention": 0.1900460775085689,
+          "normalized_jain": 0.680088586419832,
+          "per_drive": {
+            "101": {
+              "aggregate_bytes_per_s_p50": 788179618,
+              "inflight": 1,
+              "latency_ns_max": 10621900,
+              "latency_ns_p50": 5723500,
+              "latency_ns_p95": 10621900,
+              "latency_ns_p99": 10621900,
+              "request_count": 16
+            },
+            "102": {
+              "aggregate_bytes_per_s_p50": 3152718472,
+              "inflight": 4,
+              "latency_ns_max": 49982700,
+              "latency_ns_p50": 36390000,
+              "latency_ns_p95": 49297300,
+              "latency_ns_p99": 49982700,
+              "request_count": 64
+            }
+          },
+          "queue_depths": {
+            "101": 1,
+            "102": 4
+          },
+          "retention": {
+            "101": 0.1900460775085689,
+            "102": 1.0198786446371577
+          },
+          "sample_count": 8,
+          "target_kind": "upstream",
+          "target_resource_id": 901
+        },
+        {
+          "active_drive_ids": [
+            101,
+            102
+          ],
+          "aggregate_bytes_per_s_p50": 7479293364,
+          "all_group_drives_active": true,
+          "inflight": 5,
+          "latency_ns_max": 23977300,
+          "latency_ns_p50": 18335400,
+          "latency_ns_p95": 22726300,
+          "measurement_kind": "contention_matrix",
+          "min_retention": 0.5821030457575622,
+          "normalized_jain": 0.9153154977778433,
+          "per_drive": {
+            "101": {
+              "aggregate_bytes_per_s_p50": 5983434691,
+              "inflight": 4,
+              "latency_ns_max": 23977300,
+              "latency_ns_p50": 18661500,
+              "latency_ns_p95": 22818800,
+              "latency_ns_p99": 23977300,
+              "request_count": 64
+            },
+            "102": {
+              "aggregate_bytes_per_s_p50": 1495858672,
+              "inflight": 1,
+              "latency_ns_max": 16909600,
+              "latency_ns_p50": 10720000,
+              "latency_ns_p95": 16909600,
+              "latency_ns_p99": 16909600,
+              "request_count": 16
+            }
+          },
+          "queue_depths": {
+            "101": 4,
+            "102": 1
+          },
+          "retention": {
+            "101": 1.091015829553242,
+            "102": 0.5821030457575622
+          },
+          "sample_count": 8,
+          "target_kind": "upstream",
+          "target_resource_id": 901
+        },
+        {
+          "active_drive_ids": [
+            101,
+            102
+          ],
+          "aggregate_bytes_per_s_p50": 4644492279,
+          "all_group_drives_active": true,
+          "inflight": 6,
+          "latency_ns_max": 54175600,
+          "latency_ns_p50": 29217500,
+          "latency_ns_p95": 49424800,
+          "measurement_kind": "contention_matrix",
+          "min_retention": 0.3129114145333219,
+          "normalized_jain": 0.784622656590922,
+          "per_drive": {
+            "101": {
+              "aggregate_bytes_per_s_p50": 1548164093,
+              "inflight": 2,
+              "latency_ns_max": 17160500,
+              "latency_ns_p50": 9636300,
+              "latency_ns_p95": 16497300,
+              "latency_ns_p99": 17160500,
+              "request_count": 32
+            },
+            "102": {
+              "aggregate_bytes_per_s_p50": 3096328186,
+              "inflight": 4,
+              "latency_ns_max": 54175600,
+              "latency_ns_p50": 35393600,
+              "latency_ns_p95": 49806200,
+              "latency_ns_p99": 54175600,
+              "request_count": 64
+            }
+          },
+          "queue_depths": {
+            "101": 2,
+            "102": 4
+          },
+          "retention": {
+            "101": 0.3129114145333219,
+            "102": 1.0016368482423474
+          },
+          "sample_count": 8,
+          "target_kind": "upstream",
+          "target_resource_id": 901
+        },
+        {
+          "active_drive_ids": [
+            101,
+            102
+          ],
+          "aggregate_bytes_per_s_p50": 8751779225,
+          "all_group_drives_active": true,
+          "inflight": 6,
+          "latency_ns_max": 25683100,
+          "latency_ns_p50": 18711200,
+          "latency_ns_p95": 24468900,
+          "measurement_kind": "contention_matrix",
+          "min_retention": 1.0041880572537738,
+          "normalized_jain": 0.9991680521378921,
+          "per_drive": {
+            "101": {
+              "aggregate_bytes_per_s_p50": 5834519483,
+              "inflight": 4,
+              "latency_ns_max": 24370900,
+              "latency_ns_p50": 18602000,
+              "latency_ns_p95": 23381500,
+              "latency_ns_p99": 24370900,
+              "request_count": 64
+            },
+            "102": {
+              "aggregate_bytes_per_s_p50": 2917259741,
+              "inflight": 2,
+              "latency_ns_max": 25683100,
+              "latency_ns_p50": 19120900,
+              "latency_ns_p95": 25107000,
+              "latency_ns_p99": 25683100,
+              "request_count": 32
+            }
+          },
+          "queue_depths": {
+            "101": 4,
+            "102": 2
+          },
+          "retention": {
+            "101": 1.0638627214172758,
+            "102": 1.0041880572537738
+          },
+          "sample_count": 8,
+          "target_kind": "upstream",
+          "target_resource_id": 901
+        },
+        {
+          "active_drive_ids": [
+            101,
+            102
+          ],
+          "aggregate_bytes_per_s_p50": 6183414196,
+          "all_group_drives_active": true,
+          "inflight": 8,
+          "latency_ns_max": 57040700,
+          "latency_ns_p50": 21938400,
+          "latency_ns_p95": 45134500,
+          "measurement_kind": "contention_matrix",
+          "min_retention": 0.563739985218486,
+          "normalized_jain": 0.9277563894836527,
+          "per_drive": {
+            "101": {
+              "aggregate_bytes_per_s_p50": 3091707098,
+              "inflight": 4,
+              "latency_ns_max": 23108500,
+              "latency_ns_p50": 18724800,
+              "latency_ns_p95": 21938400,
+              "latency_ns_p99": 23108500,
+              "request_count": 64
+            },
+            "102": {
+              "aggregate_bytes_per_s_p50": 3091707098,
+              "inflight": 4,
+              "latency_ns_max": 57040700,
+              "latency_ns_p50": 36684100,
+              "latency_ns_p95": 50360200,
+              "latency_ns_p99": 57040700,
+              "request_count": 64
+            }
+          },
+          "queue_depths": {
+            "101": 4,
+            "102": 4
+          },
+          "retention": {
+            "101": 0.563739985218486,
+            "102": 1.0001419640628542
+          },
+          "sample_count": 8,
+          "target_kind": "upstream",
+          "target_resource_id": 901
+        },
+        {
+          "active_drive_ids": [
+            101,
+            102
+          ],
+          "aggregate_bytes_per_s_p50": 3611456245,
+          "all_group_drives_active": true,
+          "inflight": 9,
+          "latency_ns_max": 115606900,
+          "latency_ns_p50": 58879400,
+          "latency_ns_p95": 106804600,
+          "measurement_kind": "contention_matrix",
+          "min_retention": 0.09675503140989045,
+          "normalized_jain": 0.5964655250940205,
+          "per_drive": {
+            "101": {
+              "aggregate_bytes_per_s_p50": 401272916,
+              "inflight": 1,
+              "latency_ns_max": 14585600,
+              "latency_ns_p50": 6100200,
+              "latency_ns_p95": 14585600,
+              "latency_ns_p99": 14585600,
+              "request_count": 16
+            },
+            "102": {
+              "aggregate_bytes_per_s_p50": 3210183329,
+              "inflight": 8,
+              "latency_ns_max": 115606900,
+              "latency_ns_p50": 61521600,
+              "latency_ns_p95": 107502500,
+              "latency_ns_p99": 114947500,
+              "request_count": 128
+            }
+          },
+          "queue_depths": {
+            "101": 1,
+            "102": 8
+          },
+          "retention": {
+            "101": 0.09675503140989045,
+            "102": 0.9935791036072814
+          },
+          "sample_count": 8,
+          "target_kind": "upstream",
+          "target_resource_id": 901
+        },
+        {
+          "active_drive_ids": [
+            101,
+            102
+          ],
+          "aggregate_bytes_per_s_p50": 6967576638,
+          "all_group_drives_active": true,
+          "inflight": 9,
+          "latency_ns_max": 58253000,
+          "latency_ns_p50": 32829700,
+          "latency_ns_p95": 48641600,
+          "measurement_kind": "contention_matrix",
+          "min_retention": 0.301264912138782,
+          "normalized_jain": 0.73689626839661,
+          "per_drive": {
+            "101": {
+              "aggregate_bytes_per_s_p50": 6193401456,
+              "inflight": 8,
+              "latency_ns_max": 58253000,
+              "latency_ns_p50": 34999900,
+              "latency_ns_p95": 48644700,
+              "latency_ns_p99": 52138700,
+              "request_count": 128
+            },
+            "102": {
+              "aggregate_bytes_per_s_p50": 774175182,
+              "inflight": 1,
+              "latency_ns_max": 18995100,
+              "latency_ns_p50": 11426100,
+              "latency_ns_p95": 18995100,
+              "latency_ns_p99": 18995100,
+              "request_count": 16
+            }
+          },
+          "queue_depths": {
+            "101": 8,
+            "102": 1
+          },
+          "retention": {
+            "101": 1.1958183038075438,
+            "102": 0.301264912138782
+          },
+          "sample_count": 8,
+          "target_kind": "upstream",
+          "target_resource_id": 901
+        },
+        {
+          "active_drive_ids": [
+            101,
+            102
+          ],
+          "aggregate_bytes_per_s_p50": 3978546909,
+          "all_group_drives_active": true,
+          "inflight": 10,
+          "latency_ns_max": 126922400,
+          "latency_ns_p50": 58736600,
+          "latency_ns_p95": 106421900,
+          "measurement_kind": "contention_matrix",
+          "min_retention": 0.1608269750551203,
+          "normalized_jain": 0.6590186980436573,
+          "per_drive": {
+            "101": {
+              "aggregate_bytes_per_s_p50": 795709381,
+              "inflight": 2,
+              "latency_ns_max": 16739900,
+              "latency_ns_p50": 11417200,
+              "latency_ns_p95": 16041300,
+              "latency_ns_p99": 16739900,
+              "request_count": 32
+            },
+            "102": {
+              "aggregate_bytes_per_s_p50": 3182837527,
+              "inflight": 8,
+              "latency_ns_max": 126922400,
+              "latency_ns_p50": 63382300,
+              "latency_ns_p95": 107153500,
+              "latency_ns_p99": 116069500,
+              "request_count": 128
+            }
+          },
+          "queue_depths": {
+            "101": 2,
+            "102": 8
+          },
+          "retention": {
+            "101": 0.1608269750551203,
+            "102": 0.9851153447953989
+          },
+          "sample_count": 8,
+          "target_kind": "upstream",
+          "target_resource_id": 901
+        },
+        {
+          "active_drive_ids": [
+            101,
+            102
+          ],
+          "aggregate_bytes_per_s_p50": 7761267613,
+          "all_group_drives_active": true,
+          "inflight": 10,
+          "latency_ns_max": 59522100,
+          "latency_ns_p50": 31650900,
+          "latency_ns_p95": 51694200,
+          "measurement_kind": "contention_matrix",
+          "min_retention": 0.534321447869495,
+          "normalized_jain": 0.8718362296253379,
+          "per_drive": {
+            "101": {
+              "aggregate_bytes_per_s_p50": 6209014090,
+              "inflight": 8,
+              "latency_ns_max": 59522100,
+              "latency_ns_p50": 36266700,
+              "latency_ns_p95": 54215200,
+              "latency_ns_p99": 58082900,
+              "request_count": 128
+            },
+            "102": {
+              "aggregate_bytes_per_s_p50": 1552253522,
+              "inflight": 2,
+              "latency_ns_max": 28812900,
+              "latency_ns_p50": 18884300,
+              "latency_ns_p95": 28449400,
+              "latency_ns_p99": 28812900,
+              "request_count": 32
+            }
+          },
+          "queue_depths": {
+            "101": 8,
+            "102": 2
+          },
+          "retention": {
+            "101": 1.1988327819808846,
+            "102": 0.534321447869495
+          },
+          "sample_count": 8,
+          "target_kind": "upstream",
+          "target_resource_id": 901
+        },
+        {
+          "active_drive_ids": [
+            101,
+            102
+          ],
+          "aggregate_bytes_per_s_p50": 4730590763,
+          "all_group_drives_active": true,
+          "inflight": 12,
+          "latency_ns_max": 124090100,
+          "latency_ns_p50": 52058000,
+          "latency_ns_p95": 109191900,
+          "measurement_kind": "contention_matrix",
+          "min_retention": 0.287524344011112,
+          "normalized_jain": 0.7710449682033037,
+          "per_drive": {
+            "101": {
+              "aggregate_bytes_per_s_p50": 1576863587,
+              "inflight": 4,
+              "latency_ns_max": 27709300,
+              "latency_ns_p50": 18792700,
+              "latency_ns_p95": 24176300,
+              "latency_ns_p99": 27709300,
+              "request_count": 64
+            },
+            "102": {
+              "aggregate_bytes_per_s_p50": 3153727175,
+              "inflight": 8,
+              "latency_ns_max": 124090100,
+              "latency_ns_p50": 60770400,
+              "latency_ns_p95": 110763200,
+              "latency_ns_p99": 117453600,
+              "request_count": 128
+            }
+          },
+          "queue_depths": {
+            "101": 4,
+            "102": 8
+          },
+          "retention": {
+            "101": 0.287524344011112,
+            "102": 0.9761054427176684
+          },
+          "sample_count": 8,
+          "target_kind": "upstream",
+          "target_resource_id": 901
+        },
+        {
+          "active_drive_ids": [
+            101,
+            102
+          ],
+          "aggregate_bytes_per_s_p50": 8911389987,
+          "all_group_drives_active": true,
+          "inflight": 12,
+          "latency_ns_max": 67801800,
+          "latency_ns_p50": 35361100,
+          "latency_ns_p95": 52366400,
+          "measurement_kind": "contention_matrix",
+          "min_retention": 0.9609205962507202,
+          "normalized_jain": 0.9922622435055868,
+          "per_drive": {
+            "101": {
+              "aggregate_bytes_per_s_p50": 5940926658,
+              "inflight": 8,
+              "latency_ns_max": 64848200,
+              "latency_ns_p50": 35087700,
+              "latency_ns_p95": 49713700,
+              "latency_ns_p99": 64156700,
+              "request_count": 128
+            },
+            "102": {
+              "aggregate_bytes_per_s_p50": 2970463329,
+              "inflight": 4,
+              "latency_ns_max": 67801800,
+              "latency_ns_p50": 36055300,
+              "latency_ns_p95": 54055500,
+              "latency_ns_p99": 67801800,
+              "request_count": 64
+            }
+          },
+          "queue_depths": {
+            "101": 8,
+            "102": 4
+          },
+          "retention": {
+            "101": 1.147070618574573,
+            "102": 0.9609205962507202
+          },
+          "sample_count": 8,
+          "target_kind": "upstream",
+          "target_resource_id": 901
+        },
+        {
+          "active_drive_ids": [
+            101,
+            102
+          ],
+          "aggregate_bytes_per_s_p50": 6266690965,
+          "all_group_drives_active": true,
+          "inflight": 16,
+          "latency_ns_max": 129248000,
+          "latency_ns_p50": 45151100,
+          "latency_ns_p95": 105580600,
+          "measurement_kind": "contention_matrix",
+          "min_retention": 0.6049844994140279,
+          "normalized_jain": 0.9490673698485301,
+          "per_drive": {
+            "101": {
+              "aggregate_bytes_per_s_p50": 3133345482,
+              "inflight": 8,
+              "latency_ns_max": 70118600,
+              "latency_ns_p50": 36846000,
+              "latency_ns_p95": 52663200,
+              "latency_ns_p99": 59119100,
+              "request_count": 128
+            },
+            "102": {
+              "aggregate_bytes_per_s_p50": 3133345482,
+              "inflight": 8,
+              "latency_ns_max": 129248000,
+              "latency_ns_p50": 64430500,
+              "latency_ns_p95": 116120800,
+              "latency_ns_p99": 121475200,
+              "request_count": 128
+            }
+          },
+          "queue_depths": {
+            "101": 8,
+            "102": 8
+          },
+          "retention": {
+            "101": 0.6049844994140279,
+            "102": 0.9697971350026549
+          },
+          "sample_count": 8,
+          "target_kind": "upstream",
+          "target_resource_id": 901
+        }
+      ],
+      "observed_downward_envelope": [
+        {
+          "all_observed_partitions_pass": false,
+          "observed_partitions": 1,
+          "partitions": [
+            {
+              "min_retention": 0.5968741014186194,
+              "normalized_jain": 0.9477248281972251,
+              "pass": false,
+              "queue_depths": {
+                "101": 1,
+                "102": 1
+              }
+            }
+          ],
+          "passing_partitions": 0,
+          "total_inflight": 2
+        },
+        {
+          "all_observed_partitions_pass": false,
+          "observed_partitions": 2,
+          "partitions": [
+            {
+              "min_retention": 0.3594427554647773,
+              "normalized_jain": 0.8119699967016478,
+              "pass": false,
+              "queue_depths": {
+                "101": 1,
+                "102": 2
+              }
+            },
+            {
+              "min_retention": 0.987995217437815,
+              "normalized_jain": 0.9996382589385283,
+              "pass": true,
+              "queue_depths": {
+                "101": 2,
+                "102": 1
+              }
+            }
+          ],
+          "passing_partitions": 1,
+          "total_inflight": 3
+        },
+        {
+          "all_observed_partitions_pass": false,
+          "observed_partitions": 1,
+          "partitions": [
+            {
+              "min_retention": 0.6022903226226596,
+              "normalized_jain": 0.9366330339591836,
+              "pass": false,
+              "queue_depths": {
+                "101": 2,
+                "102": 2
+              }
+            }
+          ],
+          "passing_partitions": 0,
+          "total_inflight": 4
+        },
+        {
+          "all_observed_partitions_pass": false,
+          "observed_partitions": 2,
+          "partitions": [
+            {
+              "min_retention": 0.1900460775085689,
+              "normalized_jain": 0.680088586419832,
+              "pass": false,
+              "queue_depths": {
+                "101": 1,
+                "102": 4
+              }
+            },
+            {
+              "min_retention": 0.5821030457575622,
+              "normalized_jain": 0.9153154977778433,
+              "pass": false,
+              "queue_depths": {
+                "101": 4,
+                "102": 1
+              }
+            }
+          ],
+          "passing_partitions": 0,
+          "total_inflight": 5
+        },
+        {
+          "all_observed_partitions_pass": false,
+          "observed_partitions": 2,
+          "partitions": [
+            {
+              "min_retention": 0.3129114145333219,
+              "normalized_jain": 0.784622656590922,
+              "pass": false,
+              "queue_depths": {
+                "101": 2,
+                "102": 4
+              }
+            },
+            {
+              "min_retention": 1.0041880572537738,
+              "normalized_jain": 0.9991680521378921,
+              "pass": true,
+              "queue_depths": {
+                "101": 4,
+                "102": 2
+              }
+            }
+          ],
+          "passing_partitions": 1,
+          "total_inflight": 6
+        },
+        {
+          "all_observed_partitions_pass": false,
+          "observed_partitions": 1,
+          "partitions": [
+            {
+              "min_retention": 0.563739985218486,
+              "normalized_jain": 0.9277563894836527,
+              "pass": false,
+              "queue_depths": {
+                "101": 4,
+                "102": 4
+              }
+            }
+          ],
+          "passing_partitions": 0,
+          "total_inflight": 8
+        },
+        {
+          "all_observed_partitions_pass": false,
+          "observed_partitions": 2,
+          "partitions": [
+            {
+              "min_retention": 0.09675503140989045,
+              "normalized_jain": 0.5964655250940205,
+              "pass": false,
+              "queue_depths": {
+                "101": 1,
+                "102": 8
+              }
+            },
+            {
+              "min_retention": 0.301264912138782,
+              "normalized_jain": 0.73689626839661,
+              "pass": false,
+              "queue_depths": {
+                "101": 8,
+                "102": 1
+              }
+            }
+          ],
+          "passing_partitions": 0,
+          "total_inflight": 9
+        },
+        {
+          "all_observed_partitions_pass": false,
+          "observed_partitions": 2,
+          "partitions": [
+            {
+              "min_retention": 0.1608269750551203,
+              "normalized_jain": 0.6590186980436573,
+              "pass": false,
+              "queue_depths": {
+                "101": 2,
+                "102": 8
+              }
+            },
+            {
+              "min_retention": 0.534321447869495,
+              "normalized_jain": 0.8718362296253379,
+              "pass": false,
+              "queue_depths": {
+                "101": 8,
+                "102": 2
+              }
+            }
+          ],
+          "passing_partitions": 0,
+          "total_inflight": 10
+        },
+        {
+          "all_observed_partitions_pass": false,
+          "observed_partitions": 2,
+          "partitions": [
+            {
+              "min_retention": 0.287524344011112,
+              "normalized_jain": 0.7710449682033037,
+              "pass": false,
+              "queue_depths": {
+                "101": 4,
+                "102": 8
+              }
+            },
+            {
+              "min_retention": 0.9609205962507202,
+              "normalized_jain": 0.9922622435055868,
+              "pass": false,
+              "queue_depths": {
+                "101": 8,
+                "102": 4
+              }
+            }
+          ],
+          "passing_partitions": 0,
+          "total_inflight": 12
+        },
+        {
+          "all_observed_partitions_pass": false,
+          "observed_partitions": 1,
+          "partitions": [
+            {
+              "min_retention": 0.6049844994140279,
+              "normalized_jain": 0.9490673698485301,
+              "pass": false,
+              "queue_depths": {
+                "101": 8,
+                "102": 8
+              }
+            }
+          ],
+          "passing_partitions": 0,
+          "total_inflight": 16
+        }
+      ],
+      "read_bytes": 31850496,
+      "review_policy": {
+        "min_fairness": 0.9,
+        "min_per_drive_retention": 0.7,
+        "min_samples": 8
+      },
+      "tail_percentile_ppm": 950000,
+      "target_kind": "upstream",
+      "target_resource_id": 901
+    }
+  ],
+  "schema": "m3-shadow-calibration-review-v2",
+  "tail_percentile": 95,
+  "tail_percentile_ppm": 950000,
+  "tool": {
+    "name": "m3_shadow_calibration_review",
+    "source_sha256": "5abe2846a6e859c42758a5e73aeae3092afbfe6e94e27ae71d8345752ccbc731",
+    "version": 2
+  }
+}

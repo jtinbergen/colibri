@@ -1,0 +1,245 @@
+{
+  "schema_version": "0.1.0",
+  "machine_id": "A",
+  "capture_date": "2026-09-07",
+  "evidence_basis": "Win32_PnP + Win32_DiskDrive + Win32_Processor + Win32_ComputerSystem + Win32_VideoController + Step 0c prof_report + Step 7 calibration capture",
+  "units": {
+    "rate": "B/s",
+    "latency": "ns",
+    "bytes": "B",
+    "lanes": "PCIe lanes",
+    "frequency": "MT/s",
+    "voltage": "V",
+    "power": "W",
+    "temperature": "C"
+  },
+  "compute": {
+    "cpu": {
+      "model": "12th Gen Intel(R) Core(TM) i5-12600K",
+      "family_model_stepping": "Family 6 Model 151 Stepping 2",
+      "isa_caps": ["SSE4.2", "AVX", "AVX2", "FMA", "BMI2"],
+      "isa_caps_missing": ["AVX-512", "AMX", "VNNI", "SVE", "SVE2", "i8mm"],
+      "physical_cores": 10,
+      "logical_cores": 16,
+      "core_layout": "6 P-cores (HT) + 4 E-cores",
+      "numa_nodes": 1,
+      "numa_domains": 1,
+      "base_freq_mhz": 3686,
+      "boost_freq_mhz": 4900,
+      "tdp_w": 125,
+      "package": "LGA1700",
+      "motherboard": "Gigabyte Technology Co., Ltd. Z690 AORUS ELITE DDR4",
+      "cpu_roofline": {
+        "scalar_fma_avx2_gflops_peak": 105,
+        "avx2_fma_gflops_peak": 421,
+        "mem_bw_gbps_peak": 51.2,
+        "method": "NOT_RUN: theoretical peaks from spec sheet, not measured",
+        "measured_in_compute_kernel": "see m3-execution-step5-invariants-2026-09-06.md (~3.1 us/call g64 expert kernel)"
+      }
+    },
+    "gpu": [
+      {
+        "model": "NVIDIA GeForce GTX 1080",
+        "arch": "Pascal",
+        "compute_capability": "sm_61",
+        "vram_bytes": 8589934592,
+        "vram_speed_class": "GDDR5X 11 Gbps",
+        "memory_bw_gbps": 484,
+        "fp32_tflops": 11.34,
+        "tensor_cores": 0,
+        "rt_cores": 0,
+        "pcie": {
+          "gen": 3,
+          "lanes": 16,
+          "parent_slot": "PCI\\VEN_8086&DEV_7AB0&REV_11 (Z690 PCH root)"
+        },
+        "eligible_for_expert_compute": false,
+        "eligibility_reason": "consumer Pascal without FP16 accumulator; sm_61 does not match the engine's CUDA tier per base plan Rules 4/9; Step 6 evidence shows routed GPU critical = 0.000 s on this host"
+      },
+      {
+        "model": "Intel(R) UHD Graphics 770",
+        "arch": "Gen 12.2 (Alder Lake)",
+        "vram_bytes": 536870912,
+        "backend_supported": false,
+        "eligible_for_expert_compute": false,
+        "eligibility_reason": "no expert compute kernel for iGPU in this engine"
+      }
+    ]
+  },
+  "memory_domains": [
+    {
+      "id": "mem:drama",
+      "kind": "DRAM",
+      "total_bytes": 34119794688,
+      "total_bytes_unit_note": "Win32 reports 34.1 GB; OS reports 32 GiB available to user",
+      "channels": 2,
+      "speed_class": "DDR4-3200 (down-bin likely 3000/3200 from board spec)",
+      "speed_mt_s": "NOT_RUN: not probed",
+      "bandwidth_class_gbps": "NOT_RUN: not measured",
+      "form_factor": "DIMM",
+      "numa_attach": "node 0",
+      "process_affinity_default": "process-wide"
+    }
+  ],
+  "storage": [
+    {
+      "id": "drive:101",
+      "label": "C:",
+      "model": "Samsung SSD 980 PRO 1TB",
+      "capacity_bytes": 1000202273280,
+      "controller": "ctrl:201",
+      "controller_label": "Standard NVM Express Controller (PCI\\VEN_144D&DEV_A80B)",
+      "pci_parent": "PCI\\VEN_8086&DEV_7AB0&REV_11 (Z690 PCH)",
+      "interface": "NVMe PCIe 3.0 x4 (Z690 PCH lanes; chipset gen3)",
+      "pcie_gen": 3,
+      "pcie_lanes": 4,
+      "media_type": "TLC V-NAND",
+      "sequential_read_mbps_peak": 7000,
+      "sequential_read_mbps_method": "NOT_RUN: vendor spec",
+      "random_read_iops_4k_qd1": "NOT_RUN",
+      "random_read_iops_4k_qd32": "NOT_RUN",
+      "calibration": {
+        "qd1_random_read_gbps": 3.41,
+        "qd1_random_read_p99_ns": 413000,
+        "qd4_random_read_gbps": 6.57,
+        "qd4_random_read_p99_ns": 1198000,
+        "qd1_19mib_random_p99_ns": 5663000,
+        "qd4_19mib_random_p99_ns": 20782000,
+        "calibration_source": "Step 7 calibration capture (16 MiB, inflight 1/2/4)"
+      },
+      "notes": "primary model volume; current drive for the planner in the Step 0c run"
+    },
+    {
+      "id": "drive:102",
+      "label": "E:",
+      "model": "SAMSUNG MZAL4512HBLU-00BL2",
+      "capacity_bytes": 512105932800,
+      "controller": "ctrl:202",
+      "controller_label": "Standard NVM Express Controller (PCI\\VEN_144D&DEV_A80A)",
+      "pci_parent": "PCI\\VEN_8086&DEV_7AB4&REV_11 (Z690 PCH)",
+      "interface": "NVMe PCIe 3.0 x4 (separate PCH root)",
+      "pcie_gen": 3,
+      "pcie_lanes": 4,
+      "media_type": "OEM mid-range NVMe (PM9B1 class)",
+      "sequential_read_mbps_peak": 3500,
+      "random_read_iops_4k_qd1": "NOT_RUN",
+      "calibration": {
+        "qd1_random_read_gbps": 0.81,
+        "qd1_random_read_p99_ns": 1901000,
+        "qd4_random_read_gbps": 1.00,
+        "qd4_random_read_p99_ns": 7541000,
+        "qd1_19mib_random_p99_ns": 48580000,
+        "qd4_19mib_random_p99_ns": 134493000,
+        "calibration_source": "Step 7 calibration capture"
+      },
+      "notes": "secondary copy; on this machine ~6x slower p50 / 7-8x slower p99 than C: under contention; not in the env for the Step 0c run"
+    },
+    {
+      "id": "drive:103",
+      "label": "F: (Kingston XS1000)",
+      "model": "Kingston XS1000 USB Device",
+      "capacity_bytes": 1000202273280,
+      "controller": "ctrl:usb",
+      "interface": "USB 3.2 Gen 2",
+      "pcie_gen": null,
+      "pcie_lanes": null,
+      "calibration": "NOT_RUN",
+      "notes": "external SSD; not eligible for any planner role"
+    }
+  ],
+  "controllers": [
+    {
+      "id": "ctrl:201",
+      "kind": "nvme",
+      "parent": "ctrl:201 is itself root; NVMe controller owns its lanes",
+      "drives": ["drive:101"]
+    },
+    {
+      "id": "ctrl:202",
+      "kind": "nvme",
+      "parent": "separate NVMe controller",
+      "drives": ["drive:102"]
+    }
+  ],
+  "interconnects": [
+    {
+      "id": "pcie:z690-pch",
+      "kind": "pcie",
+      "gen": 3,
+      "lanes_total": 28,
+      "shared_group": "pch:z690",
+      "evidence": "PCH; both NVMe controllers hang off PCH root ports per PCI parent devices 7AB0 and 7AB4"
+    },
+    {
+      "id": "usb:3.2",
+      "kind": "usb",
+      "gen": 3.2,
+      "shared_group": "usb:1",
+      "evidence": "Kingston XS1000 on a USB port"
+    }
+  ],
+  "machine": {
+    "id": "A",
+    "name": "dev desktop",
+    "numa_topology": "single socket; no NUMA on this board",
+    "eligibility": {
+      "cpu_island": [
+        { "id": "cpu:0", "isa_match": true, "score": "primary" }
+      ],
+      "gpu_island": [
+        { "id": "gpu:gtx1080", "eligible": false, "reason": "consumer Pascal, no FP16 acc, not in expert compute tier; 8a-lite source rule still benefits from this machine's storage topology" },
+        { "id": "gpu:uhd770", "eligible": false, "reason": "no iGPU compute kernel" }
+      ]
+    }
+  },
+  "operating_environment": {
+    "os": "Microsoft Windows 11 Pro",
+    "build": "26200",
+    "kernel": "10.0.26200",
+    "filesystem": "NTFS",
+    "filesystems_observed": ["NTFS"],
+    "backends_enabled": ["CPU"],
+    "backends_disabled": ["CUDA", "Metal", "Vulkan", "ROCm"],
+    "compiler": "MSYS2 MinGW GCC (OpenMP)",
+    "omp_threads_default": 10,
+    "omp_threads_configured": "PIPE=1 PIPE_WORKERS=4"
+  },
+  "open_evidence_gaps": [
+    {
+      "id": "cal:qd8_drive101",
+      "field": "drive:101.qd8_random_read",
+      "status": "NOT_RUN",
+      "rationale": "only inflight 1/2/4 captured; QD 8/16 needed before admission bounds can be chosen from the latency curve"
+    },
+    {
+      "id": "cal:same_controller_contention",
+      "field": "drive:101 + drive:102 same controller",
+      "status": "NOT_RUN",
+      "rationale": "two NVMe drives on separate controller instances on this host; same-controller case is not measurable here"
+    },
+    {
+      "id": "cal:shared_upstream",
+      "field": "Z690 PCH shared upstream",
+      "status": "NOT_RUN",
+      "rationale": "PCH is the shared parent of both NVMe controllers; contention would require two independent drives on the same controller OR a controlled injection"
+    },
+    {
+      "id": "cal:cache_warm_cold",
+      "field": "drive:101 warm vs cold reads",
+      "status": "NOT_RUN",
+      "rationale": "Step 7 capture labelled cache_condition=unknown; warm/cold split needs a controlled flush protocol"
+    },
+    {
+      "id": "gpu:h2d_d2h",
+      "field": "GPU H2D / D2H",
+      "status": "NOT_RUN",
+      "rationale": "GTX 1080 ineligible for expert compute on this machine; transfer costs would only matter if eligibility flips"
+    },
+    {
+      "id": "mem:bandwidth",
+      "field": "DRAM bandwidth",
+      "status": "NOT_RUN",
+      "rationale": "no per-machine bandwidth probe; CPU roofline input is theoretical peak only"
+    }
+  ]
+}

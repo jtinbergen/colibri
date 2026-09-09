@@ -1,0 +1,71 @@
+{
+  "by_controller": [
+    {
+      "controller_id": 201,
+      "deadline_misses": 0,
+      "guarded_deadline_misses": 0,
+      "predicted_deadline_misses": 0,
+      "ready_error_ns_max_abs": 74029649,
+      "ready_error_ns_p50": 49198049,
+      "ready_error_ns_p95": 66129449,
+      "ready_error_ns_p99": 71877749,
+      "samples": 306
+    },
+    {
+      "controller_id": 202,
+      "deadline_misses": 0,
+      "guarded_deadline_misses": 0,
+      "predicted_deadline_misses": 0,
+      "ready_error_ns_max_abs": 91816749,
+      "ready_error_ns_p50": 56032149,
+      "ready_error_ns_p95": 83727049,
+      "ready_error_ns_p99": 90147449,
+      "samples": 147
+    }
+  ],
+  "by_drive_path": [
+    {
+      "actual_drive_id": 101,
+      "actual_path": "101|201|301",
+      "deadline_misses": 0,
+      "guarded_deadline_misses": 0,
+      "predicted_deadline_misses": 0,
+      "ready_error_ns_max_abs": 74029649,
+      "ready_error_ns_p50": 49198049,
+      "ready_error_ns_p95": 66129449,
+      "ready_error_ns_p99": 71877749,
+      "samples": 306
+    },
+    {
+      "actual_drive_id": 102,
+      "actual_path": "102|202|302",
+      "deadline_misses": 0,
+      "guarded_deadline_misses": 0,
+      "predicted_deadline_misses": 0,
+      "ready_error_ns_max_abs": 91816749,
+      "ready_error_ns_p50": 56032149,
+      "ready_error_ns_p95": 83727049,
+      "ready_error_ns_p99": 90147449,
+      "samples": 147
+    }
+  ],
+  "overall": {
+    "deadline_misses": 0,
+    "guarded_deadline_misses": 0,
+    "predicted_deadline_misses": 0,
+    "ready_error_ns_max_abs": 91816749,
+    "ready_error_ns_p50": 51686699,
+    "ready_error_ns_p95": 74571198,
+    "ready_error_ns_p99": 84960649,
+    "samples": 453
+  },
+  "rows_completed": 453,
+  "rows_failed": 0,
+  "rows_incomplete": 0,
+  "rows_incomplete_mapping": 0,
+  "rows_successful": 453,
+  "rows_total": 453,
+  "rows_unknown_prediction": 0,
+  "schema": "m3-shadow-runtime-report-v1",
+  "source": "c\\.m3_full_on_cmp.shadow.trace.csv"
+}

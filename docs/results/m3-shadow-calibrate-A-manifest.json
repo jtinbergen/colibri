@@ -1,0 +1,65 @@
+{
+  "topology_hash": 20260907,
+  "sources": [
+    {
+      "drive_id": 101,
+      "controller_id": 201,
+      "upstream_id": 901,
+      "path": "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00002.safetensors"
+    },
+    {
+      "drive_id": 102,
+      "controller_id": 202,
+      "upstream_id": 901,
+      "path": "E:\\Models\\minimax_m3_i4\\out-00002.safetensors"
+    }
+  ],
+  "groups": [
+    {"name": "drive-101", "drive_ids": [101]},
+    {"name": "drive-102", "drive_ids": [102]},
+    {"name": "controller-201", "drive_ids": [101]},
+    {"name": "controller-202", "drive_ids": [102]}
+  ],
+  "islands": [
+    {
+      "kind": "cpu_island",
+      "resource_id": 400,
+      "parent_mem_id": 500,
+      "isa_bits": 6,
+      "cores": 10,
+      "eligible": 1
+    },
+    {
+      "kind": "memory_dom",
+      "resource_id": 500,
+      "parent_id": 0,
+      "rate_bytes_per_s": 51200000000,
+      "bandwidth_class": 2
+    },
+    {
+      "kind": "link",
+      "resource_id": 600,
+      "parent_cpu_id": 400,
+      "pcie_parent_id": 901,
+      "rate_bytes_per_s": 12000000000,
+      "eligible": 1
+    },
+    {
+      "kind": "link",
+      "resource_id": 601,
+      "parent_cpu_id": 400,
+      "pcie_parent_id": 901,
+      "rate_bytes_per_s": 3000000000,
+      "eligible": 1
+    },
+    {
+      "kind": "gpu_island",
+      "resource_id": 700,
+      "parent_link_id": 600,
+      "vram_bytes": 8589934592,
+      "p2p_class": 0,
+      "pcie_parent_id": 901,
+      "eligible": 0
+    }
+  ]
+}

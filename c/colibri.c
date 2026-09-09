@@ -70,6 +70,9 @@
 #include "decode_batch.h"
 #include "route_trace.h"                           /* ROUTE_TRACE + .coli_usage, engine-agnostic (#700) */
 #include "m3_dag.h"                                /* Step 3 serial M3 task contract */
+#ifdef COLI_M3_SHADOW_RUNTIME
+#include "m3_shadow_m3_runtime.h"                  /* Step 7 opt-in M3 observer */
+#endif
 #include "kv_fp8.h"                               /* KV8=1: cache latente in fp8 e4m3 + scala per-riga */
 #include "kv_tq.h"                                /* KV_TQ=3|4: cache latente PolarQuant (rot+polare) */
 #ifdef _OPENMP
@@ -910,6 +913,11 @@ static uint64_t m3_dag_output_hash(const float *v,int n){
     return h;
 }
 static _Atomic int64_t g_prof_io;                /* bytes pread()/faulted from expert files */
+/* Multi-SSD source counters are declared before ProfBase so the PROF window
+ * can snapshot them without changing the routing/loader path. */
+#define MIR_REPS (1+ST_MAX_MIR)
+static _Atomic int64_t g_mir_bytes[MIR_REPS];
+static _Atomic int64_t g_mir_nread[MIR_REPS];
 /* COLI_TRACE=<csv>: bounded dependency/lifecycle trace for M3 execution work.
  * It is deliberately separate from PROF: no event is emitted unless the user
  * requests a trace. Every thread owns one fixed buffer, so the hot event path
@@ -995,11 +1003,22 @@ static void trace_init(const char *path){
  * two activities were concurrent, so these transitions maintain the actual
  * intersection interval. The mutex is only held for the tiny state update,
  * never across I/O or compute. */
+static int pipe_prof_enabled(void);
+/* QD histogram (Slice 0c): bin the IO-inflight count by the wall time it
+ * held that value, so prof_report can show what queue depth the disk was
+ * actually seeing during the window. Same single mutex; same precision. */
+#define PROF_QD_BUCKETS 9   /* buckets 0..7 + overflow (>=8) */
+static int64_t g_pipe_prof_io_qd_ns[PROF_QD_BUCKETS];
+static int64_t g_pipe_prof_compute_qd_ns[PROF_QD_BUCKETS];
 static pthread_mutex_t g_pipe_prof_mx=PTHREAD_MUTEX_INITIALIZER;
 static int g_pipe_prof_io_inflight, g_pipe_prof_compute_inflight;
 static double g_pipe_prof_last;
 static int64_t g_pipe_prof_io_ns, g_pipe_prof_compute_ns, g_pipe_prof_overlap_ns;
-static int pipe_prof_enabled(void);
+static int qd_bucket(int n){
+    if(n<0) n=0;
+    if(n>=PROF_QD_BUCKETS-1) return PROF_QD_BUCKETS-1;
+    return n;
+}
 static void pipe_prof_accum_locked(double now){
     if(g_pipe_prof_last>0){
         int64_t dt=(int64_t)((now-g_pipe_prof_last)*1e9);
@@ -1007,6 +1026,8 @@ static void pipe_prof_accum_locked(double now){
             if(g_pipe_prof_io_inflight>0) g_pipe_prof_io_ns+=dt;
             if(g_pipe_prof_compute_inflight>0) g_pipe_prof_compute_ns+=dt;
             if(g_pipe_prof_io_inflight>0 && g_pipe_prof_compute_inflight>0) g_pipe_prof_overlap_ns+=dt;
+            g_pipe_prof_io_qd_ns[qd_bucket(g_pipe_prof_io_inflight)]+=dt;
+            g_pipe_prof_compute_qd_ns[qd_bucket(g_pipe_prof_compute_inflight)]+=dt;
         }
     }
     g_pipe_prof_last=now;
@@ -1018,10 +1039,15 @@ static void pipe_prof_transition(int io_delta, int compute_delta){
     g_pipe_prof_compute_inflight+=compute_delta;
     pthread_mutex_unlock(&g_pipe_prof_mx);
 }
-static void pipe_prof_snapshot(int64_t *io_ns, int64_t *compute_ns, int64_t *overlap_ns){
+static void pipe_prof_snapshot(int64_t *io_ns, int64_t *compute_ns, int64_t *overlap_ns,
+                                int64_t *io_qd_ns, int64_t *compute_qd_ns){
     pthread_mutex_lock(&g_pipe_prof_mx);
     pipe_prof_accum_locked(now_s());
     *io_ns=g_pipe_prof_io_ns; *compute_ns=g_pipe_prof_compute_ns; *overlap_ns=g_pipe_prof_overlap_ns;
+    for(int i=0;i<PROF_QD_BUCKETS;i++){
+        io_qd_ns[i]=g_pipe_prof_io_qd_ns[i];
+        compute_qd_ns[i]=g_pipe_prof_compute_qd_ns[i];
+    }
     pthread_mutex_unlock(&g_pipe_prof_mx);
 }
 /* Disk service: wall time inside expert_load on whichever thread runs the read
@@ -1103,7 +1129,9 @@ typedef struct {
     uint64_t hit_pin,hit_ecache;
     uint64_t dc_n[2], dc_direct_n[2]; int64_t dc_bytes[2], dc_ns[2]; /* DISK-CLASS */
     int64_t dc_wall_ns[2], dc_wall_all_ns;       /* busy-wall (per class + combined) */
+    int64_t mir_bytes[1+ST_MAX_MIR]; uint64_t mir_nread[1+ST_MAX_MIR]; /* source attribution */
     int64_t pipe_io_ns, pipe_compute_ns, pipe_overlap_ns; /* PROF PIPE wall intersections */
+    int64_t pipe_io_qd_ns[PROF_QD_BUCKETS], pipe_compute_qd_ns[PROF_QD_BUCKETS]; /* QD histogram */
 } ProfBase;
 static void prof_base(Model *m, ProfBase *b){
     b->edisk=edisk_s(); b->ewait=m->t_ewait; b->emm=m->t_emm;
@@ -1118,7 +1146,8 @@ static void prof_base(Model *m, ProfBase *b){
     b->hit_pin=m->hit_pin; b->hit_ecache=m->hit_ecache;
     b->n_fw=m->n_fw; b->n_emit=m->n_emit; b->nlat=g_prof_nlat; b->n_p2p=m->n_p2p;
     b->cpu_bytes=m->cpu_expert_bytes;b->cpu_rows=m->cpu_expert_rows;
-    pipe_prof_snapshot(&b->pipe_io_ns,&b->pipe_compute_ns,&b->pipe_overlap_ns);
+    pipe_prof_snapshot(&b->pipe_io_ns,&b->pipe_compute_ns,&b->pipe_overlap_ns,
+                       b->pipe_io_qd_ns,b->pipe_compute_qd_ns);
     for(int i=0;i<2;i++){
         b->dc_n[i]=atomic_load_explicit(&g_dc_n[i],memory_order_relaxed);
         b->dc_bytes[i]=atomic_load_explicit(&g_dc_bytes[i],memory_order_relaxed);
@@ -1126,6 +1155,10 @@ static void prof_base(Model *m, ProfBase *b){
         b->dc_direct_n[i]=atomic_load_explicit(&g_dc_direct_n[i],memory_order_relaxed);
     }
     dc_wall_read(b->dc_wall_ns,&b->dc_wall_all_ns);
+    for(int r=0;r<1+ST_MAX_MIR;r++){
+        b->mir_bytes[r]=atomic_load_explicit(&g_mir_bytes[r],memory_order_relaxed);
+        b->mir_nread[r]=atomic_load_explicit(&g_mir_nread[r],memory_order_relaxed);
+    }
 }
 
 static float *falloc(int64_t n){
@@ -2919,13 +2952,10 @@ static void *map_of_fd(int fd){
  * without the env it is measured at startup with the engine's own access
  * pattern). Cold decode is disk-bound (~11 GB/token): N NVMe drives reading in
  * parallel add up. */
-#define MIR_REPS (1+ST_MAX_MIR)        /* replicas incl. the primary */
 static const char *g_mirror_dir=NULL;  /* COLI_MODEL_MIRROR / SNAP_MIRROR (dir list) */
 static int g_mirror=0;                 /* 1 = mirror active (at least one shard accepted) */
 static int g_mir_nrep=1;               /* replicas incl. the primary */
 static int g_mir_cut[MIR_REPS]={256};  /* cumulative hash cuts of 256: replica r serves h in [cut[r-1],cut[r]) */
-static _Atomic int64_t g_mir_bytes[MIR_REPS]; /* bytes served per drive: [0] primary, [r] mirror r */
-static _Atomic int64_t g_mir_nread[MIR_REPS];
 
 /* replica of one expert: DETERMINISTIC hash of (layer,eid). Determinism is a
  * requirement, not a style choice: the readahead/PILOT WILLNEED and the demand
@@ -3130,7 +3160,11 @@ static int expert_classify(Model *m, int layer, int eid){
     uint32_t age=m->eaccess_clock_dc-last_pre;                  /* ticks since last access, PRE this call's bump */
     return age>g_direct_heat_ticks ? DC_COLD : DC_WARM;         /* '>' not '>=': ties lean warm */
 }
-static int expert_load_impl(Model *m, int layer, int eid, ESlot *s, int fatal, int demand){
+static int expert_load_impl(Model *m, int layer, int eid, ESlot *s, int fatal, int demand
+#ifdef COLI_M3_SHADOW_RUNTIME
+                            , m3_shd_m3_load_observation_t *shadow_observation
+#endif
+){
 #ifdef COLI_CUDA
     /* A live REPIN may reuse a GPU-enabled pinned slot for a different expert.
      * Keep its tier assignment, but invalidate the old device weights. */
@@ -3181,6 +3215,40 @@ static int expert_load_impl(Model *m, int layer, int eid, ESlot *s, int fatal, i
     }
     int rep=expert_route(layer,eid);             /* DUAL-SSD: this expert's replica */
     if(rep && st_fd_rep(&m->S,tw[0]->fd,rep)<0) rep=0; /* shard not in that mirror (partial) */
+#ifdef COLI_M3_SHADOW_RUNTIME
+    if (shadow_observation && demand == 1 && m->c.arch == ARCH_M3
+        && m3_shd_m3_runtime_enabled()) {
+        uint64_t bytes = 0;
+        int bytes_ok = 1, actual_replica = -1;
+        uint8_t component_mask = 0;
+        for (int k = 0; k < 3; ++k) {
+            int used_w = st_fd_rep(&m->S, tw[k]->fd, rep) >= 0 ? rep : 0;
+            int used_q = st_fd_rep(&m->S, tq[k]->fd, rep) >= 0 ? rep : 0;
+            if (actual_replica == -1) actual_replica = used_w;
+            if (used_w != actual_replica || used_q != actual_replica)
+                actual_replica = -2;
+            uint64_t wb = tw[k]->nbytes > 0 ? (uint64_t)tw[k]->nbytes : 0;
+            uint64_t qb = tq[k]->nbytes > 0 ? (uint64_t)tq[k]->nbytes : 0;
+            if (UINT64_MAX - bytes < wb || UINT64_MAX - bytes - wb < qb) {
+                bytes_ok = 0; break;
+            }
+            bytes += wb + qb;
+            component_mask |= (uint8_t)(1u << k);
+            component_mask |= (uint8_t)(1u << (3 + k));
+        }
+        /* Direct striped reads use several physical resources.  The current
+         * bridge intentionally refuses to collapse that into one drive.
+         * mmap has logical tensor bytes but no physical read/completion fact;
+         * keep it UNKNOWN until page-fault traffic is observed explicitly. */
+        int path_complete = bytes_ok && actual_replica >= 0
+            && !g_mmap && !(g_direct && g_mir_nrep > 1);
+        if (bytes_ok && bytes && path_complete)
+            (void)m3_shd_m3_runtime_issue_mapped(shadow_observation,
+                m3_shd_m3_runtime_model_id((uint64_t)(uintptr_t)m),
+                (ColiExpertKey){layer, eid}, bytes,
+                actual_replica, path_complete, component_mask);
+    }
+#endif
     if(g_mmap){
         void *bw[3],*bq[3]; int okm=1;
         for(int k=0;k<3;k++){
@@ -3411,7 +3479,14 @@ static int expert_load(Model *m, int layer, int eid, ESlot *s, int fatal, int de
      * them, and DISK-CLASS deliberately leaves them unclassified -- see expert_classify()'s
      * call site. */
     double t0=now_s();
+#ifdef COLI_M3_SHADOW_RUNTIME
+    m3_shd_m3_load_observation_t shadow_observation;
+    m3_shd_m3_runtime_begin_load(&shadow_observation);
+    int rc=expert_load_impl(m,layer,eid,s,fatal,demand,&shadow_observation);
+    m3_shd_m3_runtime_finish(&shadow_observation,rc);
+#else
     int rc=expert_load_impl(m,layer,eid,s,fatal,demand);
+#endif
     atomic_fetch_add_explicit(&g_edisk_ns,(int64_t)((now_s()-t0)*1e9),memory_order_relaxed);
     return rc;
 }
@@ -3922,6 +3997,9 @@ typedef struct {
     _Atomic int eids[64];                         /* current batch expert ids */
     _Atomic int layer;                            /* current batch layer */
     _Atomic int ready[64];                        /* per-slot load-done flag */
+#ifdef COLI_M3_SHADOW_RUNTIME
+    m3_shd_m3_exec_context_t shadow_context[64];  /* copied before generation publish */
+#endif
     pthread_mutex_t mx; pthread_cond_t cv;        /* ONLY for parking/waking idle workers */
     pthread_cond_t cv_done;                       /* COLI_PIPE_BLOCK: signals ready[] transitions */
     Model *m;
@@ -3968,7 +4046,15 @@ static void *pipe_worker(void *arg){
                 if(g_pipe_test_before_load) g_pipe_test_before_load((int)i);
 #endif
                 if(g_prof) pipe_prof_transition(1,0);
-                expert_load(p->m,L,eid,&p->m->ws[i],1,1);  /* needed-now load: fatal on I/O error (matches serial path); demand=1: this IS moe()'s own miss path */
+#ifdef COLI_M3_SHADOW_RUNTIME
+                m3_shd_m3_exec_context_t shadow_previous;
+                m3_shd_m3_runtime_context_push(&p->shadow_context[i],
+                                               &shadow_previous);
+                expert_load(p->m,L,eid,&p->m->ws[i],1,1);
+                m3_shd_m3_runtime_context_pop(&shadow_previous);
+#else
+                expert_load(p->m,L,eid,&p->m->ws[i],1,1);
+#endif
 #ifdef COLI_PIPE_TEST
                 if(g_pipe_test_after_load) g_pipe_test_after_load((int)i);
 #endif
@@ -4004,7 +4090,11 @@ static void pipe_init(Model *m){
 /* enqueue `njobs` loads (slots ws[0..njobs)); returns immediately, workers run ahead.
  * Order is load-bearing: write all batch state RELAXED, then RELEASE-store cur to
  * publish it, then wake parked workers. */
-static void pipe_dispatch(Model *m,int layer,const int *eids,int njobs){
+static void pipe_dispatch(Model *m,int layer,const int *eids,int njobs
+#ifdef COLI_M3_SHADOW_RUNTIME
+                          , const m3_shd_m3_exec_context_t *shadow_context
+#endif
+){
 #ifdef __linux__
     if(g_uring){
         uring_batch_reset(&g_ub_pipe);
@@ -4021,7 +4111,13 @@ static void pipe_dispatch(Model *m,int layer,const int *eids,int njobs){
      * rewrite this non-atomic pointer for every batch while workers may read it. */
     atomic_store_explicit(&g_pp.njobs,njobs,memory_order_relaxed);
     atomic_store_explicit(&g_pp.layer,layer,memory_order_relaxed);
-    for(int q=0;q<njobs;q++) atomic_store_explicit(&g_pp.eids[q],eids[q],memory_order_relaxed);
+    for(int q=0;q<njobs;q++) {
+        atomic_store_explicit(&g_pp.eids[q],eids[q],memory_order_relaxed);
+#ifdef COLI_M3_SHADOW_RUNTIME
+        g_pp.shadow_context[q] = shadow_context ? shadow_context[q]
+            : (m3_shd_m3_exec_context_t){0};
+#endif
+    }
     for(int q=0;q<njobs;q++) atomic_store_explicit(&g_pp.ready[q],0,memory_order_relaxed); /* reset BEFORE publish */
     uint64_t g=(atomic_load_explicit(&g_pp.cur,memory_order_relaxed)>>8)+1;
     atomic_store_explicit(&g_pp.cur,(g<<8),memory_order_release);                          /* PUBLISH */
@@ -6311,6 +6407,12 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out, int 
         pthread_mutex_unlock(&g_pilot_mx);
     }
     Cfg *c=&m->c; int D=c->hidden, E=c->n_experts, K=c->topk, I=c->moe_inter;
+#ifdef COLI_M3_SHADOW_RUNTIME
+    uint64_t m3_shadow_forward = c->arch == ARCH_M3
+        ? m3_shd_m3_runtime_next_forward() : 0;
+    uint64_t m3_shadow_model = m3_shd_m3_runtime_model_id(
+        (uint64_t)(uintptr_t)m);
+#endif
     /* DISK-CLASS: does THIS call need the pre-bump recency snapshot? Must agree with
      * dc_needed() in expert_load_impl -- that's what reads what this writes. touched[]
      * makes the write once-per-call: an expert routed by more than one position in a big
@@ -6712,8 +6814,18 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out, int 
     float *m3_dag_pipe_shared=NULL;
     M3DagExpertTask m3_dag_pipe_shared_task={0};
     int m3_dag_pipe_shared_task_valid=0;
+#ifdef COLI_M3_SHADOW_RUNTIME
+    /* One observed need timestamp per block.  Only the serial M3 DAG path
+     * establishes that the current consumer is ready except for the missing
+     * weights at this point.  PIPE/parallel paths keep UNKNOWN until a later
+     * provider can establish their post-shared-compute readiness. */
+    uint64_t m3_shadow_consumer_need=0;
+#endif
     for(int base=0;base<nu;base+=64){
         int nb = nu-base<64 ? nu-base : 64;
+#ifdef COLI_M3_SHADOW_RUNTIME
+        m3_shadow_consumer_need = 0;
+#endif
 #if !defined(_WIN32)
         if(g_cluster_n){
             cluster_moe_batch(m,layer,x,S,out,idxs,ws,keff,K,uniq,base,nb);
@@ -6743,6 +6855,11 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out, int 
             if(!use[j]){ qof[j]=nmiss; use[j]=&m->ws[nmiss]; missk[nmiss++]=j; m->miss++;
                 if(g_disk_split){ if(m->ld_ctx==1) m->miss_draft++; else if(m->ld_ctx==2) m->miss_absorb++; } }
         }
+#ifdef COLI_M3_SHADOW_RUNTIME
+        if (nmiss && m3_shadow_forward && m3_shd_m3_runtime_enabled()
+            && m3_dag_all_blocks)
+            m3_shadow_consumer_need = m3_shd_m3_runtime_now_ns();
+#endif
         M3DagParallelBlock *m3p=NULL;
         if(m3_dag_parallel_all){
             int preflight_ok=1;
@@ -6857,16 +6974,45 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out, int 
          * is a no-op / compiled out, so this sits exactly where dev put it and CPU behaviour is
          * unchanged. */
         if(nmiss){
+#ifdef COLI_M3_SHADOW_RUNTIME
+            m3_shd_m3_exec_context_t shadow_context[64] = {{0}};
+            uint64_t observed_need = m3_shadow_consumer_need;
+            if (!observed_need)
+                observed_need = m3_shd_m3_runtime_synthetic_need_ns();
+            for (int q = 0; q < nmiss; ++q) {
+                shadow_context[q] = (m3_shd_m3_exec_context_t){
+                    m3_shadow_model, m3_shadow_forward,
+                    ((uint64_t)(unsigned)base << 32) | 1u,
+                    (uint64_t)(unsigned)(base + missk[q]),
+                    observed_need,
+                    (uint8_t)(m3_shadow_forward != 0)
+                };
+            }
+#endif
             if(g_pipe){                            /* PIPE: launch loads async, matmul overlaps them */
                 if(!g_pp.started) pipe_init(m);
                 double t0=now_s();
                 int eids[64]; for(int q=0;q<nmiss;q++) eids[q]=uniq[base+missk[q]];
+#ifdef COLI_M3_SHADOW_RUNTIME
+                pipe_dispatch(m,layer,eids,nmiss,shadow_context);
+#else
                 pipe_dispatch(m,layer,eids,nmiss);
+#endif
                 m->t_ewait += now_s()-t0;           /* dispatch only; the reads overlap matmul and
                                                      * are timed as service inside expert_load */
             } else { double t0=now_s();             /* ORIGINALE: blocking parallel load */
                 #pragma omp parallel for schedule(dynamic,1)
-                for(int q=0;q<nmiss;q++) expert_load(m,layer,uniq[base+missk[q]],&m->ws[q],1,1);   /* demand=1: this IS the miss path */
+                for(int q=0;q<nmiss;q++) {
+#ifdef COLI_M3_SHADOW_RUNTIME
+                    m3_shd_m3_exec_context_t shadow_previous;
+                    m3_shd_m3_runtime_context_push(&shadow_context[q],
+                                                   &shadow_previous);
+                    expert_load(m,layer,uniq[base+missk[q]],&m->ws[q],1,1);
+                    m3_shd_m3_runtime_context_pop(&shadow_previous);
+#else
+                    expert_load(m,layer,uniq[base+missk[q]],&m->ws[q],1,1);
+#endif
+                }   /* demand=1: this IS the miss path */
                 m->t_ewait += now_s()-t0; }         /* compute thread blocked for the whole load */
         }
         /* I/O ASINCRONO: readahead (WILLNEED) del blocco SUCCESSIVO mentre calcoliamo
@@ -7139,7 +7285,27 @@ static void moe(Model *m, Layer *l, int layer, float *x, int S, float *out, int 
                 for(uint8_t k2=0;k2<3;k2++) for(int c2=0;c2<ncpu;c2++) if(vcls[c2]==k2) vord[no++]=c2;
                 for(int oi=0;oi<no;oi++){ int c2=vord[oi]; ESlot *e=ce[c2]; int nr=cnr[c2];
                     if(g_pipe && cqof[c2]>=0){ double tw=now_s(); pipe_wait(cqof[c2]); m->t_ewait += now_s()-tw; }
-                    if(!e->slab) expert_load(m,layer,e->eid,e,1,1);   /* demand=1: moe miss path (FASE A snapshot valid) */
+                    if(!e->slab) {
+#ifdef COLI_M3_SHADOW_RUNTIME
+                        uint64_t observed_need = m3_shadow_consumer_need;
+                        if (!observed_need)
+                            observed_need = m3_shd_m3_runtime_synthetic_need_ns();
+                        m3_shd_m3_exec_context_t shadow_context = {
+                            m3_shadow_model, m3_shadow_forward,
+                            ((uint64_t)(unsigned)base << 32) | 2u,
+                            (uint64_t)(unsigned)(base + c2),
+                            observed_need,
+                            (uint8_t)(m3_shadow_forward != 0)
+                        };
+                        m3_shd_m3_exec_context_t shadow_previous;
+                        m3_shd_m3_runtime_context_push(&shadow_context,
+                                                       &shadow_previous);
+                        expert_load(m,layer,e->eid,e,1,1);
+                        m3_shd_m3_runtime_context_pop(&shadow_previous);
+#else
+                        expert_load(m,layer,e->eid,e,1,1);
+#endif
+                    }   /* demand=1: moe miss path (FASE A snapshot valid) */
                     for(int r=0;r<nr;r++) memcpy(xg+(int64_t)r*D, x+(int64_t)crmap[c2*S+r]*D, D*sizeof(float));
                     double te0=now_s();
                     expert_ffn(hh,gg,uu,xg,&e->g,&e->u,&e->d,nr,I);
@@ -9545,7 +9711,9 @@ static void prof_report(Model *m, const ProfBase *b, double elapsed, int tokens,
     double io_w=m->t_ewait-b->ewait;    /* stall the compute thread felt */
     double io_svc=edisk_s()-b->edisk;   /* read service on the loading threads (overlaps compute) */
     int64_t pipe_io_ns,pipe_compute_ns,pipe_overlap_ns;
-    pipe_prof_snapshot(&pipe_io_ns,&pipe_compute_ns,&pipe_overlap_ns);
+    int64_t pipe_io_qd_ns[PROF_QD_BUCKETS], pipe_compute_qd_ns[PROF_QD_BUCKETS];
+    pipe_prof_snapshot(&pipe_io_ns,&pipe_compute_ns,&pipe_overlap_ns,
+                       pipe_io_qd_ns,pipe_compute_qd_ns);
     double pipe_io_wall=(pipe_io_ns-b->pipe_io_ns)*1e-9;
     double pipe_compute_wall=(pipe_compute_ns-b->pipe_compute_ns)*1e-9;
     double pipe_overlap_wall=(pipe_overlap_ns-b->pipe_overlap_ns)*1e-9;
@@ -9561,6 +9729,37 @@ static void prof_report(Model *m, const ProfBase *b, double elapsed, int tokens,
             pipe_io_wall,pipe_compute_wall,pipe_overlap_wall,
             pipe_io_wall>1e-9?100.0*pipe_overlap_wall/pipe_io_wall:0.0,
             pipe_compute_wall>1e-9?100.0*pipe_overlap_wall/pipe_compute_wall:0.0);
+    /* QD histogram (Slice 0c): wall-time share of each in-flight bucket for
+     * I/O and compute. The mean inflight over the window is the histogram
+     * weighted average; the share at QD>=2 is the parallel-issue headroom
+     * the disk actually saw. */
+    {
+        double io_d_total=0, io_d_share[PROF_QD_BUCKETS];
+        double cp_d_total=0, cp_d_share[PROF_QD_BUCKETS];
+        int64_t io_d_delta[PROF_QD_BUCKETS], cp_d_delta[PROF_QD_BUCKETS];
+        for(int i=0;i<PROF_QD_BUCKETS;i++){
+            io_d_delta[i]=pipe_io_qd_ns[i]-b->pipe_io_qd_ns[i];
+            cp_d_delta[i]=pipe_compute_qd_ns[i]-b->pipe_compute_qd_ns[i];
+            io_d_total+=io_d_delta[i];
+            cp_d_total+=cp_d_delta[i];
+        }
+        for(int i=0;i<PROF_QD_BUCKETS;i++){
+            io_d_share[i]=io_d_total>0?100.0*io_d_delta[i]/io_d_total:0.0;
+            cp_d_share[i]=cp_d_total>0?100.0*cp_d_delta[i]/cp_d_total:0.0;
+        }
+        double io_mean=0, cp_mean=0;
+        for(int i=0;i<PROF_QD_BUCKETS-1;i++){ io_mean+=io_d_share[i]*i/100.0; cp_mean+=cp_d_share[i]*i/100.0; }
+        io_mean+=io_d_share[PROF_QD_BUCKETS-1]*8.0;
+        cp_mean+=cp_d_share[PROF_QD_BUCKETS-1]*8.0;
+        fprintf(f,"[PROF] PIPE QD histogram: I/O mean %.2f | share QD0 %.0f%% QD1 %.0f%% QD2 %.0f%% QD3 %.0f%% QD4 %.0f%% QD5 %.0f%% QD6 %.0f%% QD7 %.0f%% QD>=8 %.0f%%\n",
+            io_mean,
+            io_d_share[0],io_d_share[1],io_d_share[2],io_d_share[3],io_d_share[4],
+            io_d_share[5],io_d_share[6],io_d_share[7],io_d_share[8]);
+        fprintf(f,"[PROF] compute QD histogram: mean %.2f | share QD0 %.0f%% QD1 %.0f%% QD2 %.0f%% QD3 %.0f%% QD4 %.0f%% QD5 %.0f%% QD6 %.0f%% QD7 %.0f%% QD>=8 %.0f%%\n",
+            cp_mean,
+            cp_d_share[0],cp_d_share[1],cp_d_share[2],cp_d_share[3],cp_d_share[4],
+            cp_d_share[5],cp_d_share[6],cp_d_share[7],cp_d_share[8]);
+    }
     /* DISK-CLASS: per-load cold/warm classification vs. which fd ACTUALLY served it.
      * Three per-class rates, labeled to keep the units unambiguous (ambiguous units
      * mislead -- measured lesson): GB/s-thread = bytes / thread-seconds (per-read
@@ -9587,7 +9786,7 @@ static void prof_report(Model *m, const ProfBase *b, double elapsed, int tokens,
             double ww=dcwall[DC_WARM]>0?(double)dcbytes[DC_WARM]/dcwall[DC_WARM]:0.0;
             double cc=dcwall[DC_COLD]>0?(double)dcns[DC_COLD]/dcwall[DC_COLD]:0.0;
             double wc=dcwall[DC_WARM]>0?(double)dcns[DC_WARM]/dcwall[DC_WARM]:0.0;
-            fprintf(f,"[PROF] DISK-CLASS (recency split): cold %llu x %.2f GB @ %.2f GB/s-thread, wall %.1fs @ %.2f GB/s-wall, avg-conc %.1f (direct %llu/%llu) | "
+        fprintf(f,"[PROF] DISK-CLASS (recency split): cold %llu x %.2f GB @ %.2f GB/s-thread, wall %.1fs @ %.2f GB/s-wall, avg-conc %.1f (direct %llu/%llu) | "
                       "warm %llu x %.2f GB @ %.2f GB/s-thread, wall %.1fs @ %.2f GB/s-wall, avg-conc %.1f (direct %llu/%llu) | "
                       "disk-busy %.1fs (%.0f%% of window)\n",
                 (unsigned long long)dcn[DC_COLD],dcbytes[DC_COLD]/1e9,ct,dcwall[DC_COLD]/1e9,cw,cc,
@@ -9596,6 +9795,27 @@ static void prof_report(Model *m, const ProfBase *b, double elapsed, int tokens,
                 (unsigned long long)dcdn[DC_WARM],(unsigned long long)dcn[DC_WARM],
                 dcwall_all/1e9,100.0*(dcwall_all/1e9)/elapsed);
         }
+    }
+    if(g_mirror){
+        int64_t mir_total=0; uint64_t mir_reads=0;
+        int64_t mir_delta[1+ST_MAX_MIR]={0}; uint64_t mir_read_delta[1+ST_MAX_MIR]={0};
+        for(int r=0;r<g_mir_nrep && r<1+ST_MAX_MIR;r++){
+            int64_t cur=atomic_load_explicit(&g_mir_bytes[r],memory_order_relaxed);
+            uint64_t nr=atomic_load_explicit(&g_mir_nread[r],memory_order_relaxed);
+            /* Replay resets these counters before taking its base snapshot.
+             * Keep this guard for the deliberate zero-based window semantics. */
+            mir_delta[r]=cur>=b->mir_bytes[r]?cur-b->mir_bytes[r]:cur;
+            mir_read_delta[r]=nr>=b->mir_nread[r]?nr-b->mir_nread[r]:nr;
+            mir_total+=mir_delta[r]; mir_reads+=mir_read_delta[r];
+        }
+        fprintf(f,"[PROF] storage source: primary %.3f GB/%llu reads",
+            mir_delta[0]/1e9,(unsigned long long)mir_read_delta[0]);
+        for(int r=1;r<g_mir_nrep && r<1+ST_MAX_MIR;r++)
+            fprintf(f," | mirror%d %.3f GB/%llu reads",r,mir_delta[r]/1e9,
+                (unsigned long long)mir_read_delta[r]);
+        fprintf(f," | mirror share %.1f%% of attributed bytes%s\n",
+            mir_total>0?100.0*(double)(mir_total-mir_delta[0])/(double)mir_total:0.0,
+            mir_reads==0?" (no completed attributed reads)":"");
     }
     fprintf(f,"[PROF] resident experts: %d pinned (%.1f GB) + %d in LRU (%.1f GB, cap %d/layer)\n",
         pinned,pin_b/1e9,lru,lru_b/1e9,m->ecap);
@@ -9655,9 +9875,9 @@ static void run_replay(Model *m, const int *full, int nfull, int np){
     kv_alloc(m,nfull+2);
     float *logit=step(m,full,np-1,0); free(logit);
     m->hits=m->miss=m->ereq=m->gpu_expert_calls=0; m->hit_pin=m->hit_ecache=0; m->hit_vk=0;
+    for(int r=0;r<MIR_REPS;r++){ atomic_store(&g_mir_bytes[r],0); atomic_store(&g_mir_nread[r],0); }
     profile_reset(m);
     ProfBase pb; prof_base(m,&pb);
-    for(int r=0;r<MIR_REPS;r++){ atomic_store(&g_mir_bytes[r],0); atomic_store(&g_mir_nread[r],0); }
     double t0=now_s(); int steps=0;
     for(int i=np-1;i<nfull-1;i++){
         double tf0=g_prof?now_s():0;
@@ -12361,6 +12581,9 @@ int main(int argc, char **argv){
     g_m3_dag_workers = getenv("COLI_M3_DAG_WORKERS")?atoi(getenv("COLI_M3_DAG_WORKERS")):0;
     if(g_m3_dag_workers<0) g_m3_dag_workers=0;
     g_m3_dag_digest = getenv("COLI_M3_DAG_DIGEST")?atoi(getenv("COLI_M3_DAG_DIGEST")):0;
+#ifdef COLI_M3_SHADOW_RUNTIME
+    (void)m3_shd_m3_runtime_init_from_env();
+#endif
     if(g_m3_dag_serial) fprintf(stderr,"[M3_DAG] serial contract requested (CPU S=1 grouped-int4/g64 only)\n");
     if(g_m3_dag_pipe_ready) fprintf(stderr,"[M3_DAG] PIPE ready-first contract requested (requires serial contract and PIPE=1)\n");
     if(g_m3_dag_parallel) fprintf(stderr,"[M3_DAG] bounded parallel-task contract requested (requires serial contract, PIPE=1, OpenMP)\n");
