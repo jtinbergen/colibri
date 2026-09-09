@@ -1,0 +1,48 @@
+# Two-path production-replay fixture.  The profiles are deliberately
+# synthetic and are not a hardware-calibration claim.  Each read sees its
+# drive, its controller, and its upstream resource exactly once.
+resource 101 0 201 64 1073741824
+resource 201 1 301 64 1073741824
+resource 301 2 0 64 1073741824
+resource 102 0 202 64 1073741824
+resource 202 1 302 64 1073741824
+resource 302 2 0 64 1073741824
+
+profile 101 0 0 100000000000 0 0 1
+profile 101 0 1 100000000000 0 0 1
+profile 101 0 2 100000000000 0 0 1
+profile 101 0 3 100000000000 0 0 1
+profile 101 0 4 100000000000 0 0 1
+profile 201 0 0 100000000000 0 0 1
+profile 201 0 1 100000000000 0 0 1
+profile 201 0 2 100000000000 0 0 1
+profile 201 0 3 100000000000 0 0 1
+profile 201 0 4 100000000000 0 0 1
+profile 301 0 0 100000000000 0 0 1
+profile 301 0 1 100000000000 0 0 1
+profile 301 0 2 100000000000 0 0 1
+profile 301 0 3 100000000000 0 0 1
+profile 301 0 4 100000000000 0 0 1
+profile 102 0 0 100000000000 0 0 1
+profile 102 0 1 100000000000 0 0 1
+profile 102 0 2 100000000000 0 0 1
+profile 102 0 3 100000000000 0 0 1
+profile 102 0 4 100000000000 0 0 1
+profile 202 0 0 100000000000 0 0 1
+profile 202 0 1 100000000000 0 0 1
+profile 202 0 2 100000000000 0 0 1
+profile 202 0 3 100000000000 0 0 1
+profile 202 0 4 100000000000 0 0 1
+profile 302 0 0 100000000000 0 0 1
+profile 302 0 1 100000000000 0 0 1
+profile 302 0 2 100000000000 0 0 1
+profile 302 0 3 100000000000 0 0 1
+profile 302 0 4 100000000000 0 0 1
+
+# m3tiny_i8 currently exercises (layer,expert)=(1,1) and (1,0), each 512 B.
+# The explicit model id is supplied by the replay to avoid using a process
+# pointer as a copy identity.
+copy 1001 7 4294967297 512 101 1
+copy 1002 7 4294967297 512 102 1
+copy 1003 7 4294967296 512 101 1
+copy 1004 7 4294967296 512 102 1

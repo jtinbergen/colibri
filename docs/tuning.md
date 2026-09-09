@@ -93,6 +93,7 @@ spin has measured slower there by stealing the shared CPU/GPU power budget.
 
 ```bash
 coli plan --model /models/glm52_i4 --policy quality
+coli profile --model /models/glm52_i4
 coli run --auto-tier --policy quality "Explain MoE offloading"
 # Explicit research-only router reduction:
 coli run --policy experimental-fast --topk 4 "Benchmark prompt"
@@ -100,12 +101,16 @@ coli run --policy experimental-fast --topk 4 "Benchmark prompt"
 
 ## Measured machine profiles
 
-`coli plan` chooses a safe starting point from capacity and topology.
+`coli profile` records the machine picture used by later planning. It is
+read-only: it does not benchmark drives or claim controller/NUMA capacity.
+`coli plan` chooses a safe starting point from capacity and topology and shows
+the profile's evidence status when one is present.
 `coli tune` measures the remaining scheduling choices on the actual model and
 machine, then saves a hardware/model/engine-specific profile:
 
 ```bash
 coli tune --model /models/glm52_i4
+coli profile --model /models/glm52_i4
 coli run --model /models/glm52_i4 --auto-tier "Explain MoE offloading"
 ```
 

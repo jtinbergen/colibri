@@ -1,0 +1,22 @@
+{
+  "topology_hash": 20260907,
+  "sources": [
+    {
+      "drive_id": 101,
+      "controller_id": 201,
+      "upstream_id": 901,
+      "path": "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00002.safetensors"
+    },
+    {
+      "drive_id": 102,
+      "controller_id": 202,
+      "upstream_id": 901,
+      "path": "E:\\Models\\minimax_m3_i4\\out-00002.safetensors"
+    }
+  ],
+  "groups": [
+    {"name": "drive-101", "drive_ids": [101]},
+    {"name": "drive-102", "drive_ids": [102]},
+    {"name": "nvme-pair", "drive_ids": [101, 102]}
+  ]
+}

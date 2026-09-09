@@ -1,0 +1,35 @@
+{
+  "by_drive_path": [
+    {
+      "actual_drive_id": 101,
+      "actual_path": "101|201|301",
+      "deadline_misses": 0,
+      "guarded_deadline_misses": 0,
+      "predicted_deadline_misses": 0,
+      "ready_error_ns_max_abs": 54894,
+      "ready_error_ns_p50": 39994,
+      "ready_error_ns_p95": 54894,
+      "ready_error_ns_p99": 54894,
+      "samples": 2
+    }
+  ],
+  "overall": {
+    "deadline_misses": 0,
+    "guarded_deadline_misses": 0,
+    "predicted_deadline_misses": 0,
+    "ready_error_ns_max_abs": 54894,
+    "ready_error_ns_p50": 39994,
+    "ready_error_ns_p95": 54894,
+    "ready_error_ns_p99": 54894,
+    "samples": 2
+  },
+  "rows_completed": 2,
+  "rows_failed": 0,
+  "rows_incomplete": 0,
+  "rows_incomplete_mapping": 0,
+  "rows_successful": 2,
+  "rows_total": 2,
+  "rows_unknown_prediction": 0,
+  "schema": "m3-shadow-runtime-report-v1",
+  "source": "docs\\results\\m3-execution-step7-runtime-trace-2026-09-07.csv"
+}

@@ -1,0 +1,341 @@
+{
+  "calibration": {
+    "capture": {
+      "cache_condition": "cold",
+      "groups": [
+        {
+          "all_group_drives_active": true,
+          "drive_ids": [
+            101
+          ],
+          "full_matrix_cells": 0,
+          "inflight_levels": [
+            1,
+            2,
+            4,
+            8,
+            16
+          ],
+          "matrix_cells": 0,
+          "max_observed_inflight": 16,
+          "measurement_kinds": [
+            "scalar"
+          ],
+          "name": "controller-201",
+          "target_kind": "controller"
+        },
+        {
+          "all_group_drives_active": true,
+          "drive_ids": [
+            102
+          ],
+          "full_matrix_cells": 0,
+          "inflight_levels": [
+            1,
+            2,
+            4,
+            8,
+            16
+          ],
+          "matrix_cells": 0,
+          "max_observed_inflight": 16,
+          "measurement_kinds": [
+            "scalar"
+          ],
+          "name": "controller-202",
+          "target_kind": "controller"
+        },
+        {
+          "all_group_drives_active": true,
+          "drive_ids": [
+            101
+          ],
+          "full_matrix_cells": 0,
+          "inflight_levels": [
+            1,
+            2,
+            4,
+            8,
+            16
+          ],
+          "matrix_cells": 0,
+          "max_observed_inflight": 16,
+          "measurement_kinds": [
+            "scalar"
+          ],
+          "name": "drive-101",
+          "target_kind": "drive"
+        },
+        {
+          "all_group_drives_active": true,
+          "drive_ids": [
+            102
+          ],
+          "full_matrix_cells": 0,
+          "inflight_levels": [
+            1,
+            2,
+            4,
+            8,
+            16
+          ],
+          "matrix_cells": 0,
+          "max_observed_inflight": 16,
+          "measurement_kinds": [
+            "scalar"
+          ],
+          "name": "drive-102",
+          "target_kind": "drive"
+        },
+        {
+          "all_group_drives_active": true,
+          "drive_ids": [
+            101,
+            102
+          ],
+          "full_matrix_cells": 16,
+          "inflight_levels": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            8,
+            9,
+            10,
+            12,
+            16
+          ],
+          "matrix_cells": 26,
+          "max_observed_inflight": 16,
+          "measurement_kinds": [
+            "contention_matrix"
+          ],
+          "name": "shared-upstream-901",
+          "target_kind": "upstream"
+        }
+      ],
+      "inflight_levels": [
+        1,
+        2,
+        4,
+        8,
+        16
+      ],
+      "io": {
+        "asynchronous": false,
+        "backend": "win32-no-buffering",
+        "cache_protocol": "uncontrolled",
+        "dma_evidence": {
+          "method": null,
+          "status": "NOT_RUN"
+        },
+        "mode": "direct"
+      },
+      "manifest_sha256": "49d2072b4447ec7bb2115aa13cc7ae6318cd7cf92d0f75bc45e7a5fe5ab306ef",
+      "matrix_inflight_levels": [
+        0,
+        1,
+        2,
+        4,
+        8,
+        16
+      ],
+      "max_total_inflight": 16,
+      "memory": {
+        "bytes": 268435456,
+        "bytes_per_s_p50": 8136256906,
+        "bytes_per_s_p95": 12344243762,
+        "duration_ns_p50": 32917200,
+        "duration_ns_p95": 35254000,
+        "kind": "memory_dom",
+        "method": "host_memcpy",
+        "samples": 16,
+        "units": {
+          "bytes": "B",
+          "duration": "ns",
+          "rate": "B/s"
+        }
+      },
+      "memory_method": "host_memcpy",
+      "operations_per_worker": 2,
+      "path": "C:\\Users\\jaapj\\.lmstudio\\models\\colibri-dev\\docs\\results\\m3-machine-A-direct-calibration-v2.json",
+      "quantiles": {
+        "method": "nearest-rank-ceil",
+        "population": "request-completions"
+      },
+      "read_bytes": 31850496,
+      "sample_count": 16,
+      "schema": "m3-shadow-calibration-v2",
+      "source_count": 2,
+      "tool": {
+        "name": "m3_shadow_calibrate",
+        "source_sha256": "2715947ad079db13f508ea71a2d599ece2a99538551d8de656c2999665ebcfc2",
+        "version": 2
+      },
+      "tool_provenance": "VERIFIED",
+      "topology": {
+        "groups": [
+          {
+            "drive_ids": [
+              101
+            ],
+            "kind": "drive",
+            "name": "drive-101",
+            "resource_id": 101
+          },
+          {
+            "drive_ids": [
+              102
+            ],
+            "kind": "drive",
+            "name": "drive-102",
+            "resource_id": 102
+          },
+          {
+            "drive_ids": [
+              101
+            ],
+            "kind": "controller",
+            "name": "controller-201",
+            "resource_id": 201
+          },
+          {
+            "drive_ids": [
+              102
+            ],
+            "kind": "controller",
+            "name": "controller-202",
+            "resource_id": 202
+          },
+          {
+            "drive_ids": [
+              101,
+              102
+            ],
+            "kind": "upstream",
+            "name": "shared-upstream-901",
+            "resource_id": 901,
+            "sweep": "matrix"
+          }
+        ],
+        "islands": [
+          {
+            "cores": 10,
+            "eligible": 1,
+            "isa_bits": 6,
+            "kind": "cpu_island",
+            "parent_mem_id": 500,
+            "resource_id": 400
+          },
+          {
+            "bandwidth_class": 2,
+            "kind": "memory_dom",
+            "measurement": "host_memcpy",
+            "parent_id": 0,
+            "resource_id": 500
+          }
+        ],
+        "manifest_sha256": "49d2072b4447ec7bb2115aa13cc7ae6318cd7cf92d0f75bc45e7a5fe5ab306ef",
+        "sources": [
+          {
+            "controller_id": 201,
+            "drive_id": 101,
+            "path": "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00002.safetensors",
+            "size_bytes": 4526467992,
+            "upstream_id": 901
+          },
+          {
+            "controller_id": 202,
+            "drive_id": 102,
+            "path": "E:\\Models\\minimax_m3_i4\\out-00002.safetensors",
+            "size_bytes": 4526467992,
+            "upstream_id": 901
+          }
+        ],
+        "storage_bounds": {
+          "max_bytes": 31850496,
+          "max_inflight": 1,
+          "policy": "shadow-safe single-request bound; not a measured capacity claim"
+        },
+        "topology_hash": 20260908
+      },
+      "topology_hash": 20260908
+    },
+    "coverage": {
+      "gpu_transfer": "NOT_RUN",
+      "host_memory": "EVIDENCE_ONLY",
+      "numa": "NOT_RUN",
+      "shared_controller": "NOT_RUN",
+      "shared_upstream": "EVIDENCE_ONLY",
+      "storage": "EVIDENCE_ONLY",
+      "to_memory_dma": "NOT_RUN"
+    },
+    "reason": "raw capture is evidence-only, not an admitted planner profile; to-memory DMA remains unmeasured",
+    "status": "EVIDENCE_ONLY"
+  },
+  "cpu": {
+    "logical_cores": 16,
+    "numa": "NOT_RUN",
+    "physical_cores": 10,
+    "sockets": 1
+  },
+  "generated_at_utc": "2026-09-08T00:00:00Z",
+  "gpus": {
+    "devices": [
+      {
+        "free_bytes": 6564085760,
+        "index": 0,
+        "name": "NVIDIA GeForce GTX 1080",
+        "total_bytes": 8589934592,
+        "unified_memory": false
+      }
+    ],
+    "status": "DISCOVERED"
+  },
+  "host": {
+    "machine": "AMD64",
+    "processor": "Intel64 Family 6 Model 151 Stepping 2, GenuineIntel",
+    "python": "3.13.3",
+    "release": "11",
+    "system": "Windows"
+  },
+  "memory": {
+    "available_bytes": 34359738368
+  },
+  "next_actions": [
+    {
+      "id": "calibrate-storage",
+      "reason": "review/promote storage calibration under the declared cache and tail policy",
+      "status": "required"
+    },
+    {
+      "id": "calibrate-contention",
+      "reason": "review/promote shared-controller/upstream envelopes; DMA and admission gates remain open",
+      "status": "required"
+    },
+    {
+      "id": "calibrate-numa",
+      "reason": "measure CPU/memory/link placement before enabling NUMA-sensitive planning",
+      "status": "optional"
+    }
+  ],
+  "planner_contract": {
+    "admission": "NOT_RUN",
+    "cache_condition_required": true,
+    "unknown_is_not_optimistic_capacity": true
+  },
+  "schema": "colibri-machine-profile-v1",
+  "storage": {
+    "free_bytes": 90309283840,
+    "model_path": "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4",
+    "ssd_probe": {
+      "gbs": null,
+      "state": "absent"
+    },
+    "status": "DISCOVERED",
+    "total_bytes": 999226150912
+  },
+  "version": 1
+}

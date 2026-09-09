@@ -1,0 +1,775 @@
+{
+  "host": {
+    "cache_condition": "unknown",
+    "physical_traffic_note": "OS cache state and controller traffic were not flushed or inferred",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "python": "3.13.3",
+    "range_reuse": true
+  },
+  "inflight_levels": [
+    1,
+    2
+  ],
+  "manifest": {
+    "groups": [
+      {
+        "drive_ids": [
+          101
+        ],
+        "kind": "drive",
+        "name": "drive-101",
+        "resource_id": 101
+      },
+      {
+        "drive_ids": [
+          102
+        ],
+        "kind": "drive",
+        "name": "drive-102",
+        "resource_id": 102
+      },
+      {
+        "drive_ids": [
+          101
+        ],
+        "kind": "controller",
+        "name": "controller-201",
+        "resource_id": 201
+      },
+      {
+        "drive_ids": [
+          102
+        ],
+        "kind": "controller",
+        "name": "controller-202",
+        "resource_id": 202
+      },
+      {
+        "drive_ids": [
+          101,
+          102
+        ],
+        "kind": "upstream",
+        "name": "shared-upstream-901",
+        "resource_id": 901,
+        "sweep": "matrix"
+      }
+    ],
+    "islands": [
+      {
+        "cores": 10,
+        "eligible": 1,
+        "isa_bits": 6,
+        "kind": "cpu_island",
+        "parent_mem_id": 500,
+        "resource_id": 400
+      },
+      {
+        "bandwidth_class": 2,
+        "kind": "memory_dom",
+        "measurement": "host_memcpy",
+        "parent_id": 0,
+        "resource_id": 500
+      }
+    ],
+    "storage_bounds": {
+      "max_bytes": 31850496,
+      "max_inflight": 1,
+      "policy": "shadow-safe single-request bound; not a measured capacity claim"
+    },
+    "topology_hash": 20260908
+  },
+  "manifest_sha256": "49d2072b4447ec7bb2115aa13cc7ae6318cd7cf92d0f75bc45e7a5fe5ab306ef",
+  "matrix_inflight_levels": [
+    0,
+    1,
+    2
+  ],
+  "max_total_inflight": 2,
+  "measurements": [
+    {
+      "active_drive_ids": [
+        101
+      ],
+      "all_group_drives_active": true,
+      "drive_ids": [
+        101
+      ],
+      "group": "drive-101",
+      "inflight": 1,
+      "range_reuse": true,
+      "sample_count": 1,
+      "samples": [
+        {
+          "aggregate_bytes_per_s": 55351351,
+          "bytes": 4096,
+          "latency_ns_max": 74000,
+          "latency_ns_p50": 74000,
+          "latency_ns_p95": 74000,
+          "latency_ns_p99": 74000,
+          "sample": 0,
+          "wall_ns": 74000,
+          "worker_latency_ns": [
+            74000
+          ]
+        }
+      ],
+      "summary": {
+        "aggregate_bytes_per_s_p50": 55351351,
+        "aggregate_bytes_per_s_p95": 55351351,
+        "latency_ns_max": 74000,
+        "latency_ns_p50": 74000,
+        "latency_ns_p95": 74000,
+        "latency_ns_p99": 74000
+      },
+      "target_kind": "drive",
+      "target_resource_id": 101
+    },
+    {
+      "active_drive_ids": [
+        101
+      ],
+      "all_group_drives_active": true,
+      "drive_ids": [
+        101
+      ],
+      "group": "drive-101",
+      "inflight": 2,
+      "range_reuse": true,
+      "sample_count": 1,
+      "samples": [
+        {
+          "aggregate_bytes_per_s": 69189189,
+          "bytes": 8192,
+          "latency_ns_max": 118400,
+          "latency_ns_p50": 81900,
+          "latency_ns_p95": 118400,
+          "latency_ns_p99": 118400,
+          "sample": 0,
+          "wall_ns": 118400,
+          "worker_latency_ns": [
+            118400,
+            81900
+          ]
+        }
+      ],
+      "summary": {
+        "aggregate_bytes_per_s_p50": 69189189,
+        "aggregate_bytes_per_s_p95": 69189189,
+        "latency_ns_max": 118400,
+        "latency_ns_p50": 81900,
+        "latency_ns_p95": 118400,
+        "latency_ns_p99": 118400
+      },
+      "target_kind": "drive",
+      "target_resource_id": 101
+    },
+    {
+      "active_drive_ids": [
+        102
+      ],
+      "all_group_drives_active": true,
+      "drive_ids": [
+        102
+      ],
+      "group": "drive-102",
+      "inflight": 1,
+      "range_reuse": true,
+      "sample_count": 1,
+      "samples": [
+        {
+          "aggregate_bytes_per_s": 56574585,
+          "bytes": 4096,
+          "latency_ns_max": 72400,
+          "latency_ns_p50": 72400,
+          "latency_ns_p95": 72400,
+          "latency_ns_p99": 72400,
+          "sample": 0,
+          "wall_ns": 72400,
+          "worker_latency_ns": [
+            72400
+          ]
+        }
+      ],
+      "summary": {
+        "aggregate_bytes_per_s_p50": 56574585,
+        "aggregate_bytes_per_s_p95": 56574585,
+        "latency_ns_max": 72400,
+        "latency_ns_p50": 72400,
+        "latency_ns_p95": 72400,
+        "latency_ns_p99": 72400
+      },
+      "target_kind": "drive",
+      "target_resource_id": 102
+    },
+    {
+      "active_drive_ids": [
+        102
+      ],
+      "all_group_drives_active": true,
+      "drive_ids": [
+        102
+      ],
+      "group": "drive-102",
+      "inflight": 2,
+      "range_reuse": true,
+      "sample_count": 1,
+      "samples": [
+        {
+          "aggregate_bytes_per_s": 73735373,
+          "bytes": 8192,
+          "latency_ns_max": 111100,
+          "latency_ns_p50": 66300,
+          "latency_ns_p95": 111100,
+          "latency_ns_p99": 111100,
+          "sample": 0,
+          "wall_ns": 111100,
+          "worker_latency_ns": [
+            111100,
+            66300
+          ]
+        }
+      ],
+      "summary": {
+        "aggregate_bytes_per_s_p50": 73735373,
+        "aggregate_bytes_per_s_p95": 73735373,
+        "latency_ns_max": 111100,
+        "latency_ns_p50": 66300,
+        "latency_ns_p95": 111100,
+        "latency_ns_p99": 111100
+      },
+      "target_kind": "drive",
+      "target_resource_id": 102
+    },
+    {
+      "active_drive_ids": [
+        101
+      ],
+      "all_group_drives_active": true,
+      "drive_ids": [
+        101
+      ],
+      "group": "controller-201",
+      "inflight": 1,
+      "range_reuse": true,
+      "sample_count": 1,
+      "samples": [
+        {
+          "aggregate_bytes_per_s": 65015873,
+          "bytes": 4096,
+          "latency_ns_max": 63000,
+          "latency_ns_p50": 63000,
+          "latency_ns_p95": 63000,
+          "latency_ns_p99": 63000,
+          "sample": 0,
+          "wall_ns": 63000,
+          "worker_latency_ns": [
+            63000
+          ]
+        }
+      ],
+      "summary": {
+        "aggregate_bytes_per_s_p50": 65015873,
+        "aggregate_bytes_per_s_p95": 65015873,
+        "latency_ns_max": 63000,
+        "latency_ns_p50": 63000,
+        "latency_ns_p95": 63000,
+        "latency_ns_p99": 63000
+      },
+      "target_kind": "controller",
+      "target_resource_id": 201
+    },
+    {
+      "active_drive_ids": [
+        101
+      ],
+      "all_group_drives_active": true,
+      "drive_ids": [
+        101
+      ],
+      "group": "controller-201",
+      "inflight": 2,
+      "range_reuse": true,
+      "sample_count": 1,
+      "samples": [
+        {
+          "aggregate_bytes_per_s": 75502304,
+          "bytes": 8192,
+          "latency_ns_max": 108500,
+          "latency_ns_p50": 77000,
+          "latency_ns_p95": 108500,
+          "latency_ns_p99": 108500,
+          "sample": 0,
+          "wall_ns": 108500,
+          "worker_latency_ns": [
+            77000,
+            108500
+          ]
+        }
+      ],
+      "summary": {
+        "aggregate_bytes_per_s_p50": 75502304,
+        "aggregate_bytes_per_s_p95": 75502304,
+        "latency_ns_max": 108500,
+        "latency_ns_p50": 77000,
+        "latency_ns_p95": 108500,
+        "latency_ns_p99": 108500
+      },
+      "target_kind": "controller",
+      "target_resource_id": 201
+    },
+    {
+      "active_drive_ids": [
+        102
+      ],
+      "all_group_drives_active": true,
+      "drive_ids": [
+        102
+      ],
+      "group": "controller-202",
+      "inflight": 1,
+      "range_reuse": true,
+      "sample_count": 1,
+      "samples": [
+        {
+          "aggregate_bytes_per_s": 75992578,
+          "bytes": 4096,
+          "latency_ns_max": 53900,
+          "latency_ns_p50": 53900,
+          "latency_ns_p95": 53900,
+          "latency_ns_p99": 53900,
+          "sample": 0,
+          "wall_ns": 53900,
+          "worker_latency_ns": [
+            53900
+          ]
+        }
+      ],
+      "summary": {
+        "aggregate_bytes_per_s_p50": 75992578,
+        "aggregate_bytes_per_s_p95": 75992578,
+        "latency_ns_max": 53900,
+        "latency_ns_p50": 53900,
+        "latency_ns_p95": 53900,
+        "latency_ns_p99": 53900
+      },
+      "target_kind": "controller",
+      "target_resource_id": 202
+    },
+    {
+      "active_drive_ids": [
+        102
+      ],
+      "all_group_drives_active": true,
+      "drive_ids": [
+        102
+      ],
+      "group": "controller-202",
+      "inflight": 2,
+      "range_reuse": true,
+      "sample_count": 1,
+      "samples": [
+        {
+          "aggregate_bytes_per_s": 73077609,
+          "bytes": 8192,
+          "latency_ns_max": 112100,
+          "latency_ns_p50": 64900,
+          "latency_ns_p95": 112100,
+          "latency_ns_p99": 112100,
+          "sample": 0,
+          "wall_ns": 112100,
+          "worker_latency_ns": [
+            112100,
+            64900
+          ]
+        }
+      ],
+      "summary": {
+        "aggregate_bytes_per_s_p50": 73077609,
+        "aggregate_bytes_per_s_p95": 73077609,
+        "latency_ns_max": 112100,
+        "latency_ns_p50": 64900,
+        "latency_ns_p95": 112100,
+        "latency_ns_p99": 112100
+      },
+      "target_kind": "controller",
+      "target_resource_id": 202
+    },
+    {
+      "active_drive_ids": [
+        102
+      ],
+      "all_group_drives_active": false,
+      "drive_ids": [
+        101,
+        102
+      ],
+      "group": "shared-upstream-901",
+      "inflight": 1,
+      "measurement_kind": "contention_matrix",
+      "queue_depths": {
+        "101": 0,
+        "102": 1
+      },
+      "range_reuse": true,
+      "sample_count": 1,
+      "samples": [
+        {
+          "aggregate_bytes_per_s": 66385737,
+          "bytes": 4096,
+          "fairness_jain": 1.0,
+          "latency_ns_max": 61700,
+          "latency_ns_p50": 61700,
+          "latency_ns_p95": 61700,
+          "latency_ns_p99": 61700,
+          "per_drive": {
+            "102": {
+              "aggregate_bytes_per_s": 66385737,
+              "bytes": 4096,
+              "inflight": 1,
+              "latency_ns_max": 61700,
+              "latency_ns_p50": 61700,
+              "latency_ns_p95": 61700,
+              "latency_ns_p99": 61700
+            }
+          },
+          "sample": 0,
+          "wall_ns": 61700,
+          "worker_latency_ns": [
+            61700
+          ]
+        }
+      ],
+      "summary": {
+        "aggregate_bytes_per_s_p50": 66385737,
+        "aggregate_bytes_per_s_p95": 66385737,
+        "fairness_jain_p50": 1.0,
+        "latency_ns_max": 61700,
+        "latency_ns_p50": 61700,
+        "latency_ns_p95": 61700,
+        "latency_ns_p99": 61700,
+        "per_drive": {
+          "102": {
+            "aggregate_bytes_per_s_p50": 66385737,
+            "inflight": 1,
+            "latency_ns_max": 61700,
+            "latency_ns_p50": 61700,
+            "latency_ns_p95": 61700,
+            "latency_ns_p99": 61700
+          }
+        }
+      },
+      "target_kind": "upstream",
+      "target_resource_id": 901
+    },
+    {
+      "active_drive_ids": [
+        101
+      ],
+      "all_group_drives_active": false,
+      "drive_ids": [
+        101,
+        102
+      ],
+      "group": "shared-upstream-901",
+      "inflight": 1,
+      "measurement_kind": "contention_matrix",
+      "queue_depths": {
+        "101": 1,
+        "102": 0
+      },
+      "range_reuse": true,
+      "sample_count": 1,
+      "samples": [
+        {
+          "aggregate_bytes_per_s": 53612565,
+          "bytes": 4096,
+          "fairness_jain": 1.0,
+          "latency_ns_max": 76400,
+          "latency_ns_p50": 76400,
+          "latency_ns_p95": 76400,
+          "latency_ns_p99": 76400,
+          "per_drive": {
+            "101": {
+              "aggregate_bytes_per_s": 53612565,
+              "bytes": 4096,
+              "inflight": 1,
+              "latency_ns_max": 76400,
+              "latency_ns_p50": 76400,
+              "latency_ns_p95": 76400,
+              "latency_ns_p99": 76400
+            }
+          },
+          "sample": 0,
+          "wall_ns": 76400,
+          "worker_latency_ns": [
+            76400
+          ]
+        }
+      ],
+      "summary": {
+        "aggregate_bytes_per_s_p50": 53612565,
+        "aggregate_bytes_per_s_p95": 53612565,
+        "fairness_jain_p50": 1.0,
+        "latency_ns_max": 76400,
+        "latency_ns_p50": 76400,
+        "latency_ns_p95": 76400,
+        "latency_ns_p99": 76400,
+        "per_drive": {
+          "101": {
+            "aggregate_bytes_per_s_p50": 53612565,
+            "inflight": 1,
+            "latency_ns_max": 76400,
+            "latency_ns_p50": 76400,
+            "latency_ns_p95": 76400,
+            "latency_ns_p99": 76400
+          }
+        }
+      },
+      "target_kind": "upstream",
+      "target_resource_id": 901
+    },
+    {
+      "active_drive_ids": [
+        102
+      ],
+      "all_group_drives_active": false,
+      "drive_ids": [
+        101,
+        102
+      ],
+      "group": "shared-upstream-901",
+      "inflight": 2,
+      "measurement_kind": "contention_matrix",
+      "queue_depths": {
+        "101": 0,
+        "102": 2
+      },
+      "range_reuse": true,
+      "sample_count": 1,
+      "samples": [
+        {
+          "aggregate_bytes_per_s": 92148481,
+          "bytes": 8192,
+          "fairness_jain": 1.0,
+          "latency_ns_max": 88900,
+          "latency_ns_p50": 77100,
+          "latency_ns_p95": 88900,
+          "latency_ns_p99": 88900,
+          "per_drive": {
+            "102": {
+              "aggregate_bytes_per_s": 92148481,
+              "bytes": 8192,
+              "inflight": 2,
+              "latency_ns_max": 88900,
+              "latency_ns_p50": 77100,
+              "latency_ns_p95": 88900,
+              "latency_ns_p99": 88900
+            }
+          },
+          "sample": 0,
+          "wall_ns": 88900,
+          "worker_latency_ns": [
+            77100,
+            88900
+          ]
+        }
+      ],
+      "summary": {
+        "aggregate_bytes_per_s_p50": 92148481,
+        "aggregate_bytes_per_s_p95": 92148481,
+        "fairness_jain_p50": 1.0,
+        "latency_ns_max": 88900,
+        "latency_ns_p50": 77100,
+        "latency_ns_p95": 88900,
+        "latency_ns_p99": 88900,
+        "per_drive": {
+          "102": {
+            "aggregate_bytes_per_s_p50": 92148481,
+            "inflight": 2,
+            "latency_ns_max": 88900,
+            "latency_ns_p50": 77100,
+            "latency_ns_p95": 88900,
+            "latency_ns_p99": 88900
+          }
+        }
+      },
+      "target_kind": "upstream",
+      "target_resource_id": 901
+    },
+    {
+      "active_drive_ids": [
+        101,
+        102
+      ],
+      "all_group_drives_active": true,
+      "drive_ids": [
+        101,
+        102
+      ],
+      "group": "shared-upstream-901",
+      "inflight": 2,
+      "measurement_kind": "contention_matrix",
+      "queue_depths": {
+        "101": 1,
+        "102": 1
+      },
+      "range_reuse": true,
+      "sample_count": 1,
+      "samples": [
+        {
+          "aggregate_bytes_per_s": 108791500,
+          "bytes": 8192,
+          "fairness_jain": 1.0,
+          "latency_ns_max": 75300,
+          "latency_ns_p50": 62700,
+          "latency_ns_p95": 75300,
+          "latency_ns_p99": 75300,
+          "per_drive": {
+            "101": {
+              "aggregate_bytes_per_s": 54395750,
+              "bytes": 4096,
+              "inflight": 1,
+              "latency_ns_max": 62700,
+              "latency_ns_p50": 62700,
+              "latency_ns_p95": 62700,
+              "latency_ns_p99": 62700
+            },
+            "102": {
+              "aggregate_bytes_per_s": 54395750,
+              "bytes": 4096,
+              "inflight": 1,
+              "latency_ns_max": 75300,
+              "latency_ns_p50": 75300,
+              "latency_ns_p95": 75300,
+              "latency_ns_p99": 75300
+            }
+          },
+          "sample": 0,
+          "wall_ns": 75300,
+          "worker_latency_ns": [
+            62700,
+            75300
+          ]
+        }
+      ],
+      "summary": {
+        "aggregate_bytes_per_s_p50": 108791500,
+        "aggregate_bytes_per_s_p95": 108791500,
+        "fairness_jain_p50": 1.0,
+        "latency_ns_max": 75300,
+        "latency_ns_p50": 62700,
+        "latency_ns_p95": 75300,
+        "latency_ns_p99": 75300,
+        "per_drive": {
+          "101": {
+            "aggregate_bytes_per_s_p50": 54395750,
+            "inflight": 1,
+            "latency_ns_max": 62700,
+            "latency_ns_p50": 62700,
+            "latency_ns_p95": 62700,
+            "latency_ns_p99": 62700
+          },
+          "102": {
+            "aggregate_bytes_per_s_p50": 54395750,
+            "inflight": 1,
+            "latency_ns_max": 75300,
+            "latency_ns_p50": 75300,
+            "latency_ns_p95": 75300,
+            "latency_ns_p99": 75300
+          }
+        }
+      },
+      "target_kind": "upstream",
+      "target_resource_id": 901
+    },
+    {
+      "active_drive_ids": [
+        101
+      ],
+      "all_group_drives_active": false,
+      "drive_ids": [
+        101,
+        102
+      ],
+      "group": "shared-upstream-901",
+      "inflight": 2,
+      "measurement_kind": "contention_matrix",
+      "queue_depths": {
+        "101": 2,
+        "102": 0
+      },
+      "range_reuse": true,
+      "sample_count": 1,
+      "samples": [
+        {
+          "aggregate_bytes_per_s": 64402515,
+          "bytes": 8192,
+          "fairness_jain": 1.0,
+          "latency_ns_max": 127200,
+          "latency_ns_p50": 79200,
+          "latency_ns_p95": 127200,
+          "latency_ns_p99": 127200,
+          "per_drive": {
+            "101": {
+              "aggregate_bytes_per_s": 64402515,
+              "bytes": 8192,
+              "inflight": 2,
+              "latency_ns_max": 127200,
+              "latency_ns_p50": 79200,
+              "latency_ns_p95": 127200,
+              "latency_ns_p99": 127200
+            }
+          },
+          "sample": 0,
+          "wall_ns": 127200,
+          "worker_latency_ns": [
+            127200,
+            79200
+          ]
+        }
+      ],
+      "summary": {
+        "aggregate_bytes_per_s_p50": 64402515,
+        "aggregate_bytes_per_s_p95": 64402515,
+        "fairness_jain_p50": 1.0,
+        "latency_ns_max": 127200,
+        "latency_ns_p50": 79200,
+        "latency_ns_p95": 127200,
+        "latency_ns_p99": 127200,
+        "per_drive": {
+          "101": {
+            "aggregate_bytes_per_s_p50": 64402515,
+            "inflight": 2,
+            "latency_ns_max": 127200,
+            "latency_ns_p50": 79200,
+            "latency_ns_p95": 127200,
+            "latency_ns_p99": 127200
+          }
+        }
+      },
+      "target_kind": "upstream",
+      "target_resource_id": 901
+    }
+  ],
+  "read_bytes": 4096,
+  "sample_count": 1,
+  "schema": "m3-shadow-calibration-v1",
+  "sources": [
+    {
+      "controller_id": 201,
+      "drive_id": 101,
+      "path": "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00002.safetensors",
+      "size_bytes": 4526467992,
+      "upstream_id": 901
+    },
+    {
+      "controller_id": 202,
+      "drive_id": 102,
+      "path": "E:\\Models\\minimax_m3_i4\\out-00002.safetensors",
+      "size_bytes": 4526467992,
+      "upstream_id": 901
+    }
+  ],
+  "topology_hash": 20260908
+}

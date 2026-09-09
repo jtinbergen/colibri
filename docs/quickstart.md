@@ -188,6 +188,7 @@ Useful first commands:
 
 ```bash
 COLI_MODEL=/nvme/glm52_i4 ./coli doctor   # read-only check: is everything ready?
+COLI_MODEL=/nvme/glm52_i4 ./coli profile  # save machine evidence; no benchmark
 COLI_MODEL=/nvme/glm52_i4 ./coli plan     # shows where the model will live (RAM/disk/GPU)
 COLI_MODEL=/nvme/glm52_i4 ./coli chat --topp 0.85   # faster: reads less from disk, same quality
 ```

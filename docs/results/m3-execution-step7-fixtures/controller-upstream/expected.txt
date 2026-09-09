@@ -1,0 +1,3 @@
+independent controller groups remain planable with upstream capacity=8
+the same candidate defers when upstream max_inflight=1 is occupied
+real occupancy is unchanged by the hypothetical decision

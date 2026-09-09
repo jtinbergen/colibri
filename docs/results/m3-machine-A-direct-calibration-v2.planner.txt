@@ -1,0 +1,44 @@
+# planner text dump -- m3-shadow-calibration-v2 emitter
+# topology_hash = 20260908
+# manifest_sha256 = 49d2072b4447ec7bb2115aa13cc7ae6318cd7cf92d0f75bc45e7a5fe5ab306ef
+# capture_schema = m3-shadow-calibration-v2
+# calibrator_tool = m3_shadow_calibrate/2
+# calibrator_source_sha256 = 2715947ad079db13f508ea71a2d599ece2a99538551d8de656c2999665ebcfc2
+# quantiles = nearest-rank-ceil/request-completions
+# cache_condition = cold
+# io_mode = direct
+# io_backend = win32-no-buffering
+# asynchronous = False
+# range_reuse = True
+# configuration_status = shadow_only
+# host_memory_method = host_memcpy
+# physical_traffic_note: direct/unbuffered reads; OS page cache bypass requested; range reuse enabled
+resource 101 0 201 1 31850496
+resource 201 1 901 1 31850496
+resource 901 2 0 1 31850496
+resource 102 0 202 1 31850496
+resource 202 1 901 1 31850496
+profile 101 3 0 2965429864 0 4303700 16 950000
+profile 101 3 1 3469458457 0 11043000 16 950000
+profile 101 3 2 4468880867 0 5343200 16 950000
+profile 101 3 3 5245103233 0 14487400 16 950000
+profile 102 3 0 2363971410 0 11324600 16 950000
+profile 102 3 1 2737143446 0 2526400 16 950000
+profile 102 3 2 2992912123 0 3015900 16 950000
+profile 102 3 3 3108574774 0 12953100 16 950000
+profile 201 3 0 3108517889 0 7064500 16 950000
+profile 201 3 1 3381120794 0 13149000 16 950000
+profile 201 3 2 4513239598 0 5889500 16 950000
+profile 201 3 3 5191298150 0 15104000 16 950000
+profile 202 3 0 2364287273 0 11434200 16 950000
+profile 202 3 1 2776573926 0 1179500 16 950000
+profile 202 3 2 3013135172 0 4844800 16 950000
+profile 202 3 3 3105294005 0 12736200 16 950000
+profile 901 3 0 2621181117 0 3962700 16 950000
+profile 901 3 1 2986219631 0 8908900 16 950000
+profile 901 3 2 3155830553 0 18899000 16 950000
+profile 901 3 3 3047013235 0 74652600 16 950000
+profile 901 3 4 3909672145 0 18184900 16 950000
+memory_dom 500 0 8136256906 2
+profile 500 3 0 8136256906 0 2336800 16 950000
+cpu_island 400 500 6 10 1

@@ -1,0 +1,2 @@
+m3 shadow planner fixtures: PASS
+covered by test_shared_bandwidth in c/tests/test_m3_shadow_plan.c

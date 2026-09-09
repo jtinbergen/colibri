@@ -1,0 +1,194 @@
+{
+  "calibration": {
+    "capture": {
+      "cache_condition": "unknown",
+      "groups": [
+        {
+          "all_group_drives_active": true,
+          "drive_ids": [
+            101
+          ],
+          "inflight_levels": [
+            1,
+            2,
+            4,
+            8,
+            16
+          ],
+          "max_observed_inflight": 16,
+          "name": "controller-201",
+          "target_kind": "controller"
+        },
+        {
+          "all_group_drives_active": true,
+          "drive_ids": [
+            102
+          ],
+          "inflight_levels": [
+            1,
+            2,
+            4,
+            8,
+            16
+          ],
+          "max_observed_inflight": 16,
+          "name": "controller-202",
+          "target_kind": "controller"
+        },
+        {
+          "all_group_drives_active": true,
+          "drive_ids": [
+            101
+          ],
+          "inflight_levels": [
+            1,
+            2,
+            4,
+            8,
+            16
+          ],
+          "max_observed_inflight": 16,
+          "name": "drive-101",
+          "target_kind": "drive"
+        },
+        {
+          "all_group_drives_active": true,
+          "drive_ids": [
+            102
+          ],
+          "inflight_levels": [
+            1,
+            2,
+            4,
+            8,
+            16
+          ],
+          "max_observed_inflight": 16,
+          "name": "drive-102",
+          "target_kind": "drive"
+        },
+        {
+          "all_group_drives_active": true,
+          "drive_ids": [
+            101,
+            102
+          ],
+          "inflight_levels": [
+            1,
+            2,
+            4,
+            8,
+            16
+          ],
+          "max_observed_inflight": 16,
+          "name": "shared-upstream-901",
+          "target_kind": "upstream"
+        }
+      ],
+      "inflight_levels": [
+        1,
+        2,
+        4,
+        8,
+        16
+      ],
+      "manifest_sha256": "283348c0e1c7764e183594bdae99121ee376bb5b9bf722e7ff3fb4615d608150",
+      "memory": {
+        "bytes": 268435456,
+        "bytes_per_s_p50": 8285812143,
+        "bytes_per_s_p95": 8439880272,
+        "duration_ns_p50": 32403200,
+        "duration_ns_p95": 34790500,
+        "kind": "memory_dom",
+        "method": "host_memcpy",
+        "samples": 16,
+        "units": {
+          "bytes": "B",
+          "duration": "ns",
+          "rate": "B/s"
+        }
+      },
+      "memory_method": "host_memcpy",
+      "path": "C:\\Users\\jaapj\\.lmstudio\\models\\colibri-dev\\docs\\results\\m3-machine-A-calibration-2026-09-08.json",
+      "read_bytes": 31850496,
+      "sample_count": 16,
+      "schema": "m3-shadow-calibration-v1",
+      "source_count": 2,
+      "topology_hash": 20260908
+    },
+    "coverage": {
+      "gpu_transfer": "NOT_RUN",
+      "host_memory": "EVIDENCE_ONLY",
+      "numa": "NOT_RUN",
+      "shared_controller": "NOT_RUN",
+      "shared_upstream": "EVIDENCE_ONLY",
+      "storage": "EVIDENCE_ONLY",
+      "to_memory_dma": "NOT_RUN"
+    },
+    "reason": "raw capture is evidence-only, not an admitted planner profile; to-memory DMA remains unmeasured",
+    "status": "EVIDENCE_ONLY"
+  },
+  "cpu": {
+    "logical_cores": 16,
+    "numa": "NOT_RUN",
+    "physical_cores": 10,
+    "sockets": 1
+  },
+  "generated_at_utc": "2026-09-08T16:39:57Z",
+  "gpus": {
+    "devices": [
+      {
+        "free_bytes": 6874464256,
+        "index": 0,
+        "name": "NVIDIA GeForce GTX 1080",
+        "total_bytes": 8589934592,
+        "unified_memory": false
+      }
+    ],
+    "status": "DISCOVERED"
+  },
+  "host": {
+    "machine": "AMD64",
+    "processor": "Intel64 Family 6 Model 151 Stepping 2, GenuineIntel",
+    "python": "3.13.3",
+    "release": "11",
+    "system": "Windows"
+  },
+  "memory": {
+    "available_bytes": 34359738368
+  },
+  "next_actions": [
+    {
+      "id": "calibrate-storage",
+      "reason": "measure representative expert reads with explicit cache condition and tail units",
+      "status": "required"
+    },
+    {
+      "id": "calibrate-contention",
+      "reason": "measure simultaneous drives within controller and shared-upstream groups",
+      "status": "required"
+    },
+    {
+      "id": "calibrate-numa",
+      "reason": "measure CPU/memory/link placement before enabling NUMA-sensitive planning",
+      "status": "optional"
+    }
+  ],
+  "planner_contract": {
+    "admission": "NOT_RUN",
+    "cache_condition_required": true,
+    "unknown_is_not_optimistic_capacity": true
+  },
+  "schema": "colibri-machine-profile-v1",
+  "storage": {
+    "free_bytes": 90897940480,
+    "model_path": "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4",
+    "ssd_probe": {
+      "gbs": null,
+      "state": "absent"
+    },
+    "status": "DISCOVERED",
+    "total_bytes": 999226150912
+  },
+  "version": 1
+}

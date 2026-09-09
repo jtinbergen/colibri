@@ -1,0 +1,133 @@
+{
+  "topology_hash": 18437471596682960890,
+  "topology_hash_algorithm": "sha256-trunc64-v1",
+  "active_admission": false,
+  "profile_status": "raw_only",
+  "storage_bounds": {
+    "max_inflight": 1,
+    "max_bytes": 31850496,
+    "policy": "shadow-safe single-request bound; not a measured capacity claim"
+  },
+  "sources": [
+    {
+      "drive_id": 101,
+      "controller_id": 201,
+      "upstream_id": 901,
+      "platform": {
+        "windows_volume": "C:",
+        "windows_pci_instance_id": "PCI\\VEN_144D&DEV_A80A&SUBSYS_A801144D&REV_00\\4&21705936&0&00EC",
+        "windows_pci_parent_id": "PCI\\VEN_8086&DEV_7AB4&SUBSYS_50011458&REV_11\\3&11583659&0&EC",
+        "device_model": "Samsung SSD 980 PRO 1TB"
+      },
+      "paths": [
+        "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00002.safetensors",
+        "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00003.safetensors",
+        "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00004.safetensors",
+        "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00005.safetensors",
+        "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00006.safetensors",
+        "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00007.safetensors",
+        "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00008.safetensors",
+        "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00009.safetensors",
+        "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00010.safetensors",
+        "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00011.safetensors",
+        "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00012.safetensors",
+        "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00013.safetensors",
+        "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00014.safetensors",
+        "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00015.safetensors",
+        "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00016.safetensors",
+        "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00017.safetensors",
+        "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00018.safetensors",
+        "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00019.safetensors"
+      ]
+    },
+    {
+      "drive_id": 102,
+      "controller_id": 202,
+      "upstream_id": 901,
+      "platform": {
+        "windows_volume": "E:",
+        "windows_pci_instance_id": "PCI\\VEN_144D&DEV_A80B&SUBSYS_A80B144D&REV_02\\4&1E1F98A2&0&00E8",
+        "windows_pci_parent_id": "PCI\\VEN_8086&DEV_7AB0&SUBSYS_50011458&REV_11\\3&11583659&0&E8",
+        "device_model": "SAMSUNG MZAL4512HBLU-00BL2"
+      },
+      "paths": [
+        "E:\\Models\\minimax_m3_i4\\out-00002.safetensors",
+        "E:\\Models\\minimax_m3_i4\\out-00003.safetensors",
+        "E:\\Models\\minimax_m3_i4\\out-00004.safetensors",
+        "E:\\Models\\minimax_m3_i4\\out-00005.safetensors",
+        "E:\\Models\\minimax_m3_i4\\out-00006.safetensors",
+        "E:\\Models\\minimax_m3_i4\\out-00007.safetensors",
+        "E:\\Models\\minimax_m3_i4\\out-00008.safetensors",
+        "E:\\Models\\minimax_m3_i4\\out-00009.safetensors",
+        "E:\\Models\\minimax_m3_i4\\out-00010.safetensors",
+        "E:\\Models\\minimax_m3_i4\\out-00011.safetensors",
+        "E:\\Models\\minimax_m3_i4\\out-00012.safetensors",
+        "E:\\Models\\minimax_m3_i4\\out-00013.safetensors",
+        "E:\\Models\\minimax_m3_i4\\out-00014.safetensors",
+        "E:\\Models\\minimax_m3_i4\\out-00015.safetensors",
+        "E:\\Models\\minimax_m3_i4\\out-00016.safetensors",
+        "E:\\Models\\minimax_m3_i4\\out-00017.safetensors",
+        "E:\\Models\\minimax_m3_i4\\out-00018.safetensors",
+        "E:\\Models\\minimax_m3_i4\\out-00019.safetensors"
+      ]
+    }
+  ],
+  "groups": [
+    {"name": "drive-101", "drive_ids": [101], "resource_id": 101, "kind": "drive"},
+    {"name": "drive-102", "drive_ids": [102], "resource_id": 102, "kind": "drive"},
+    {"name": "controller-201", "drive_ids": [101], "resource_id": 201, "kind": "controller"},
+    {"name": "controller-202", "drive_ids": [102], "resource_id": 202, "kind": "controller"},
+    {"name": "shared-upstream-901", "drive_ids": [101, 102], "resource_id": 901, "kind": "upstream", "sweep": "matrix"}
+  ],
+  "islands": [
+    {
+      "kind": "cpu_island",
+      "resource_id": 400,
+      "parent_mem_id": 500,
+      "isa_bits": 6,
+      "cores": 10,
+      "eligible": 1
+    },
+    {
+      "kind": "memory_dom",
+      "resource_id": 500,
+      "parent_id": 0,
+      "bandwidth_class": 2,
+      "measurement": "host_memcpy"
+    },
+    {
+      "kind": "link",
+      "resource_id": 600,
+      "parent_cpu_id": 400,
+      "pcie_parent_id": 901,
+      "rate_status": "NOT_RUN",
+      "status": "NOT_RUN",
+      "reason": "PCH/DMI link capacity was not independently measured"
+    },
+    {
+      "kind": "gpu_island",
+      "resource_id": 700,
+      "parent_link_id": 600,
+      "vram_bytes": 8589934592,
+      "p2p_class": 0,
+      "pcie_parent_id": 901,
+      "eligible": 0,
+      "platform": {
+        "windows_pci_instance_id": "PCI\\VEN_10DE&DEV_1B80&SUBSYS_33621462&REV_A1\\4&AA66160&0&0008"
+      },
+      "status": "NOT_RUN",
+      "reason": "GTX 1080 is not eligible for the expert-compute tier"
+    },
+    {
+      "kind": "gpu_island",
+      "resource_id": 701,
+      "parent_link_id": 600,
+      "vram_bytes": 536870912,
+      "p2p_class": 0,
+      "pcie_parent_id": 901,
+      "eligible": 0,
+      "status": "NOT_RUN",
+      "reason": "Intel UHD Graphics 770 has no expert-compute backend"
+    }
+  ]
+}

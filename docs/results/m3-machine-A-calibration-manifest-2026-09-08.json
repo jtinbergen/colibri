@@ -1,0 +1,66 @@
+{
+  "topology_hash": 20260908,
+  "storage_bounds": {
+    "max_inflight": 1,
+    "max_bytes": 31850496,
+    "policy": "shadow-safe single-request bound; not a measured capacity claim"
+  },
+  "sources": [
+    {
+      "drive_id": 101,
+      "controller_id": 201,
+      "upstream_id": 901,
+      "path": "C:\\Users\\jaapj\\.lmstudio\\models\\minimax_m3_i4\\out-00002.safetensors"
+    },
+    {
+      "drive_id": 102,
+      "controller_id": 202,
+      "upstream_id": 901,
+      "path": "E:\\Models\\minimax_m3_i4\\out-00002.safetensors"
+    }
+  ],
+  "groups": [
+    {"name": "drive-101", "drive_ids": [101], "resource_id": 101, "kind": "drive"},
+    {"name": "drive-102", "drive_ids": [102], "resource_id": 102, "kind": "drive"},
+    {"name": "controller-201", "drive_ids": [101], "resource_id": 201, "kind": "controller"},
+    {"name": "controller-202", "drive_ids": [102], "resource_id": 202, "kind": "controller"},
+    {"name": "shared-upstream-901", "drive_ids": [101, 102], "resource_id": 901, "kind": "upstream", "sweep": "matrix"}
+  ],
+  "islands": [
+    {
+      "kind": "cpu_island",
+      "resource_id": 400,
+      "parent_mem_id": 500,
+      "isa_bits": 6,
+      "cores": 10,
+      "eligible": 1
+    },
+    {
+      "kind": "memory_dom",
+      "resource_id": 500,
+      "parent_id": 0,
+      "bandwidth_class": 2,
+      "measurement": "host_memcpy"
+    },
+    {
+      "kind": "link",
+      "resource_id": 600,
+      "parent_cpu_id": 400,
+      "pcie_parent_id": 901,
+      "rate_status": "NOT_RUN",
+      "status": "NOT_RUN",
+      "reason": "PCH/DMI link capacity was not independently measured"
+    },
+    {
+      "kind": "gpu_island",
+      "resource_id": 700,
+      "parent_link_id": 600,
+      "vram_bytes": 8589934592,
+      "p2p_class": 0,
+      "pcie_parent_id": 901,
+      "eligible": 0,
+      "status": "NOT_RUN",
+      "reason": "GTX 1080 is not eligible for the expert-compute tier"
+    }
+  ]
+}

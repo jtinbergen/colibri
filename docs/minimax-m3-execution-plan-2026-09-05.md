@@ -530,14 +530,96 @@ Werkpakketten, in deze volgorde:
 - Afsluiting: finale diff/evidence is vastgelegd in
   [`results/m3-execution-step6a-gate-2026-09-06.md`](results/m3-execution-step6a-gate-2026-09-06.md)
   en CI-run `34054894622`. De actuele 6/6a-gaterecords spreken elkaar niet
-  tegen. Step 7 mag nu beginnen; Step 7 zelf blijft `NIET GEÏMPLEMENTEERD /
-  NIET GEGATED`.
+  tegen. Step 7 mag nu beginnen; de eerste bounded-planner-slice staat nu in
+  de werkboom, en een transparante `shadow-auto` store-boundary is gekoppeld;
+  de live topology-snapshot en lokale bounded-read kalibratie-evidence zijn
+  nu vastgelegd; volledige kalibratieprofielen, runtime-evidence en Gate-7-
+  approval ontbreken nog. Het rapport staat in
+  [`results/m3-execution-step7-calibration-2026-09-07.md`](results/m3-execution-step7-calibration-2026-09-07.md)
+  met ruwe JSON-captures voor 64 KiB, 1 MiB en 16 MiB. De capture bevat
+  beide NVMe's, inflight 1/2/4, p50/p95/p99/max-latency en bytes-per-second per
+sample. De captures zijn bewijs voor 7b-instrumentatie, geen automatische
+promotie van `max_inflight` of plannerprofielen. De aanvullende p99-capture
+staat in `results/m3-execution-step7-calibration-p99-2026-09-07.json`.
+Een 16-sample vervolgmatrix staat in
+`results/m3-execution-step7-calibration-p99-16-2026-09-07.json`; de
+bijbehorende 2x-review blijft een expliciete gevoeligheidsanalyse en geen
+automatische queue-depthkeuze.
 
 ## Stap 7 — planner in shadow mode
 
-**Status: NIET GEÏMPLEMENTEERD / NIET GEGATED in deze checkout.**
-De onderstaande opslagtopologie- en contentiontekst is een uitvoeringscontract,
-geen implementatie-evidence. Begin uitvoering pas na afsluiting van 6a C/M.
+**Status: C/M afgerond binnen de bounded shadow-scope; Gate 7 als geheel
+blijft NIET GEGATED en P blijft `NOT_RUN`/`NOT_PROMOTED`.** De dependency voor
+Step 8 is daarmee alleen voor shadow-only voorbereiding vervuld. Actieve
+plannerbeslissingen blijven ineligible totdat echte contention-kalibratie,
+held-out performance en de overige expliciete Gate-7-evidence beschikbaar zijn.
+De bounded, observer-only planner-slice staat in `c/m3_shadow_plan.*`, met
+een transparante store-adapter, deterministische fixtures en
+sanitizer-workflow. De opt-in M3-runtime seam staat in
+`c/m3_shadow_m3_runtime.*` en is onder `COLI_M3_SHADOW_RUNTIME` gekoppeld aan
+de echte `expert_load()`-route; zie
+[`results/m3-execution-step7-gate-2026-09-06.md`](results/m3-execution-step7-gate-2026-09-06.md).
+De opslagtopologie- en contentiontekst blijft een uitvoeringscontract totdat
+de live seam volledige tensor-/replica-mappings, echte kalibratie en Gate-7-
+evidence heeft. De tiny fixture bewijst dat de observer transparant kan
+meelopen, een echte beslissing kan loggen en een bounded correlatietrace kan
+schrijven met werkelijk resourcepad, `consumer_need`, voorspelde ready-tijd
+`expert_load()`-retourtijd en actuele inflight/byte-occupancy per resource;
+dit blijft smalle runtime-evidence, geen Gate-7-approval. De offline
+`c/tools/m3_shadow_trace_report.py` maakt hieruit per drive/resourcepad
+ready-time-fout en deadline-miss-statistiek; ontbrekende voorspellingen of
+deadlines blijven `UNKNOWN`. De productiehook legt bovendien het zes-
+componentenmasker vast (3 gewichten + 3 quantisatie/scale-tensors) en laat
+incomplete of gemengde replica-mappings buiten de accuracy-statistiek.
+De live productie-replay gebruikt nu twee complete equivalente kopieën op
+onafhankelijke drive/controller/upstream-paden. Beslissing en registratie van
+de werkelijk geobserveerde read gebeuren atomair onder dezelfde planner-guard;
+bij bezette replica 0 wordt replica 1 als counterfactual zichtbaar zonder de
+engine-route te wijzigen. Dit blijft een kleine replay van twee experts, geen
+bewijs van volledige residentie of hardwareprestatie. Een daaropvolgende
+full-model shadow-off/on smoke heeft de complete M3-inventoryconfiguratie
+geladen (7.296 experts, 14.592 copy-rows) en 453 succesvolle reads van 444
+identiteiten geverifieerd; zie het gekoppelde 7c-runtime-rapport. Ook dit
+blijft synthetic-profile C-evidence, geen Gate-7-PASS.
+
+De deterministische 7d-dekking is daarna uitgebreid met expliciete
+controller-budgetafwijzing/bounded defer, contention-ranking tegenover een
+vrije controller, deadline-miss-score en stabiele resource-ID tie-breaks.
+Weight-copy-validatie verwerpt nu niet-drive mappings, tegenstrijdige
+model/tensor-byteidentiteiten en een stille fallback wanneer een expliciete
+matching copy onbeschikbaar is. Deze wijzigingen zijn lokaal met `-Werror`,
+GCC `-fanalyzer` en de productie-replay getest; zij veranderen de Gate-7-
+De eerste voorspeller ondersteunt nu ook een optioneel conversieprofiel:
+I/O-ready flows gaan in een begrensde seriële virtuele queue, gesorteerd op
+I/O-readytijd en request-ID, en weight-ready wordt pas na de gekalibreerde
+conversieduur gerapporteerd. Zonder zo'n profiel blijft de bestaande
+storage-only voorspelling actief; ontbrekende conversieklassen geven
+`UNKNOWN` in plaats van een nulduur-aanname.
+De bounded demand-queue ondersteunt daarnaast een optioneel
+`queue_age_ns`-profiel: zodra een request die leeftijd bereikt, krijgt het
+voorrang in enqueue-volgorde; zonder instelling blijft de bestaande
+need/enqueue/request-ID-volgorde actief.
+
+De goedkope 7a-ext/7b-ext vervolgslice is nu lokaal uitgevoerd: de nieuwe
+resource-kindtopologieën en planner-text emit/parse zijn groen onder
+`-Werror`. Dit is uitsluitend C/M-datamodelbewijs; GPU-transfer,
+same-controller/upstream-contention en hardware-P blijven `NOT_RUN`.
+De machine-A capture is bovendien uitgebreid naar inflight 8/16 met 16
+samples per cel. De gecombineerde p99/2x-uitkomst is alleen sensitivity-
+evidence: cacheconditie blijft onbekend en de uitkomst is geen admission-bound.
+Een aanvullende drie-drive capture gebruikt nu ook de Kingston USB-modelkopie
+als afzonderlijke drive-resource. Singles, alle paren en de triple zijn op
+inflight 1/2/4/8 gemeten; de USB-tail is duidelijk trager, maar zijn
+controller/upstreamrelatie blijft onbekend en er is geen profielpromotie.
+De 7b-0 machine-profile bridge is lokaal toegevoegd: `coli profile` schrijft
+een atomair canoniek inventarisprofiel en `coli plan` leest dat alleen-lezen.
+Dit is evidence-plumbing; contention, NUMA, GPU-transfer en planner-admission
+blijven `NOT_RUN`/`UNKNOWN`. Zie
+[`results/m3-execution-slice-7b-0-machine-profile-2026-09-07.md`](results/m3-execution-slice-7b-0-machine-profile-2026-09-07.md).
+
+De bounded Step-7 C/M-afronding en de toegestane overgang naar Step 8a
+shadow-only staan in
+[`results/m3-execution-step7-cm-transition-2026-09-07.md`](results/m3-execution-step7-cm-transition-2026-09-07.md).
 
 **Briefing**
 
@@ -567,7 +649,9 @@ Lever eerst een gevalideerde configuratie en parser met deze logische velden;
 de concrete bestandsindeling mag eenvoudig blijven:
 
 - `resource_id`, `kind` (drive/controller/upstream), `max_inflight`,
-  `max_inflight_bytes` en een verwijzing naar het kalibratieprofiel.
+  `max_inflight_bytes` en een verwijzing naar het kalibratieprofiel. De
+  admissiongrens blijft expliciet: een gemeten inflight-level is niet zonder
+  meer een veilige maximum queue depth.
 - Per drive een lijst unieke `resource_id`s op het gedeelde I/O-pad, inclusief
   de drive zelf. Een upstream-link kan meerdere controllers omvatten. Een
   gedeelde resource staat maar één keer in de configuratie en wordt per read
@@ -591,6 +675,30 @@ configuratie laat het bestaande pad vóór plannerpublicatie intact.
 
 **7b — Kalibratie van capaciteit én contention**
 
+**7b-0 — Canoniek machineprofiel en `coli plan`-bridge**
+
+Maak de eerste bruikbare installatiestap voor nieuwe machines expliciet: `coli
+profile --model <dir>` schrijft een atomair, versie-gemarkeerd
+`.coli_machine_profile.json` met host-, CPU-, geheugen-, GPU- en opslaginventaris
+en optioneel een verwijzing naar een Step-7 raw capture. `coli plan` leest dit
+profiel alleen-lezen en toont de status en open meetklassen; het profiel
+verandert nog geen placementbeslissing.
+
+Contract voor deze slice:
+
+- geen verborgen benchmark, cache-flush of model-shard-scan bij `coli profile`;
+- calibration captures worden metadata-only gerefereerd, niet als admissiongrens
+  geaccepteerd;
+- ontbrekende cacheconditie, shared-controller/upstream contention,
+  GPU-transfer en NUMA blijven `UNKNOWN`/`NOT_RUN`;
+- profiel en planner gebruiken hetzelfde JSON-artifact, met schema/version en
+  atomische write, zodat een onderbroken update geen half profiel oplevert;
+- `coli plan` blijft functioneel zonder profiel en waarschuwt wanneer er geen
+  machineprofiel of geen toegelaten Step-7-capaciteit beschikbaar is.
+
+Status: IMPLEMENTATIE IN UITVOERING. Dit sluit Step 7 niet af en promoveert
+geen P-gate.
+
 Meet per drive de completion-latencyverdeling en throughput voor relevante
 requestgroottes en in-flight aantallen, minstens 1/2/4 en verdere waarden
 binnen een vooraf begrensd meetbudget. Gebruik echte expert-readpatronen;
@@ -608,13 +716,46 @@ een gemeten gedeeld knelpunt kan ook boven de controllers liggen.
 
 Bewaar per profiel: topologie/configuratiehash, meetcondities, ondersteunde
 grootte-/loadklassen, latency en spreiding, aggregate bandwidth in bytes/s,
-afgeleide admissiongrenzen en versie. Een bytebudget is geen bandwidthbudget.
+afgeleide admissiongrenzen en versie. Niet-nul fitresiduen dragen een
+expliciet tail-percentiel (bijvoorbeeld p95), zodat onzekerheid niet als
+ongedefinieerde marge in de planner belandt. Een bytebudget is geen
+bandwidthbudget.
 Noem expliciet de tijdseenheid; een capaciteit zoals “500 gigabytes” zonder
 `/s` mag niet als bandbreedte worden ingevoerd. Ontbrekende meetklassen blijven
 `UNKNOWN`; geen optimistische extrapolatie. Wijzig topologie of I/O-modus
 alleen tussen gedrainde generaties en herkalibreer de getroffen profielen.
 
 **7c — Pure voorspeller en deterministische beslissing**
+
+De emitter bewaakt dit contract ook bij gedeeltelijke captures: alleen
+singleton-drivegroepen met ondubbelzinnige ownership mogen een drive-profiel
+opleveren. Multi-drive aggregate-metingen worden niet naar iedere drive
+gekopieerd. Controller- en upstream-resources blijven wel in de topology,
+maar krijgen zonder een eigen meting geen profielrij; een pad dat zo'n resource
+nodig heeft blijft `UNKNOWN`. Sparse profielsets moeten bovendien uitsluitend
+naar gedeclareerde resources wijzen en mogen geen dubbele profielobjecten
+bevatten. Zie de 7b-ext-regressies en
+[`results/m3-execution-slice-7b-ext-2026-09-07.md`](results/m3-execution-slice-7b-ext-2026-09-07.md).
+
+Voor de full-model kopietabel is de resourcegrens gescheiden van de
+copygrens: `M3_SHD_MAX_RESOURCES=128` blijft gelden voor topology-, actieve-
+en kandidaatgeheugen, terwijl `M3_SHD_MAX_COPIES=16384` de 60x128 expertkeys
+met twee replica's kan bevatten. De schaalfixture met 15.360 rows en 3.000
+first/middle/last lookups is groen; zie
+[`results/m3-execution-slice-7c-copy-scale-2026-09-07.md`](results/m3-execution-slice-7c-copy-scale-2026-09-07.md).
+Dit is bounded capacity/lookup-evidence, geen full-model route/lease/read- of
+performance-gate.
+
+De model-aware generator vult daarnaast een complete twee-replica M3-configuratie
+uit safetensors-headers: 7.296 expertidentiteiten en 14.592 copy-rows. De
+full-model shadow-off/on smoke met vaste seed liet 453 succesvolle shadow-
+observaties van 444 expertidentiteiten zien, uitsluitend via complete fysieke
+paden, en de semantische engine-trace (10.366 events per run,
+`(kind, layer, expert, resource)`) was multiset-gelijk. Zie
+[`results/m3-execution-slice-7c-full-model-runtime-2026-09-07.md`](results/m3-execution-slice-7c-full-model-runtime-2026-09-07.md).
+De profielen in dit artefact zijn bewust synthetisch: dit sluit geen
+controller/upstream-contention, mixed residency, mmap/io_uring, sanitizer- of
+performance-evidence af en promoveert Gate 7 niet.
 
 Implementeer eerst een pure functie van een immutable snapshot, request en
 kandidaatkopie. Zij doet geen I/O, verandert geen counters en leest geen

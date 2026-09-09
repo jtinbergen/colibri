@@ -1,0 +1,76 @@
+name: MiniMax-M3 Step 7 shadow planner
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [dev, main]
+    paths:
+      - 'c/m3_shadow_plan*'
+      - 'c/m3_shadow_store*'
+      - 'c/expert_store_registry.*'
+      - 'c/tests/test_m3_shadow_plan*'
+      - 'c/m3_shadow_m3_bridge.*'
+      - 'c/tests/test_m3_shadow_m3_bridge*'
+      - 'c/m3_shadow_m3_runtime.*'
+      - 'c/tests/test_m3_shadow_m3_runtime*'
+      - 'c/tests/test_m3_shadow_runtime_replay.py'
+      - 'c/tools/m3_shadow_calibrate.py'
+      - 'c/tools/m3_shadow_calibration_review.py'
+      - 'c/tools/test_m3_shadow_calibration_review.py'
+      - 'c/tools/m3_shadow_trace_report.py'
+      - 'c/tools/test_m3_shadow_trace_report.py'
+      - 'c/Makefile'
+      - 'docs/results/m3-execution-step7*'
+      - '.github/workflows/m3-step7-shadow.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  shadow:
+    name: Step 7 deterministic planner
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends make gcc clang
+      - name: Build and run focused fixtures
+        run: make -C c test-shadow-m3 test-shadow-observer-m3 \
+          test-shadow-store-m3 test-shadow-registry-m3 test-shadow-m3-bridge \
+          test-shadow-m3-runtime
+      - name: Validate calibration review tools
+        run: |
+          python3 -m py_compile \
+            c/tools/m3_shadow_calibrate.py \
+            c/tools/m3_shadow_calibration_review.py \
+            c/tools/test_m3_shadow_calibration_review.py \
+            c/tools/m3_shadow_trace_report.py \
+            c/tools/test_m3_shadow_trace_report.py
+          python3 c/tools/test_m3_shadow_calibration_review.py
+          python3 c/tools/test_m3_shadow_trace_report.py
+      - name: Run focused fixtures under ASan and UBSan
+        run: |
+          make -C c clean
+          make -C c tests/test_m3_shadow_plan \
+            tests/test_m3_shadow_plan_observer \
+            tests/test_m3_shadow_store \
+            tests/test_m3_shadow_registry \
+            tests/test_m3_shadow_m3_bridge \
+            tests/test_m3_shadow_m3_runtime \
+            EXTRA_CFLAGS='-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined' \
+            EXTRA_LDFLAGS='-fsanitize=address,undefined'
+          ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
+            ./c/tests/test_m3_shadow_plan
+          ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
+            ./c/tests/test_m3_shadow_plan_observer
+          ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
+            ./c/tests/test_m3_shadow_store
+          ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
+            ./c/tests/test_m3_shadow_registry
+          ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
+            ./c/tests/test_m3_shadow_m3_bridge
+          ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
+            ./c/tests/test_m3_shadow_m3_runtime
+      - name: Run focused fixtures under TSan
+        run: make -C c test-tsan-m3-shadow CC=clang

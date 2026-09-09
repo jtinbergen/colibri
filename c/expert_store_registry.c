@@ -7,6 +7,7 @@
  */
 
 #include "expert_store_registry.h"
+#include "m3_shadow_store.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -82,17 +83,37 @@ int coli_expert_store_backend_open_selected(
     char *error, size_t error_size) {
     const char *name = getenv("COLI_EXPERT_STORE");
     if (!name || !*name) name = "auto";
-    ColiExpertStoreBackendOpenFn fn = coli_expert_store_backend_lookup(name);
+    int shadow = !strncmp(name, "shadow-", 7);
+    const char *backend_name = shadow ? name + 7 : name;
+    ColiExpertStoreBackendOpenFn fn =
+        coli_expert_store_backend_lookup(backend_name);
     if (!fn) {
         if (error && error_size)
             snprintf(error, error_size,
                      "expert store backend '%s' is not registered "
                      "(set COLI_EXPERT_STORE to a linked backend; "
                      "default is 'auto')",
-                     name);
+                     backend_name);
         return -1;
     }
-    return fn(engine, config, options, output, error, error_size);
+    int result = fn(engine, config, options, output, error, error_size);
+    if (result || !shadow || !output || !*output) return result;
+    /* The first live integration is intentionally transparent: until a
+     * topology/calibration snapshot is supplied, the observer remains
+     * planner-null and can only prove non-interference.  It still exercises
+     * the real store vtable boundary under COLI_EXPERT_STORE=shadow-auto. */
+    ColiExpertStore *wrapped = m3_shd_store_wrap(*output, NULL);
+    if (!wrapped) {
+        /* The shadow wrapper is observer-only.  Its allocation failure must
+         * never turn a successfully opened real backend into an engine
+         * failure or destroy the caller-owned store. */
+        if (error && error_size)
+            snprintf(error, error_size,
+                     "shadow observer disabled: cannot allocate wrapper");
+        return result;
+    }
+    *output = wrapped;
+    return 0;
 }
 
 /* Register the built-in on-disk/mmap backend at static-link time so the

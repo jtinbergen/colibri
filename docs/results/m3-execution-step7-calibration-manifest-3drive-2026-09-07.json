@@ -1,0 +1,28 @@
+{
+  "topology_hash": 20260907,
+  "sources": [
+    {
+      "drive_id": 101,
+      "controller_id": 201,
+      "path": "C:/Users/jaapj/.lmstudio/models/minimax_m3_i4/out-00002.safetensors"
+    },
+    {
+      "drive_id": 102,
+      "controller_id": 202,
+      "path": "E:/Models/minimax_m3_i4/out-00002.safetensors"
+    },
+    {
+      "drive_id": 103,
+      "path": "D:/models/minimax_m3_i4/out-00002.safetensors"
+    }
+  ],
+  "groups": [
+    {"name": "drive-101", "drive_ids": [101]},
+    {"name": "drive-102", "drive_ids": [102]},
+    {"name": "drive-103-usb", "drive_ids": [103]},
+    {"name": "pair-101-102", "drive_ids": [101, 102]},
+    {"name": "pair-101-103", "drive_ids": [101, 103]},
+    {"name": "pair-102-103", "drive_ids": [102, 103]},
+    {"name": "triple-101-102-103", "drive_ids": [101, 102, 103]}
+  ]
+}
